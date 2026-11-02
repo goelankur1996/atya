@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
-from . import processor, receiver, sender
+from . import embeddings, processor, receiver, sender
 from .config import load_settings
 from .llm import ClaudeLLM
 from .migrate import migrate
@@ -68,12 +68,18 @@ def main() -> None:
     sync_owner_timezone(store, settings)
     tg = Telegram(settings.telegram_bot_token)
     llm = ClaudeLLM(settings.anthropic_api_key)
+    embedder = embeddings.VoyageEmbedder(settings.voyage_api_key) if settings.voyage_api_key else None
+    if embedder is None:
+        log.warning("VOYAGE_API_KEY not set: embeddings off, search uses full text only")
 
-    for name, target, args in [
+    workers = [
         ("receiver", receiver.run, (store, tg, settings)),
-        ("processor", processor.run, (store, llm, settings)),
+        ("processor", processor.run, (store, llm, settings, embedder)),
         ("sender", sender.run, (store, tg, settings)),
-    ]:
+    ]
+    if embedder is not None:
+        workers.append(("embedder", embeddings.run, (store, embedder, settings)))
+    for name, target, args in workers:
         threading.Thread(target=_supervise, args=(name, target, *args), daemon=True, name=name).start()
 
     stop = threading.Event()

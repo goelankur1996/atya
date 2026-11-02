@@ -8,8 +8,9 @@ into typed records, and ask questions answered from your own data.
 - `assistant_bot/` — v1 (Telegram → Notion). Still the live system; untouched.
 - `atya/` — v2, being built milestone by milestone (see the v2 spec).
   - **Milestone 1 (done):** Postgres tables, storage layer, schema file.
-  - **Milestone 2 (code done, live test pending):** receiver / processor / sender on Postgres.
-  - Next: search with embeddings (Voyage).
+  - **Milestone 2 (done, tested live):** receiver / processor / sender on Postgres.
+  - **Milestone 3 (code done, live test pending):** hybrid search: full text + Voyage embeddings.
+  - Next: Notion import, AWS deploy, cutover.
 
 ## Layout (v2)
 
@@ -24,6 +25,7 @@ into typed records, and ask questions answered from your own data.
 | `atya/processor.py` | Claims inbox rows, classifies, then writes records (capture) or answers (question). All writes for one message commit together. |
 | `atya/sender.py` | Outbox -> Telegram. |
 | `atya/llm.py` | The four Claude calls (prompts ported from v1). |
+| `atya/embeddings.py` | Voyage client + background worker that (re-)embeds records whose content changed. Optional: without `VOYAGE_API_KEY`, search is full text only. |
 | `atya/__main__.py` | Runs migrations, then the three workers as supervised threads. |
 | `tests/` | Schema tests (no database needed) and storage tests (need Postgres + pgvector). |
 

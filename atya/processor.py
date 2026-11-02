@@ -18,6 +18,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .config import Settings
+from .embeddings import Embedder, EmbeddingError
 from .llm import LLM
 from .schema import Schema, load_schema
 from .store import Store, Tx
@@ -218,12 +219,30 @@ class FanoutExecutor:
 
 # --- query path ----------------------------------------------------------------
 
-def gather_records(tx: Tx, schema: Schema, tenant_id: uuid.UUID, plan: dict) -> list[dict]:
+RRF_K = 60
+
+
+def fuse(*ranked_lists: list[dict], limit: int = SEARCH_LIMIT) -> list[dict]:
+    """Reciprocal rank fusion: merge result lists by rank, not by raw score,
+    so full-text and vector scores never need to be on the same scale."""
+    score: dict[uuid.UUID, float] = {}
+    rows: dict[uuid.UUID, dict] = {}
+    for lst in ranked_lists:
+        for rank, r in enumerate(lst):
+            score[r["id"]] = score.get(r["id"], 0.0) + 1.0 / (RRF_K + rank + 1)
+            rows.setdefault(r["id"], r)
+    ordered = sorted(score, key=lambda i: score[i], reverse=True)[:limit]
+    return [rows[i] for i in ordered]
+
+
+def gather_records(tx: Tx, schema: Schema, tenant_id: uuid.UUID, plan: dict,
+                   query_vector: list[float] | None = None) -> list[dict]:
     types = [t for t in plan.get("types", []) if t in schema.types] or None
-    found: dict[uuid.UUID, dict] = {}
-    if plan.get("search"):
-        for r in tx.search_text(tenant_id, plan["search"], types=types, limit=SEARCH_LIMIT):
-            found[r["id"]] = r
+    text_hits = tx.search_text(tenant_id, plan["search"], types=types, limit=SEARCH_LIMIT) \
+        if plan.get("search") else []
+    vector_hits = tx.search_vector(tenant_id, query_vector, types=types, limit=SEARCH_LIMIT) \
+        if query_vector is not None else []
+    found: dict[uuid.UUID, dict] = {r["id"]: r for r in fuse(text_hits, vector_hits)}
     if len(found) < 10:
         for t in types or []:
             for r in tx.list_records(tenant_id, t, limit=RECENT_PER_TYPE):
@@ -250,7 +269,8 @@ def gather_records(tx: Tx, schema: Schema, tenant_id: uuid.UUID, plan: dict) -> 
 
 # --- per-row orchestration -----------------------------------------------------
 
-def process_row(store: Store, llm: LLM, row: dict, settings: Settings) -> str:
+def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
+                embedder: Embedder | None = None) -> str:
     """Process one claimed inbox row. Returns the final status."""
     raw = row["raw_content"]
     with store.tx() as tx:
@@ -285,8 +305,14 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings) -> str:
             return "processed"
 
         plan = llm.plan_query(schema=schema, question=raw, now=now)
+        query_vector = None
+        if embedder is not None:
+            try:
+                query_vector = embedder.embed_query(raw)
+            except EmbeddingError as e:  # degrade to full-text only
+                log.warning("query embedding failed, using full text only: %s", e)
         with store.tx() as tx:
-            records = gather_records(tx, schema, tenant["id"], plan)
+            records = gather_records(tx, schema, tenant["id"], plan, query_vector)
         answer = llm.answer(schema=schema, question=raw, records=records, now=now)
         with store.tx() as tx:
             tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=answer,
@@ -311,19 +337,20 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings) -> str:
         return "failed" if final else "retry"
 
 
-def process_once(store: Store, llm: LLM, settings: Settings) -> int:
+def process_once(store: Store, llm: LLM, settings: Settings,
+                 embedder: Embedder | None = None) -> int:
     with store.tx() as tx:
         rows = tx.claim_inbox(limit=10, reclaim_after_minutes=settings.reclaim_minutes)
     for row in rows:
-        process_row(store, llm, row, settings)
+        process_row(store, llm, row, settings, embedder)
     return len(rows)
 
 
-def run(store: Store, llm: LLM, settings: Settings) -> None:
-    log.info("processor started")
+def run(store: Store, llm: LLM, settings: Settings, embedder: Embedder | None = None) -> None:
+    log.info("processor started (search: %s)", "full text + vectors" if embedder else "full text only")
     while True:
         try:
-            if process_once(store, llm, settings) == 0:
+            if process_once(store, llm, settings, embedder) == 0:
                 time.sleep(settings.poll_interval)
         except Exception:
             log.exception("processor loop error")

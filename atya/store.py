@@ -301,9 +301,30 @@ class Tx:
             "ORDER BY rank DESC, r.updated_at DESC LIMIT %s",
             (query, tenant_id, types, types, limit))
 
-    def set_embedding(self, record_id: uuid.UUID, vector: list[float]) -> None:
-        self.conn.execute("UPDATE records SET embedding = %s::vector, embedded_at = now() WHERE id = %s",
-                          (str(list(vector)), record_id))
+    def set_embedding(self, record_id: uuid.UUID, vector: list[float], *,
+                      if_updated_at: dt.datetime | None = None) -> bool:
+        """Store an embedding. With if_updated_at, skip it if the record changed meanwhile."""
+        cur = self.conn.execute(
+            "UPDATE records SET embedding = %s::vector, embedded_at = now() "
+            "WHERE id = %s AND (%s::timestamptz IS NULL OR updated_at = %s::timestamptz)",
+            (str(list(vector)), record_id, if_updated_at, if_updated_at))
+        return cur.rowcount == 1
+
+    def records_needing_embedding(self, *, limit: int = 64) -> list[dict]:
+        return self._all(
+            "SELECT id, tenant_id, type, title, body, fields, updated_at FROM records "
+            "WHERE embedding IS NULL OR embedded_at < updated_at ORDER BY updated_at LIMIT %s",
+            (limit,))
+
+    def search_vector(self, tenant_id: uuid.UUID, vector: list[float], *,
+                      types: list[str] | None = None, limit: int = 30) -> list[dict]:
+        """Nearest records by cosine distance (smaller = closer)."""
+        return self._all(
+            "SELECT r.*, r.embedding <=> %s::vector AS distance FROM records r "
+            "WHERE r.tenant_id = %s AND r.embedding IS NOT NULL "
+            "AND (%s::text[] IS NULL OR r.type = ANY(%s::text[])) "
+            "ORDER BY r.embedding <=> %s::vector LIMIT %s",
+            (str(list(vector)), tenant_id, types, types, str(list(vector)), limit))
 
     # --- outbox --------------------------------------------------------------
 

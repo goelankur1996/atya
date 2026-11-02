@@ -31,6 +31,7 @@ class Settings:
     # Their tenant row is created on their first message.
     owner_telegram_user_id: int | None
     owner_timezone: str = "UTC"
+    voyage_api_key: str | None = None
     poll_interval: int = 5
     reclaim_minutes: int = 5
     max_attempts: int = 3
@@ -51,6 +52,7 @@ def load_settings() -> Settings:
         anthropic_api_key=need("ANTHROPIC_API_KEY"),
         owner_telegram_user_id=int(owner) if owner.isdigit() else None,
         owner_timezone=os.environ.get("OWNER_TIMEZONE", "UTC").strip() or "UTC",
+        voyage_api_key=os.environ.get("VOYAGE_API_KEY", "").strip() or None,
         poll_interval=int(os.environ.get("POLL_INTERVAL_SECONDS", "5")),
         reclaim_minutes=int(os.environ.get("PROCESSING_RECLAIM_MINUTES", "5")),
         max_attempts=int(os.environ.get("MAX_ATTEMPTS", "3")),
