@@ -3,6 +3,7 @@
 /start <code>   join with an invite code (or: the owner's first message)
 /invite         owner only: create a one-time invite code
 /help           what the bot does and the commands
+/web            one-time link to the web view
 /export         download everything as a zip
 /delete         erase your account (asks for a typed confirmation code)
 
@@ -13,6 +14,7 @@ anything they send is stored.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import logging
 import secrets
 import zoneinfo
@@ -33,6 +35,7 @@ TIMEZONE_CHOICES = [
     ("Singapore", "Asia/Singapore"), ("Sydney", "Australia/Sydney"),
 ]
 DELETE_CONFIRM_MINUTES = 10
+LOGIN_LINK_MINUTES = 15
 STRANGER_REPLY_HOURS = 24
 
 HELP = """Send me anything you want remembered: tasks, people you met, decisions, ideas, links, how your day went. I file it for you.
@@ -42,6 +45,7 @@ Ask me questions about it: "what do I owe Rahul?", "what did I decide about pric
 Progress counts too: "sent the deck to Meera" closes that task.
 
 Commands:
+/web - a one-time link to browse, search and edit your records in a browser
 /export - download everything you've sent and everything I've filed, as a zip
 /delete - permanently erase your account and data
 /help - this message"""
@@ -62,8 +66,9 @@ class Ctx:
     name: str | None
     tenant: dict | None
 
-    def reply(self, text: str, buttons: list[list[tuple[str, str]]] | None = None) -> None:
-        self.tg.send_message(self.chat_id, text, buttons=buttons)
+    def reply(self, text: str, buttons: list[list[tuple[str, str]]] | None = None,
+              preview: bool = True) -> None:
+        self.tg.send_message(self.chat_id, text, buttons=buttons, preview=preview)
 
     @property
     def is_owner(self) -> bool:
@@ -126,6 +131,8 @@ def handle(ctx: Ctx, text: str) -> str:
         return "help"
     if cmd == "/invite":
         return invite(ctx)
+    if cmd == "/web":
+        return web_link(ctx)
     if cmd == "/export":
         return export(ctx)
     if cmd == "/delete":
@@ -176,6 +183,22 @@ def invite(ctx: Ctx) -> str:
         link = "this bot"
     ctx.reply(f"Invite code (one use): {code}\n\nSend them this:\nOpen {link} and send:\n/start {code}")
     return "invite-created"
+
+
+def web_link(ctx: Ctx) -> str:
+    """A single-use sign-in link for the web view."""
+    assert ctx.tenant is not None
+    base = ctx.settings.web_base_url
+    if not base:
+        ctx.reply("The web view isn't switched on yet.")
+        return "web:off"
+    token = secrets.token_urlsafe(32)
+    with ctx.store.tx(ctx.tenant["id"]) as tx:
+        tx.create_login_token(ctx.tenant["id"], hashlib.sha256(token.encode()).hexdigest(),
+                              LOGIN_LINK_MINUTES)
+    ctx.reply(f"Your sign-in link (works once, for {LOGIN_LINK_MINUTES} minutes):\n{base}/login/{token}\n\n"
+              "Don't forward it: anyone who opens it first gets into your account.", preview=False)
+    return "web:link-sent"
 
 
 def export(ctx: Ctx) -> str:

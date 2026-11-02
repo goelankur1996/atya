@@ -19,7 +19,8 @@ class TelegramError(Exception):
 class TelegramAPI(Protocol):
     def get_updates(self, offset: int | None, timeout: int = 30) -> list[dict]: ...
     def send_message(self, chat_id: int, text: str, reply_to: int | None = None,
-                     buttons: list[list[tuple[str, str]]] | None = None) -> dict: ...
+                     buttons: list[list[tuple[str, str]]] | None = None,
+                     preview: bool = True) -> dict: ...
     def send_document(self, chat_id: int, filename: str, data: bytes, caption: str = "") -> dict: ...
     def answer_callback(self, callback_id: str, text: str = "") -> None: ...
     def bot_username(self) -> str: ...
@@ -49,15 +50,19 @@ class Telegram:
         return result
 
     def send_message(self, chat_id: int, text: str, reply_to: int | None = None,
-                     buttons: list[list[tuple[str, str]]] | None = None) -> dict:
+                     buttons: list[list[tuple[str, str]]] | None = None,
+                     preview: bool = True) -> dict:
         """Send text, split into several messages if it exceeds Telegram's limit.
 
         buttons: rows of (label, callback_data), attached to the last part.
+        preview=False: no link preview (Telegram would otherwise fetch the link).
         """
         last: dict = {}
         parts = split_message(text)
         for i, part in enumerate(parts):
             payload: dict = {"chat_id": chat_id, "text": part}
+            if not preview:
+                payload["link_preview_options"] = {"is_disabled": True}
             if reply_to and i == 0:
                 payload["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
             if buttons and i == len(parts) - 1:

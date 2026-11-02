@@ -1,7 +1,8 @@
 #!/bin/bash
 # First-boot bootstrap for the ATYA server (Amazon Linux 2023, arm64).
-# Installs Docker, writes /opt/atya (compose file + helper scripts), schedules
-# nightly backups to S3, then starts the app. Logs: /var/log/cloud-init-output.log
+# Installs Docker, writes /opt/atya (compose file, Caddyfile, helper scripts),
+# schedules nightly backups to S3, then starts the app. The embedded files are
+# copies of deploy/server/*; tests/test_deploy.py keeps them in sync. Logs: /var/log/cloud-init-output.log
 set -euxo pipefail
 
 dnf install -y docker
@@ -40,8 +41,34 @@ services:
     depends_on:
       db: {condition: service_healthy}
     logging: {driver: json-file, options: {max-size: "10m", max-file: "5"}}
+  # HTTPS for the web view. Only started when WEB_DOMAIN is set (update.sh).
+  caddy:
+    image: caddy:2
+    profiles: [web]
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      WEB_DOMAIN: ${WEB_DOMAIN:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [app]
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:
+EOF
+
+cat > Caddyfile <<'EOF'
+# Caddy gets and renews the HTTPS certificate for WEB_DOMAIN automatically.
+{$WEB_DOMAIN} {
+	encode gzip
+	reverse_proxy app:8080
+	header -Server
+	header Strict-Transport-Security "max-age=31536000"
+}
 EOF
 
 cat > region.sh <<'EOF'
@@ -69,8 +96,10 @@ cd /opt/atya
 ./fetch-env.sh
 IMAGE=$(grep '^ECR_IMAGE=' .env | cut -d= -f2-)
 aws ecr get-login-password --region "$(./region.sh)" | docker login --username AWS --password-stdin "${IMAGE%%/*}"
-docker compose pull app
-docker compose up -d
+PROFILE=()
+grep -q '^WEB_DOMAIN=.' .env && PROFILE=(--profile web)
+docker compose "${PROFILE[@]}" pull app
+docker compose "${PROFILE[@]}" up -d
 docker image prune -f >/dev/null
 EOF
 

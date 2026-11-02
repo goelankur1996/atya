@@ -1,0 +1,353 @@
+"""Worker 4: the web view. Browse, search, edit and export one user's records.
+
+Server-rendered pages, no JavaScript. Sign-in is only through the bot: /web
+sends a single-use link, and opening it (then pressing Continue) starts a
+session. The Continue step exists because Telegram and other apps fetch links
+to build previews; a plain GET never consumes the token.
+
+Every request after sign-in runs in that user's database scope, so Postgres
+row-level security keeps users apart even if a query here forgets to filter.
+User edits are saved with by_user=True: the field is marked as user-owned and
+the bot never overwrites it afterwards.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import hmac
+import logging
+import secrets
+import zoneinfo
+from typing import Any
+
+from flask import Flask, Response, abort, g, redirect, render_template, request, url_for
+
+from ..config import Settings
+from ..export import build_export
+from ..schema import FieldDef, TypeDef, load_schema
+from ..store import Store
+
+log = logging.getLogger("web")
+
+COOKIE = "atya_session"
+SESSION_DAYS = 30
+PAGE_SIZE = 50
+LIST_COLUMNS = ("Status", "Due Date", "Date", "Priority", "Area", "Relationship", "Type", "Mood")
+
+
+def _hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def create_app(store: Store, settings: Settings) -> Flask:
+    app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
+    secure_cookie = bool(settings.web_base_url and settings.web_base_url.startswith("https://"))
+
+    # --- session handling --------------------------------------------------
+
+    @app.before_request
+    def load_user() -> None:
+        g.tenant = None
+        g.csrf = ""
+        token = request.cookies.get(COOKIE)
+        if not token:
+            return
+        with store.tx(system=True) as tx:
+            tenant_id = tx.session_tenant(_hash(token))
+        if tenant_id is None:
+            return
+        with store.tx(tenant_id) as tx:
+            tenant = tx.tenant(tenant_id)
+        if tenant is None or tenant["status"] != "active":
+            return
+        g.tenant = tenant
+        g.schema = load_schema(tenant["schema_name"])
+        g.csrf = hmac.new(token.encode(), b"csrf", hashlib.sha256).hexdigest()
+
+    @app.after_request
+    def headers(resp: Response) -> Response:
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; "
+            "frame-ancestors 'none'; base-uri 'none'")
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    def need_login() -> None:
+        if g.tenant is None:
+            abort(redirect(url_for("home")))
+
+    def check_csrf() -> None:
+        sent = request.form.get("csrf", "")
+        if not g.csrf or not hmac.compare_digest(sent, g.csrf):
+            abort(400, "This form has expired. Go back, reload the page and try again.")
+
+    def tx():
+        return store.tx(g.tenant["id"])
+
+    @app.context_processor
+    def helpers() -> dict:
+        return {"ref": ref, "fmt_time": fmt_time, "fmt_value": fmt_value, "csrf": g.get("csrf", ""),
+                "tenant": g.get("tenant"), "schema": g.get("schema")}
+
+    def ref(rec: dict) -> str:
+        tdef = g.schema.types.get(rec["type"])
+        return f"{tdef.prefix if tdef else rec['type'].upper()}-{rec['seq']}"
+
+    def fmt_time(ts: dt.datetime | None) -> str:
+        if ts is None:
+            return ""
+        try:
+            tz = zoneinfo.ZoneInfo(g.tenant["timezone"])
+        except Exception:
+            tz = dt.timezone.utc
+        return ts.astimezone(tz).strftime("%a %d %b %Y, %H:%M")
+
+    # --- sign in / out -----------------------------------------------------
+
+    @app.get("/")
+    def home():
+        if g.tenant is None:
+            return render_template("signed_out.html")
+        with tx() as t:
+            counts = t.count_by_type(g.tenant["id"])
+        types = [(td, counts.get(td.key, 0)) for td in g.schema.types.values()]
+        return render_template("home.html", types=types)
+
+    @app.get("/login/<token>")
+    def login_page(token: str):
+        # Does not consume the token (link previews would burn it).
+        return render_template("login.html", token=token)
+
+    @app.post("/login")
+    def login():
+        token = request.form.get("token", "")
+        with store.tx(system=True) as t:
+            tenant_id = t.use_login_token(_hash(token)) if token else None
+        if tenant_id is None:
+            return render_template("login_failed.html"), 400
+        session = secrets.token_urlsafe(32)
+        with store.tx(tenant_id) as t:
+            t.create_session(tenant_id, _hash(session), SESSION_DAYS)
+        with store.tx(system=True) as t:
+            t.purge_expired_logins()
+        resp = redirect(url_for("home"))
+        resp.set_cookie(COOKIE, session, max_age=SESSION_DAYS * 86400, httponly=True,
+                        secure=secure_cookie, samesite="Lax")
+        return resp
+
+    @app.post("/logout")
+    def logout():
+        need_login()
+        check_csrf()
+        token = request.cookies.get(COOKIE, "")
+        with tx() as t:
+            t.delete_session(_hash(token))
+        resp = redirect(url_for("home"))
+        resp.delete_cookie(COOKIE)
+        return resp
+
+    # --- browse --------------------------------------------------------------
+
+    @app.get("/t/<type_key>")
+    def type_list(type_key: str):
+        need_login()
+        tdef = g.schema.types.get(type_key) or abort(404)
+        page = max(1, request.args.get("page", 1, type=int))
+        with tx() as t:
+            rows = t.list_records(g.tenant["id"], type_key, limit=PAGE_SIZE + 1,
+                                  offset=(page - 1) * PAGE_SIZE)
+        cols = [c for c in LIST_COLUMNS if c in tdef.fields][:3]
+        return render_template("list.html", tdef=tdef, rows=rows[:PAGE_SIZE], cols=cols, page=page,
+                               more=len(rows) > PAGE_SIZE)
+
+    @app.get("/search")
+    def search():
+        need_login()
+        q = request.args.get("q", "").strip()
+        rows: list[dict] = []
+        if q:
+            with tx() as t:
+                rows = t.search_text(g.tenant["id"], q, limit=PAGE_SIZE)
+        return render_template("search.html", q=q, rows=rows)
+
+    # --- one record ------------------------------------------------------------
+
+    def load_record(ref_str: str) -> tuple[TypeDef, dict]:
+        prefix, _, seq = ref_str.upper().rpartition("-")
+        tdef = next((td for td in g.schema.types.values() if td.prefix == prefix), None)
+        if tdef is None or not seq.isdigit():
+            abort(404)
+        with tx() as t:
+            rec = t.record_by_ref(g.tenant["id"], tdef.key, int(seq))
+        if rec is None:
+            abort(404)
+        return tdef, rec
+
+    def record_page(tdef: TypeDef, rec: dict, *, problems: list[str] | None = None, status: int = 200):
+        with tx() as t:
+            links: dict[str, set[str]] = {}
+            for l in t.links_from(rec["id"]):
+                links.setdefault(l["field"], set()).add(str(l["to_id"]))
+            pickers = {name: t.titles_of_type(g.tenant["id"], f.to)
+                       for name, f in tdef.relation_fields.items() if f.to}
+            backlinks = t.links_to(rec["id"])
+            source = t.inbox_row(rec["source_inbox_id"]) if rec["source_inbox_id"] else None
+            history = t.audit_for(g.tenant["id"], rec["id"])
+        fields = [(f, form_value(f, rec["fields"].get(f.name), links.get(f.name, set())))
+                  for f in tdef.fields.values()]
+        return render_template("record.html", tdef=tdef, rec=rec, fields=fields, pickers=pickers,
+                               backlinks=backlinks, source=source, history=history,
+                               problems=problems or [], saved=request.args.get("saved") == "1"), status
+
+    @app.get("/r/<ref_str>")
+    def record_view(ref_str: str):
+        need_login()
+        tdef, rec = load_record(ref_str)
+        return record_page(tdef, rec)
+
+    @app.post("/r/<ref_str>")
+    def record_save(ref_str: str):
+        need_login()
+        check_csrf()
+        tdef, rec = load_record(ref_str)
+        with tx() as t:
+            current_links: dict[str, set[str]] = {}
+            for l in t.links_from(rec["id"]):
+                current_links.setdefault(l["field"], set()).add(str(l["to_id"]))
+            changes, clear = diff_form(tdef, rec, current_links, request.form)
+            problems: list[str] = []
+            if changes or clear:
+                problems = t.update_record(g.tenant["id"], g.schema, rec["id"], changes,
+                                           actor="web", by_user=True, clear=clear)
+        if problems:
+            _, rec = load_record(ref_str)
+            return record_page(tdef, rec, problems=problems, status=400)
+        return redirect(url_for("record_view", ref_str=ref_str, saved=1))
+
+    # --- export ------------------------------------------------------------
+
+    @app.post("/export")
+    def export():
+        need_login()
+        check_csrf()
+        with tx() as t:
+            filename, data = build_export(t, g.schema, g.tenant)
+            t.audit(g.tenant["id"], actor="web", action="send", target_table="none", target_id=None,
+                    summary=f"export downloaded ({len(data)} bytes)")
+        return Response(data, mimetype="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+    @app.errorhandler(404)
+    def not_found(_e):
+        return render_template("message.html", title="Not found",
+                               text="That page or record doesn't exist."), 404
+
+    @app.errorhandler(400)
+    def bad_request(e):
+        return render_template("message.html", title="Something's off",
+                               text=getattr(e, "description", "") or "Bad request."), 400
+
+    @app.errorhandler(500)
+    def server_error(_e):
+        return render_template("message.html", title="Something failed on our side",
+                               text="Please try again in a minute."), 500
+
+    return app
+
+
+# --- form <-> field values ----------------------------------------------------
+
+def form_value(f: FieldDef, value: Any, links: set[str]) -> Any:
+    """What the edit form shows for a stored value."""
+    if f.type == "relation":
+        return links
+    if f.type == "multi_select":
+        return set(value or [])
+    if f.type == "checkbox":
+        return bool(value)
+    if value is None:
+        return ""
+    if f.type == "number":
+        return f"{value:g}" if isinstance(value, float) else str(value)
+    return str(value)
+
+
+def fmt_value(f: FieldDef, value: Any) -> str:
+    """Short read-only rendering for list pages."""
+    if value is None or value == "" or value == []:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(map(str, value))
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def diff_form(tdef: TypeDef, rec: dict, current_links: dict[str, set[str]],
+              form) -> tuple[dict[str, Any], list[str]]:
+    """Turn a submitted edit form into (changes, fields to clear).
+
+    Only fields whose value actually changed are returned, so saving the form
+    doesn't mark untouched fields as user-edited.
+    """
+    changes: dict[str, Any] = {}
+    clear: list[str] = []
+    title = (form.get("title") or "").strip()
+    if title and title != rec["title"]:
+        changes[tdef.title_field] = title
+    for f in tdef.fields.values():
+        key = f"f:{f.name}"
+        if f.type == "checkbox":
+            if f"present:{f.name}" not in form:
+                continue
+            new = key in form
+            if new != bool(rec["fields"].get(f.name)):
+                changes[f.name] = new
+            continue
+        if f.type in ("multi_select", "relation"):
+            if f"present:{f.name}" not in form:
+                continue
+            new_set = {v for v in form.getlist(key) if v}
+            old_set = current_links.get(f.name, set()) if f.type == "relation" \
+                else set(rec["fields"].get(f.name) or [])
+            if new_set == old_set:
+                continue
+            if not new_set:
+                clear.append(f.name)
+            elif f.type == "relation":
+                changes[f.name] = sorted(new_set)
+            else:
+                changes[f.name] = [o for o in (*f.options, *f.deprecated) if o in new_set]
+            continue
+        if key not in form:
+            continue
+        # Browsers send textarea newlines as \r\n and may trim whitespace; compare
+        # normalised text so an untouched field isn't seen as changed.
+        new = form.get(key, "").replace("\r\n", "\n").strip()
+        old = form_value(f, rec["fields"].get(f.name), set()).strip()
+        if f.type == "number" and new and old:
+            try:
+                if float(new) == float(old):
+                    continue
+            except ValueError:
+                pass
+        if new == old:
+            continue
+        if new == "":
+            clear.append(f.name)
+        else:
+            changes[f.name] = new
+    return changes, clear
+
+
+def run(store: Store, settings: Settings) -> None:
+    from waitress import serve
+    log.info("web view on port %s (%s)", settings.web_port, settings.web_base_url or "no public URL set")
+    serve(create_app(store, settings), host="0.0.0.0", port=settings.web_port, threads=4,
+          ident="atya", url_scheme="https" if (settings.web_base_url or "").startswith("https") else "http")

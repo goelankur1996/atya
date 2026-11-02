@@ -30,6 +30,7 @@ class LLM(Protocol):
     def plan_fanout(self, *, schema: Schema, raw_content: str, captured_local: str,
                     context: dict[str, list[dict]]) -> dict: ...
     def plan_query(self, *, schema: Schema, question: str, now: str) -> dict: ...
+    def broaden_search(self, *, question: str, tried: str, found: list[str]) -> str: ...
     def answer(self, *, schema: Schema, question: str, records: list[dict], now: str) -> str: ...
 
 
@@ -138,14 +139,26 @@ PLAN_SYSTEM = """You decide which record types to search, and with which keyword
 Output exactly one JSON object, no prose, no markdown fences:
 {{
   "types": ["<type key>", ...],      // 1 to {max_types} entries
-  "search": "<keywords for full-text search: names, topics, nouns from the question; empty string if the question is about recency or status rather than a topic>",
+  "search": "<keywords for full-text search; empty string if the question is about recency or status rather than a topic>",
   "rationale": "<one short sentence>"
 }}
 
 Picking rules:
 - Smallest set of types that lets you answer (task = actionable items, thought = atomic reflections, journal = day narratives, decision = commitments, person = contacts, library = things to read/watch/listen).
 - For a derived lens (Discipline, Social health), list every type its definition references.
-- Questions about a project usually need task + project."""
+- Questions about a project usually need task + project.
+
+Keyword rules (the search matches whole words, any one word is enough, and it does not understand meaning):
+- Include the names, topics and nouns from the question.
+- Also add the other words the owner might have used when writing it down: synonyms, related terms, abbreviations and their expansions, alternative spellings ("gym workout exercise training lift" for a question about the gym; "VLA vision-language-action policy model" for VLA).
+- 4 to 15 words. No stop words, no dates."""
+
+BROADEN_SYSTEM = """A keyword search over someone's personal notes found too little to answer their question. Suggest different words to search for.
+
+The search matches whole words (any one word is enough) and does not understand meaning, so think about how the owner might have phrased the note when they wrote it: synonyms, broader and narrower terms, related activities, people or places, abbreviations, alternative spellings. Do not repeat words that were already tried.
+
+Output exactly one JSON object, no prose, no markdown fences:
+{"search": "<5 to 15 new words, space-separated>"}"""
 
 ANSWER_SYSTEM = """You answer questions from the owner of a personal memory system.
 
@@ -225,6 +238,14 @@ class ClaudeLLM:
         types = [t for t in plan.get("types", []) if isinstance(t, str)][:MAX_TYPES_TO_SEARCH]
         return {"types": types, "search": str(plan.get("search", "")),
                 "rationale": str(plan.get("rationale", ""))}
+
+    def broaden_search(self, *, question: str, tried: str, found: list[str]) -> str:
+        """Second attempt when the first keyword search came back thin."""
+        user = (f"Question: {question}\nWords already tried: {tried}\n"
+                f"Titles found so far: {'; '.join(found[:10]) if found else '(nothing)'}")
+        obj = parse_json(self._call(model=CLASSIFIER_MODEL, system=BROADEN_SYSTEM, user=user,
+                                    max_tokens=150, cache=False))
+        return str(obj.get("search", "")).strip()
 
     def answer(self, *, schema: Schema, question: str, records: list[dict], now: str) -> str:
         system = ANSWER_SYSTEM.format(hard_rules=schema.rules_hard,

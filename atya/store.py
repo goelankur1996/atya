@@ -254,13 +254,16 @@ class Tx:
 
     def update_record(self, tenant_id: uuid.UUID, schema: Schema, record_id: uuid.UUID,
                       fields: dict[str, Any], *, actor: str = "processor",
-                      by_user: bool = False) -> list[str]:
+                      by_user: bool = False, clear: tuple[str, ...] | list[str] = ()) -> list[str]:
         """Merge field changes into a record.
 
         Automation never overwrites a field the user edited by hand
         (create-or-leave); a user edit marks the field as user-owned.
+        clear (user edits only): fields to empty, values or links.
         Returns the list of dropped or skipped changes.
         """
+        if clear and not by_user:
+            raise StoreError("only user edits can clear fields")
         rec = self._one("SELECT * FROM records WHERE id = %s AND tenant_id = %s FOR UPDATE",
                         (record_id, tenant_id))
         if rec is None:
@@ -279,24 +282,30 @@ class Tx:
                 new_title = None
 
         result = schema.validate(rec["type"], changes, allow_deprecated=by_user)
-        merged = {**rec["fields"], **result.fields}
+        cleared = [c for c in clear if c in tdef.fields]
+        merged = {k: v for k, v in {**rec["fields"], **result.fields}.items()
+                  if k not in cleared or tdef.fields[k].type == "relation"}
         edited = set(rec["user_edited_fields"])
         if by_user:
-            edited |= set(result.fields) | set(result.links)
+            edited |= set(result.fields) | set(result.links) | set(cleared)
             if new_title is not None:
                 edited.add(tdef.title_field)
         self.conn.execute(
             "UPDATE records SET fields = %s, title = coalesce(%s, title), user_edited_fields = %s "
             "WHERE id = %s", (Jsonb(merged), new_title, sorted(edited), record_id))
         dropped = skipped + list(result.dropped)
+        for fname in cleared:
+            if tdef.fields[fname].type == "relation":
+                self.conn.execute("DELETE FROM record_links WHERE from_id = %s AND field = %s",
+                                  (record_id, fname))
         for fname, ids in result.links.items():
             self.conn.execute("DELETE FROM record_links WHERE from_id = %s AND field = %s",
                               (record_id, fname))
             dropped += self._set_links(tenant_id, schema, record_id, rec["type"], fname, ids)
         self.audit(tenant_id, actor=actor, action="update", target_table="records",
                    target_id=record_id,
-                   summary=f"{tdef.prefix}-{rec['seq']} updated ({', '.join(sorted(result.fields) + sorted(result.links)) or 'no changes'})",
-                   source_data={"changes": result.fields, "links": result.links,
+                   summary=f"{tdef.prefix}-{rec['seq']} updated ({', '.join(sorted(result.fields) + sorted(result.links) + sorted(cleared)) or 'no changes'})",
+                   source_data={"changes": result.fields, "links": result.links, "cleared": cleared,
                                 "title": new_title, "dropped": dropped, "by_user": by_user})
         return dropped
 
@@ -327,6 +336,30 @@ class Tx:
     def links_from(self, record_id: uuid.UUID) -> list[dict]:
         return self._all("SELECT field, to_id FROM record_links WHERE from_id = %s ORDER BY field",
                          (record_id,))
+
+    def links_to(self, record_id: uuid.UUID) -> list[dict]:
+        """Records that link to this one (e.g. a project's tasks)."""
+        return self._all("SELECT l.field, r.id, r.type, r.seq, r.title FROM record_links l "
+                         "JOIN records r ON r.id = l.from_id WHERE l.to_id = %s "
+                         "ORDER BY r.type, r.updated_at DESC", (record_id,))
+
+    def audit_for(self, tenant_id: uuid.UUID, target_id: uuid.UUID, limit: int = 50) -> list[dict]:
+        return self._all("SELECT actor, action, summary, at FROM audit_log "
+                         "WHERE tenant_id = %s AND target_id = %s ORDER BY at DESC, id DESC LIMIT %s",
+                         (tenant_id, target_id, limit))
+
+    def record_by_ref(self, tenant_id: uuid.UUID, type_key: str, seq: int) -> dict | None:
+        return self._one("SELECT * FROM records WHERE tenant_id = %s AND type = %s AND seq = %s",
+                         (tenant_id, type_key, seq))
+
+    def count_by_type(self, tenant_id: uuid.UUID) -> dict[str, int]:
+        return {r["type"]: r["n"] for r in self._all(
+            "SELECT type, count(*) AS n FROM records WHERE tenant_id = %s GROUP BY type", (tenant_id,))}
+
+    def titles_of_type(self, tenant_id: uuid.UUID, type_key: str) -> list[dict]:
+        """id + title of every record of a type, for relation pickers."""
+        return self._all("SELECT id, seq, title FROM records WHERE tenant_id = %s AND type = %s "
+                         "ORDER BY lower(title)", (tenant_id, type_key))
 
     def records_from_inbox(self, tenant_id: uuid.UUID, inbox_id: uuid.UUID) -> list[dict]:
         return self._all("SELECT * FROM records WHERE tenant_id = %s AND source_inbox_id = %s "
@@ -430,6 +463,42 @@ class Tx:
             "INSERT INTO service_state (key, value) VALUES (%s, %s) "
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
             (key, Jsonb(value)))
+
+    # --- web login ------------------------------------------------------------
+    # Only hashes are stored. Lookups by hash run in system scope (the tenant
+    # is not known yet); everything after that runs in the tenant's scope.
+
+    def create_login_token(self, tenant_id: uuid.UUID, token_hash: str, minutes: int) -> None:
+        self.conn.execute(
+            "INSERT INTO login_tokens (token_hash, tenant_id, expires_at) "
+            "VALUES (%s, %s, now() + make_interval(mins => %s))", (token_hash, tenant_id, minutes))
+        self.audit(tenant_id, actor="commands", action="create", target_table="login_tokens",
+                   target_id=None, summary="web login link sent")
+
+    def use_login_token(self, token_hash: str) -> uuid.UUID | None:
+        """Consume a one-time token. None if unknown, used or expired."""
+        row = self._one("UPDATE login_tokens SET used_at = now() WHERE token_hash = %s "
+                        "AND used_at IS NULL AND expires_at > now() RETURNING tenant_id", (token_hash,))
+        return row["tenant_id"] if row else None
+
+    def create_session(self, tenant_id: uuid.UUID, session_hash: str, days: int) -> None:
+        self.conn.execute(
+            "INSERT INTO sessions (session_hash, tenant_id, expires_at) "
+            "VALUES (%s, %s, now() + make_interval(days => %s))", (session_hash, tenant_id, days))
+        self.audit(tenant_id, actor="web", action="create", target_table="sessions",
+                   target_id=None, summary="signed in to the web view")
+
+    def session_tenant(self, session_hash: str) -> uuid.UUID | None:
+        row = self._one("SELECT tenant_id FROM sessions WHERE session_hash = %s AND expires_at > now()",
+                        (session_hash,))
+        return row["tenant_id"] if row else None
+
+    def delete_session(self, session_hash: str) -> None:
+        self.conn.execute("DELETE FROM sessions WHERE session_hash = %s", (session_hash,))
+
+    def purge_expired_logins(self) -> None:
+        self.conn.execute("DELETE FROM login_tokens WHERE expires_at < now() - interval '1 day'")
+        self.conn.execute("DELETE FROM sessions WHERE expires_at < now()")
 
     # --- tenant deletion -----------------------------------------------------
 

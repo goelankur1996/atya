@@ -27,14 +27,16 @@ class Settings:
     database_url: str
     telegram_bot_token: str
     anthropic_api_key: str
-    # Until invites exist (milestone 5), only this Telegram user is served.
-    # Their tenant row is created on their first message.
+    # The owner can create invites; their tenant row is created on their first message.
     owner_telegram_user_id: int | None
     owner_timezone: str = "UTC"
     voyage_api_key: str | None = None
     poll_interval: int = 5
     reclaim_minutes: int = 5
     max_attempts: int = 3
+    # Public address of the web view, e.g. https://atya.example.com. Unset: /web is off.
+    web_base_url: str | None = None
+    web_port: int = 8080
 
 
 def load_settings() -> Settings:
@@ -56,4 +58,6 @@ def load_settings() -> Settings:
         poll_interval=int(os.environ.get("POLL_INTERVAL_SECONDS", "5")),
         reclaim_minutes=int(os.environ.get("PROCESSING_RECLAIM_MINUTES", "5")),
         max_attempts=int(os.environ.get("MAX_ATTEMPTS", "3")),
+        web_base_url=os.environ.get("WEB_BASE_URL", "").strip().rstrip("/") or None,
+        web_port=int(os.environ.get("WEB_PORT", "8080")),
     )

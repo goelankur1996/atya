@@ -34,9 +34,10 @@ class FakeTelegram:
     def get_updates(self, offset, timeout=30):
         return [u for u in self.queue if offset is None or u["update_id"] >= offset]
 
-    def send_message(self, chat_id, text, reply_to=None, buttons=None):
+    def send_message(self, chat_id, text, reply_to=None, buttons=None, preview=True):
         self.sent.append((chat_id, text, reply_to))
         self.last_buttons = buttons
+        self.last_preview = preview
         return {}
 
     def send_document(self, chat_id, filename, data, caption=""):
@@ -62,6 +63,8 @@ class FakeLLM:
         self.plans: dict[str, dict] = {}
         self.query_plans: dict[str, dict] = {}
         self.seen_records: list[dict] = []
+        self.broader: dict[str, str] = {}
+        self.broaden_calls: list[tuple] = []
         self.fail_times = 0
 
     def classify(self, text):
@@ -79,6 +82,10 @@ class FakeLLM:
     def plan_query(self, *, schema, question, now):
         self.last_now = now
         return self.query_plans[question]
+
+    def broaden_search(self, *, question, tried, found):
+        self.broaden_calls.append((question, tried, found))
+        return self.broader.get(question, "")
 
     def answer(self, *, schema, question, records, now):
         self.seen_records = records
@@ -340,3 +347,54 @@ def test_answer_records_carry_weekdays(store, tenant):
         recs = processor.gather_records(tx, S, tenant["id"], {"types": ["task"], "search": "Meera"})
     assert recs[0]["fields"]["Due Date"] == "2026-11-11 (Wednesday)"
     assert recs[0]["created"].endswith("day)")
+
+
+def test_thin_search_retries_with_broader_words_across_types(store, settings, clean):
+    tg, llm = FakeTelegram(), FakeLLM()
+    cap = "Leg day, squats 5x5 at 80kg"
+    llm.plans[cap] = {"writes": [{"type": "journal", "title": "Leg day workout"}]}
+    q = "When did I last go to the gym?"
+    llm.intent[q] = "query"
+    llm.query_plans[q] = {"types": ["task"], "search": "gym"}
+    llm.broader[q] = "workout squats training"
+    tg.push(cap)
+    tg.push(q)
+    run_all(store, tg, llm, settings)
+    assert llm.broaden_calls == [(q, "gym", [])]
+    assert [r["title"] for r in llm.seen_records] == ["Leg day workout"]
+    with store.tx(system=True) as tx:
+        t = tx.tenant_by_telegram(OWNER)
+        notes = tx._one("SELECT processor_notes FROM inbox WHERE raw_content = %s AND tenant_id = %s",
+                        (q, t["id"]))["processor_notes"]
+    assert "then all types for 'workout squats training'" in notes
+
+
+def test_no_retry_when_enough_hits_or_no_keywords(store, settings, clean):
+    tg, llm = FakeTelegram(), FakeLLM()
+    caps = [f"Gym session {i}" for i in range(6)]
+    for c in caps:
+        llm.plans[c] = {"writes": [{"type": "journal", "title": c}]}
+        tg.push(c)
+    q1, q2 = "gym history?", "what's new?"
+    for q in (q1, q2):
+        llm.intent[q] = "query"
+    llm.query_plans[q1] = {"types": ["journal"], "search": "gym"}
+    llm.query_plans[q2] = {"types": ["journal"], "search": ""}
+    tg.push(q1)
+    tg.push(q2)
+    run_all(store, tg, llm, settings)
+    assert llm.broaden_calls == []
+
+
+def test_failed_retry_still_answers(store, settings, clean):
+    tg, llm = FakeTelegram(), FakeLLM()
+    q = "anything about sailing?"
+    llm.intent[q] = "query"
+    llm.query_plans[q] = {"types": ["thought"], "search": "sailing"}
+
+    def boom(**kw):
+        raise RuntimeError("overloaded")
+    llm.broaden_search = boom
+    tg.push(q)
+    run_all(store, tg, llm, settings)
+    assert tg.sent[-1][1] == "Answer: "

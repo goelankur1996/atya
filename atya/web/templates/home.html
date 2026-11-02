@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>{{ tenant.display_name or "Your records" }}</h1>
+<table class="types">
+  <tbody>
+  {% for tdef, n in types %}
+    <tr{% if tdef.child %} class="child"{% endif %}>
+      <td><a href="{{ url_for('type_list', type_key=tdef.key) }}">{{ tdef.label }}</a></td>
+      <td class="num">{{ n }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<section class="export">
+  <h2>Download everything</h2>
+  <p>A zip with every message you've sent, a spreadsheet per type, a Markdown file per record and the full change log.</p>
+  <form action="{{ url_for('export') }}" method="post">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit">Download export</button>
+  </form>
+</section>
+{% endblock %}

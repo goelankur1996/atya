@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}{{ ref(rec) }} {{ rec.title }} · ATYA{% endblock %}
+{% block body %}
+<p class="crumbs"><a href="{{ url_for('home') }}">All types</a> / <a href="{{ url_for('type_list', type_key=tdef.key) }}">{{ tdef.label }}</a></p>
+<p class="ref big">{{ ref(rec) }}</p>
+
+{% if saved %}<p class="notice">Saved. The bot won't overwrite fields you've edited.</p>{% endif %}
+{% if problems %}
+<div class="problem">
+  <p>Some changes weren't saved:</p>
+  <ul>{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+<form method="post" class="record">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label class="title">
+    <span>{{ tdef.title_field }}{% if tdef.title_field in rec.user_edited_fields %} <em>edited by you</em>{% endif %}</span>
+    <input type="text" name="title" value="{{ rec.title }}" required>
+  </label>
+
+  {% for f, v in fields %}
+  {% set name = "f:" ~ f.name %}
+  <div class="field">
+    <span class="label">{{ f.name }}{% if f.name in rec.user_edited_fields %} <em>edited by you</em>{% endif %}</span>
+    {% if f.type == "select" %}
+      <select name="{{ name }}">
+        <option value=""></option>
+        {% for o in f.options %}<option value="{{ o }}"{% if o == v %} selected{% endif %}>{{ o }}</option>{% endfor %}
+        {% if v and v not in f.options %}<option value="{{ v }}" selected>{{ v }} (old value)</option>{% endif %}
+      </select>
+    {% elif f.type == "multi_select" %}
+      <input type="hidden" name="present:{{ f.name }}" value="1">
+      <span class="choices">
+      {% for o in f.options %}
+        <label class="choice"><input type="checkbox" name="{{ name }}" value="{{ o }}"{% if o in v %} checked{% endif %}> {{ o }}</label>
+      {% endfor %}
+      {% for o in v if o not in f.options %}
+        <label class="choice"><input type="checkbox" name="{{ name }}" value="{{ o }}" checked> {{ o }} (old value)</label>
+      {% endfor %}
+      </span>
+    {% elif f.type == "checkbox" %}
+      <input type="hidden" name="present:{{ f.name }}" value="1">
+      <input type="checkbox" name="{{ name }}"{% if v %} checked{% endif %}>
+    {% elif f.type == "relation" %}
+      <input type="hidden" name="present:{{ f.name }}" value="1">
+      <select name="{{ name }}"{% if f.many %} multiple size="{{ [[pickers[f.name]|length, 6]|min, 3]|max }}"{% endif %}>
+        {% if not f.many %}<option value=""></option>{% endif %}
+        {% for p in pickers[f.name] %}
+          <option value="{{ p.id }}"{% if p.id|string in v %} selected{% endif %}>{{ schema.types[f.to].prefix }}-{{ p.seq }} {{ p.title }}</option>
+        {% endfor %}
+      </select>
+      {% for p in pickers[f.name] if p.id|string in v %}
+        <a class="ref" href="{{ url_for('record_view', ref_str=schema.types[f.to].prefix ~ '-' ~ p.seq) }}">{{ schema.types[f.to].prefix }}-{{ p.seq }}</a>
+      {% endfor %}
+    {% elif f.type == "date" %}
+      <input type="{{ 'date' if (not v or v|length == 10) else 'text' }}" name="{{ name }}" value="{{ v }}">
+    {% elif f.type == "number" %}
+      <input type="number" step="any" name="{{ name }}" value="{{ v }}">
+    {% elif f.type == "url" %}
+      <input type="url" name="{{ name }}" value="{{ v }}">
+    {% elif f.type == "email" %}
+      <input type="email" name="{{ name }}" value="{{ v }}">
+    {% else %}
+      {% if v|length > 80 or "\n" in v %}
+      <textarea name="{{ name }}" rows="4">{{ v }}</textarea>
+      {% else %}
+      <input type="text" name="{{ name }}" value="{{ v }}">
+      {% endif %}
+    {% endif %}
+  </div>
+  {% endfor %}
+  <p><button type="submit">Save changes</button></p>
+</form>
+
+{% if rec.body %}
+<section>
+  <h2>{{ "Text, as you sent it" if tdef.verbatim_body else "Notes" }}</h2>
+  <div class="body">{{ rec.body }}</div>
+  {% if tdef.verbatim_body %}<p class="muted">This is your original wording and can't be edited.</p>{% endif %}
+</section>
+{% endif %}
+
+{% if backlinks %}
+<section>
+  <h2>Linked from</h2>
+  <ul class="plain">
+  {% for b in backlinks %}
+    <li><a class="ref" href="{{ url_for('record_view', ref_str=ref(b)) }}">{{ ref(b) }}</a> {{ b.title }} <span class="muted">({{ b.field }})</span></li>
+  {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{% if source %}
+<section>
+  <h2>From your message</h2>
+  <p class="muted">{{ fmt_time(source.captured_at) }}</p>
+  <div class="body">{{ source.raw_content }}</div>
+</section>
+{% endif %}
+
+<section>
+  <h2>History</h2>
+  <p class="muted">Created {{ fmt_time(rec.created_at) }}.</p>
+  {% if history %}
+  <ul class="plain history">
+  {% for h in history %}
+    <li><span class="muted">{{ fmt_time(h.at) }} · {{ "you, on the web" if h.actor == "web" else h.actor }}</span><br>{{ h.summary }}</li>
+  {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endblock %}

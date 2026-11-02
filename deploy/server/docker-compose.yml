@@ -1,0 +1,43 @@
+name: atya
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: atya
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: atya
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atya -d atya"]
+      interval: 5s
+      retries: 20
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+  app:
+    image: ${ECR_IMAGE}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://atya:${POSTGRES_PASSWORD}@db:5432/atya
+    depends_on:
+      db: {condition: service_healthy}
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "5"}}
+  # HTTPS for the web view. Only started when WEB_DOMAIN is set (update.sh).
+  caddy:
+    image: caddy:2
+    profiles: [web]
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      WEB_DOMAIN: ${WEB_DOMAIN:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [app]
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

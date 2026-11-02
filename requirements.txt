@@ -4,3 +4,5 @@ requests>=2.31.0
 psycopg[binary]>=3.2
 psycopg-pool>=3.2
 PyYAML>=6.0
+Flask>=3.0
+waitress>=3.0

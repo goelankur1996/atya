@@ -26,6 +26,7 @@ from .store import Store, Tx
 log = logging.getLogger("processor")
 
 SEARCH_LIMIT = 30
+THIN_RESULTS = 5   # fewer keyword hits than this triggers one broader retry (text-only mode)
 RECENT_PER_TYPE = 15
 CONTEXT_PROJECTS = 80
 CONTEXT_PEOPLE = 200
@@ -298,12 +299,20 @@ def fuse(*ranked_lists: list[dict], limit: int = SEARCH_LIMIT) -> list[dict]:
 
 def gather_records(tx: Tx, schema: Schema, tenant_id: uuid.UUID, plan: dict,
                    query_vector: list[float] | None = None) -> list[dict]:
+    """Retrieve records for an answer.
+
+    plan["broader"] (set by broaden_if_thin) is a second keyword list searched
+    across all types, because a thin first result often means the planner
+    picked the wrong types as well as the wrong words.
+    """
     types = [t for t in plan.get("types", []) if t in schema.types] or None
     text_hits = tx.search_text(tenant_id, plan["search"], types=types, limit=SEARCH_LIMIT) \
         if plan.get("search") else []
+    broader_hits = tx.search_text(tenant_id, plan["broader"], limit=SEARCH_LIMIT) \
+        if plan.get("broader") else []
     vector_hits = tx.search_vector(tenant_id, query_vector, types=types, limit=SEARCH_LIMIT) \
         if query_vector is not None else []
-    found: dict[uuid.UUID, dict] = {r["id"]: r for r in fuse(text_hits, vector_hits)}
+    found: dict[uuid.UUID, dict] = {r["id"]: r for r in fuse(text_hits, vector_hits, broader_hits)}
     if len(found) < 10:
         for t in types or []:
             for r in tx.list_records(tenant_id, t, limit=RECENT_PER_TYPE):
@@ -327,6 +336,30 @@ def gather_records(tx: Tx, schema: Schema, tenant_id: uuid.UUID, plan: dict,
             "updated": with_weekday(r["updated_at"].date().isoformat()),
         })
     return out
+
+
+def broaden_if_thin(store: Store, llm: LLM, schema: Schema, tenant_id: uuid.UUID,
+                    question: str, plan: dict) -> dict:
+    """If the planned keywords find too little, ask once for different words.
+
+    Only used without embeddings (vector search always returns a full list).
+    Skipped for recency/status questions, which have no keywords. A failed
+    retry is not fatal: the answer goes ahead with what was found.
+    """
+    if not plan.get("search"):
+        return plan
+    types = [t for t in plan.get("types", []) if t in schema.types] or None
+    with store.tx(tenant_id) as tx:
+        hits = tx.search_text(tenant_id, plan["search"], types=types, limit=THIN_RESULTS)
+    if len(hits) >= THIN_RESULTS:
+        return plan
+    try:
+        broader = llm.broaden_search(question=question, tried=plan["search"],
+                                     found=[h["title"] for h in hits])
+    except Exception as e:
+        log.warning("broader search failed, answering with what was found: %s", e)
+        return plan
+    return {**plan, "broader": broader} if broader else plan
 
 
 # --- per-row orchestration -----------------------------------------------------
@@ -373,6 +406,8 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                 query_vector = embedder.embed_query(raw)
             except EmbeddingError as e:  # degrade to full-text only
                 log.warning("query embedding failed, using full text only: %s", e)
+        if query_vector is None:
+            plan = broaden_if_thin(store, llm, schema, tenant["id"], raw, plan)
         with store.tx(row["tenant_id"]) as tx:
             records = gather_records(tx, schema, tenant["id"], plan, query_vector)
         answer = llm.answer(schema=schema, question=raw, records=records, now=now)
@@ -380,7 +415,9 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
             tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=answer,
                           inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]))
             tx.finish_inbox(row["id"], status="responded", intent="query",
-                            notes=f"searched {', '.join(plan.get('types', []))} for {plan.get('search')!r}; "
+                            notes=f"searched {', '.join(plan.get('types', []))} for {plan.get('search')!r}"
+                                  + (f", then all types for {plan['broader']!r}" if plan.get("broader") else "")
+                                  + "; "
                                   f"{len(records)} records")
         return "responded"
 

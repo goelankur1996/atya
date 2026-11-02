@@ -5,14 +5,14 @@ into typed records, and ask questions answered from your own data.
 
 ## Status
 
-- `assistant_bot/` — v1 (Telegram → Notion). Still the live system; untouched.
+- `assistant_bot/` — v1 (Telegram → Notion). Retired at cutover; kept for reference.
 - `atya/` — v2, being built milestone by milestone (see the v2 spec).
   - **Milestone 1 (done):** Postgres tables, storage layer, schema file.
   - **Milestone 2 (done, tested live):** receiver / processor / sender on Postgres.
   - **Milestone 3 (done, tested live):** hybrid search: full text + Voyage embeddings.
   - **Milestone 4 (done):** Notion history imported; running on AWS; real bot cut over.
-  - **Milestone 5 (code done, deploy pending):** row-level security, invites and onboarding, /export, /delete.
-  - Next: web view.
+  - **Milestone 5 (done, live):** row-level security, invites and onboarding, /export, /delete.
+  - **Milestone 6:** web view (/web sends a one-time sign-in link; browse, search, edit, export) and broader keyword search (synonyms, one retry when results are thin).
 
 ## Layout (v2)
 
@@ -27,7 +27,8 @@ into typed records, and ask questions answered from your own data.
 | `atya/receiver.py` | Telegram long-poll -> inbox (no AI). Polling offset kept in the database. |
 | `atya/processor.py` | Claims inbox rows, classifies, then writes records (capture) or answers (question). All writes for one message commit together. |
 | `atya/sender.py` | Outbox -> Telegram. |
-| `atya/llm.py` | The four Claude calls (prompts ported from v1). |
+| `atya/llm.py` | The Claude calls: classify, plan capture, plan search, broaden a thin search, answer. |
+| `atya/web/` | Web view (Flask + waitress, server-rendered, no JavaScript). Runs as the fourth worker on port 8080; Caddy terminates HTTPS in front of it on the server. |
 | `atya/notion_import.py` | One-time, re-runnable import of the v1 Notion OS (inbox, 11 databases, relations, outbox, audit log). Keeps Notion IDs (TSK-41 stays TSK-41). `--dry-run` writes nothing. |
 | `atya/commands.py` | `/start` (invite codes), `/invite` (owner), `/help`, `/export`, `/delete`; timezone onboarding; one polite reply a day to strangers. |
 | `atya/export.py` | Builds a user's zip: raw inbox, CSV per type, Markdown per record, audit log, schema. |
