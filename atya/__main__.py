@@ -48,7 +48,7 @@ def sync_owner_timezone(store: Store, settings) -> None:
     except Exception:
         log.error("OWNER_TIMEZONE %r is not a valid timezone; ignoring", settings.owner_timezone)
         return
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         t = tx.tenant_by_telegram(settings.owner_telegram_user_id)
         if t and t["timezone"] != settings.owner_timezone:
             tx.set_timezone(t["id"], settings.owner_timezone)

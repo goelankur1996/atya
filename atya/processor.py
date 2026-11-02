@@ -335,7 +335,7 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                 embedder: Embedder | None = None) -> str:
     """Process one claimed inbox row. Returns the final status."""
     raw = row["raw_content"]
-    with store.tx() as tx:
+    with store.tx(row["tenant_id"]) as tx:
         tenant = tx.tenant(row["tenant_id"])
     assert tenant is not None
     schema = load_schema(tenant["schema_name"])
@@ -344,24 +344,24 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
 
     try:
         if not raw.strip():
-            with store.tx() as tx:
+            with store.tx(row["tenant_id"]) as tx:
                 tx.finish_inbox(row["id"], status="failed", notes="empty content")
             return "failed"
 
         cls = llm.classify(raw)
         intent = cls["intent"]
         if intent == "chat":
-            with store.tx() as tx:
+            with store.tx(row["tenant_id"]) as tx:
                 tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=cls["reply"],
                               inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]))
                 tx.finish_inbox(row["id"], status="responded", intent="chat", notes="small talk; nothing saved")
             return "responded"
         if intent == "log":
-            with store.tx() as tx:
+            with store.tx(row["tenant_id"]) as tx:
                 context = fanout_context(tx, tenant["id"])
             plan = llm.plan_fanout(schema=schema, raw_content=raw,
                                    captured_local=local_label(row["captured_at"], tz), context=context)
-            with store.tx() as tx:
+            with store.tx(row["tenant_id"]) as tx:
                 notes = FanoutExecutor(tx, schema, tenant, row).run(plan)
                 tx.finish_inbox(row["id"], status="processed", notes=notes, intent="log")
             return "processed"
@@ -373,10 +373,10 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                 query_vector = embedder.embed_query(raw)
             except EmbeddingError as e:  # degrade to full-text only
                 log.warning("query embedding failed, using full text only: %s", e)
-        with store.tx() as tx:
+        with store.tx(row["tenant_id"]) as tx:
             records = gather_records(tx, schema, tenant["id"], plan, query_vector)
         answer = llm.answer(schema=schema, question=raw, records=records, now=now)
-        with store.tx() as tx:
+        with store.tx(row["tenant_id"]) as tx:
             tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=answer,
                           inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]))
             tx.finish_inbox(row["id"], status="responded", intent="query",
@@ -387,7 +387,7 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
     except Exception as e:
         log.exception("processing failed for inbox %s (attempt %s)", row["id"], row["attempts"])
         final = row["attempts"] >= settings.max_attempts
-        with store.tx() as tx:
+        with store.tx(row["tenant_id"]) as tx:
             if final:
                 tx.finish_inbox(row["id"], status="failed", notes=f"gave up after {row['attempts']} attempts: {e}")
             else:
@@ -401,7 +401,7 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
 
 def process_once(store: Store, llm: LLM, settings: Settings,
                  embedder: Embedder | None = None) -> int:
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         rows = tx.claim_inbox(limit=10, reclaim_after_minutes=settings.reclaim_minutes)
     for row in rows:
         process_row(store, llm, row, settings, embedder)

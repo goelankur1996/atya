@@ -292,7 +292,7 @@ class Importer:
         for page in pages:
             pid = norm_id(page["id"])
             props = page["properties"]
-            with self.store.tx() as tx:
+            with self.store.tx(self.tid) as tx:
                 existing = tx._one("SELECT id FROM inbox WHERE tenant_id = %s AND external_id = %s",
                                    (self.tid, ext(page["id"])))
             if existing:
@@ -320,7 +320,7 @@ class Importer:
             if self.dry_run:
                 self.report.imported["inbox"] += 1
                 continue
-            with self.store.tx() as tx:
+            with self.store.tx(self.tid) as tx:
                 if msg_id and tx._one("SELECT 1 FROM inbox WHERE tenant_id = %s AND source = %s "
                                       "AND source_message_id = %s", (self.tid, source, msg_id)):
                     msg_id = None   # same channel message captured twice in v1; keep both rows
@@ -344,7 +344,7 @@ class Importer:
         self.report.found[key] = len(pages)
         for page in pages:
             pid = norm_id(page["id"])
-            with self.store.tx() as tx:
+            with self.store.tx(self.tid) as tx:
                 existing = tx._one("SELECT id FROM records WHERE tenant_id = %s AND external_id = %s",
                                    (self.tid, ext(page["id"])))
             if existing:
@@ -371,7 +371,7 @@ class Importer:
                 self.report.dropped[key].update(self.schema.validate(key, fields, allow_deprecated=True).dropped)
                 self.report.imported[key] += 1
                 continue
-            with self.store.tx() as tx:
+            with self.store.tx(self.tid) as tx:
                 rec, dropped = tx.create_record(
                     self.tid, self.schema, key, title=title, fields=fields, body=body,
                     source_inbox_id=source_inbox, actor=ACTOR, allow_deprecated=True,
@@ -398,7 +398,7 @@ class Importer:
                     targets = [str(t) for t in targets if t]
                     if not targets:
                         continue
-                    with self.store.tx() as tx:
+                    with self.store.tx(self.tid) as tx:
                         before = len(tx.links_from(from_id))
                         dropped = tx._set_links(self.tid, self.schema, from_id, key, fname, targets)
                         self.report.links += len(tx.links_from(from_id)) - before
@@ -411,7 +411,7 @@ class Importer:
         self.report.found["outbox"] = len(pages)
         for page in pages:
             props = page["properties"]
-            with self.store.tx() as tx:
+            with self.store.tx(self.tid) as tx:
                 if tx._one("SELECT 1 FROM outbox WHERE tenant_id = %s AND external_id = %s",
                            (self.tid, ext(page["id"]))):
                     self.report.skipped["outbox"] += 1
@@ -427,7 +427,7 @@ class Importer:
             if self.dry_run:
                 self.report.imported["outbox"] += 1
                 continue
-            with self.store.tx() as tx:
+            with self.store.tx(self.tid) as tx:
                 tx.conn.execute(
                     "INSERT INTO outbox (tenant_id, inbox_id, channel, chat_id, body, priority, status, "
                     "sent_at, error, created_at, external_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -444,7 +444,7 @@ class Importer:
         self.report.found["audit_log"] = len(pages)
         for page in pages:
             props = page["properties"]
-            with self.store.tx() as tx:
+            with self.store.tx(self.tid) as tx:
                 if tx._one("SELECT 1 FROM audit_log WHERE tenant_id = %s AND external_id = %s",
                            (self.tid, ext(page["id"]))):
                     self.report.skipped["audit_log"] += 1
@@ -456,7 +456,7 @@ class Importer:
             if self.dry_run:
                 self.report.imported["audit_log"] += 1
                 continue
-            with self.store.tx() as tx:
+            with self.store.tx(self.tid) as tx:
                 tx.conn.execute(
                     "INSERT INTO audit_log (tenant_id, actor, action, target_table, target_id, summary, "
                     "source_data, at, external_id) VALUES (%s,%s,%s,%s,NULL,%s,%s,%s,%s)",
@@ -493,11 +493,12 @@ def main() -> None:
     with psycopg.connect(database_url()) as conn:
         migrate(conn)
     store = Store(database_url())
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         tenant = tx.tenant_by_telegram(int(owner))
         if tenant is None:
             tenant = tx.create_tenant(telegram_user_id=int(owner), telegram_chat_id=int(owner),
                                       timezone=os.environ.get("OWNER_TIMEZONE", "UTC"), actor=ACTOR)
+    with store.tx(tenant["id"]) as tx:
         n = native_rows(tx, tenant["id"])
     if n and not args.allow_existing and not args.dry_run:
         sys.exit(f"This account already has {n} messages/records captured in v2 (not from Notion).\n"

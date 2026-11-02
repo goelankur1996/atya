@@ -42,6 +42,6 @@ def store(db_url: str):
 
 @pytest.fixture
 def tenant(store: Store) -> dict:
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         return tx.create_tenant(telegram_user_id=int(uuid.uuid4().int % 10**12),
                                 telegram_chat_id=1, display_name="test")

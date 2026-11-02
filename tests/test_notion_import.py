@@ -92,7 +92,7 @@ def run_import(store, tenant, notion, **kw):
 def test_full_import(store, tenant, notion):
     tid = tenant["id"]
     report = run_import(store, tenant, notion)
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         inbox = {r["seq"]: r for r in tx._all("SELECT * FROM inbox WHERE tenant_id = %s", (tid,))}
         assert set(inbox) == {7, 8}                                     # Inbox IDs kept
         assert inbox[7]["source_message_id"] == "telegram:555:42"       # future Telegram dedup works
@@ -126,7 +126,7 @@ def test_rerun_only_adds_new(store, tenant, notion):
     report = run_import(store, tenant, notion)
     assert report.imported["task"] == 1 and report.skipped["task"] == 1
     assert report.imported["inbox"] == 0 and report.skipped["inbox"] == 2
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         assert tx._one("SELECT count(*) AS n FROM records WHERE tenant_id = %s AND type = 'task'",
                        (tenant["id"],))["n"] == 2
 
@@ -134,7 +134,7 @@ def test_rerun_only_adds_new(store, tenant, notion):
 def test_dry_run_writes_nothing(store, tenant, notion):
     report = run_import(store, tenant, notion, dry_run=True)
     assert report.imported["task"] == 1
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         assert tx._one("SELECT count(*) AS n FROM records WHERE tenant_id = %s", (tenant["id"],))["n"] == 0
 
 
@@ -153,7 +153,7 @@ def test_imported_records_are_searchable_and_skip_defaults(store, tenant, notion
     run_import(store, tenant, notion)
     notion.dbs[ni.TYPE_SOURCES["task"]].append(page({"Title": title("No status task"), "Task ID": uid(50)}))
     run_import(store, tenant, notion)
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         t = tx._one("SELECT fields FROM records WHERE tenant_id = %s AND seq = 50 AND type = 'task'",
                     (tenant["id"],))
         assert "Status" not in t["fields"]          # no invented 'inbox' default on history

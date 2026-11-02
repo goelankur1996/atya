@@ -5,7 +5,7 @@ changes data writes its audit_log row in the same transaction, so a record and
 its audit entry either both exist or neither does.
 
     store = Store(database_url)
-    with store.tx() as tx:
+    with store.tx(tenant_id) as tx:
         inbox_id = tx.add_inbox(tenant_id, source="telegram", raw_content=...)
 """
 
@@ -28,18 +28,39 @@ class StoreError(Exception):
     pass
 
 
+APP_ROLE = "atya_app"
+
+
+def _as_app_role(conn: psycopg.Connection) -> None:
+    # Row-level security applies to this role (not to the table owner).
+    conn.execute(f"SET ROLE {APP_ROLE}")
+    conn.commit()
+
+
 class Store:
     def __init__(self, url: str, *, min_size: int = 1, max_size: int = 8) -> None:
         self.pool = ConnectionPool(url, min_size=min_size, max_size=max_size,
-                                   kwargs={"row_factory": dict_row}, open=True)
+                                   kwargs={"row_factory": dict_row}, configure=_as_app_role,
+                                   open=True)
 
     def close(self) -> None:
         self.pool.close()
 
     @contextmanager
-    def tx(self) -> Iterator["Tx"]:
+    def tx(self, tenant_id: uuid.UUID | None = None, *, system: bool = False) -> Iterator["Tx"]:
+        """A transaction scoped to one user, or to the whole system.
+
+        tx(tenant_id): Postgres only shows and accepts that user's rows.
+        tx(system=True): every user's rows; for queue workers and admin steps.
+        tx(): no scope, sees nothing (a forgotten scope fails closed).
+        """
+        if tenant_id is not None and system:
+            raise ValueError("pass a tenant_id or system=True, not both")
         with self.pool.connection() as conn:
             with conn.transaction():
+                conn.execute("SELECT set_config('atya.tenant_id', %s, true), "
+                             "set_config('atya.scope', %s, true)",
+                             (str(tenant_id) if tenant_id else "", "system" if system else "tenant"))
                 yield Tx(conn)
 
 
@@ -85,11 +106,12 @@ class Tx:
 
     def create_tenant(self, *, telegram_user_id: int | None, telegram_chat_id: int | None,
                       display_name: str | None = None, timezone: str = "UTC",
-                      schema_name: str = "default", actor: str = "system") -> dict:
+                      schema_name: str = "default", actor: str = "system",
+                      status: str = "active") -> dict:
         row = self._one(
-            "INSERT INTO tenants (telegram_user_id, telegram_chat_id, display_name, timezone, schema_name) "
-            "VALUES (%s, %s, %s, %s, %s) RETURNING *",
-            (telegram_user_id, telegram_chat_id, display_name, timezone, schema_name))
+            "INSERT INTO tenants (telegram_user_id, telegram_chat_id, display_name, timezone, schema_name, status) "
+            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
+            (telegram_user_id, telegram_chat_id, display_name, timezone, schema_name, status))
         assert row is not None
         self.audit(row["id"], actor=actor, action="create", target_table="tenants",
                    target_id=row["id"], summary=f"tenant created ({display_name or telegram_user_id})")
@@ -97,6 +119,25 @@ class Tx:
 
     def tenant_by_telegram(self, telegram_user_id: int) -> dict | None:
         return self._one("SELECT * FROM tenants WHERE telegram_user_id = %s", (telegram_user_id,))
+
+    def set_tenant_status(self, tenant_id: uuid.UUID, status: str, *, actor: str = "system") -> None:
+        self.conn.execute("UPDATE tenants SET status = %s WHERE id = %s", (status, tenant_id))
+        self.audit(tenant_id, actor=actor, action="update", target_table="tenants",
+                   target_id=tenant_id, summary=f"status set to {status}")
+
+    def create_invite(self, created_by: uuid.UUID, code: str) -> None:
+        self.conn.execute("INSERT INTO invites (code, created_by) VALUES (%s, %s)", (code, created_by))
+        self.audit(created_by, actor="commands", action="create", target_table="invites",
+                   target_id=None, summary="invite code created")
+
+    def use_invite(self, code: str, tenant_id: uuid.UUID) -> bool:
+        """Mark an unused invite as used by tenant_id. Needs system scope."""
+        row = self._one("UPDATE invites SET used_by = %s, used_at = now() "
+                        "WHERE code = %s AND used_by IS NULL RETURNING code", (tenant_id, code))
+        return row is not None
+
+    def invite_is_open(self, code: str) -> bool:
+        return self._one("SELECT 1 FROM invites WHERE code = %s AND used_by IS NULL", (code,)) is not None
 
     def set_timezone(self, tenant_id: uuid.UUID, timezone: str, *, actor: str = "system") -> None:
         self.conn.execute("UPDATE tenants SET timezone = %s WHERE id = %s", (timezone, tenant_id))

@@ -51,20 +51,20 @@ def drained(store):
 
 def test_worker_embeds_and_reembeds_after_change(store, tenant, drained):
     emb = drained
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         rec, _ = tx.create_record(tenant["id"], S, "task", title="Book flights to Bengaluru")
     assert embeddings.embed_pending(store, emb) == 1
     assert embeddings.embed_pending(store, emb) == 0          # storing a vector is not a change
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         tx.update_record(tenant["id"], S, rec["id"], {"Notes": "window seat"})
     assert embeddings.embed_pending(store, emb) == 1          # content changed -> re-embed
 
 
 def test_stale_vector_is_not_stored(store, tenant, drained):
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         rec, _ = tx.create_record(tenant["id"], S, "task", title="old title")
         stale_ts = tx.record(tenant["id"], rec["id"])["updated_at"]
-    with store.tx() as tx:   # a later transaction, so updated_at really moves
+    with store.tx(system=True) as tx:   # a later transaction, so updated_at really moves
         tx.update_record(tenant["id"], S, rec["id"], {"Notes": "changed meanwhile"})
         assert tx.set_embedding(rec["id"], [0.1] * EMBEDDING_DIM, if_updated_at=stale_ts) is False
         assert tx.record(tenant["id"], rec["id"])["embedding"] is None
@@ -72,11 +72,11 @@ def test_stale_vector_is_not_stored(store, tenant, drained):
 
 def test_vector_search_finds_by_meaning(store, tenant, drained):
     emb = drained
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         tx.create_record(tenant["id"], S, "decision", title="Picked Voyage for vector search")
         tx.create_record(tenant["id"], S, "task", title="Buy groceries")
     embeddings.embed_pending(store, emb)
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         hits = tx.search_vector(tenant["id"], emb.embed_query("which embeddings provider?"), limit=1)
         assert hits[0]["title"] == "Picked Voyage for vector search"
         # Full text alone misses it: no shared words.
@@ -91,7 +91,7 @@ def test_fuse_prefers_records_found_by_both():
 def test_answer_reaches_records_older_than_the_latest_100(store, tenant, drained):
     emb = drained
     tid = tenant["id"]
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         old, _ = tx.create_record(tid, S, "decision", title="Picked Voyage for vector search",
                                   fields={"Reasoning": "good retrieval quality"})
         # Make it genuinely old: 120 newer decisions follow.
@@ -102,7 +102,7 @@ def test_answer_reaches_records_older_than_the_latest_100(store, tenant, drained
     while embeddings.embed_pending(store, emb, limit=200):
         pass
     plan = {"types": ["decision"], "search": "provider"}
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         without = processor.gather_records(tx, S, tid, plan)
         with_vec = processor.gather_records(tx, S, tid, plan, emb.embed_query("which embeddings provider did I choose"))
     assert "DEC-1" not in [r["id"] for r in without]

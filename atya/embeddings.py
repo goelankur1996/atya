@@ -71,19 +71,19 @@ def record_text(rec: dict, label: str) -> str:
 
 
 def embed_pending(store: Store, embedder: Embedder, *, limit: int = BATCH) -> int:
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         rows = tx.records_needing_embedding(limit=limit)
     if not rows:
         return 0
     texts = []
     for r in rows:
-        with store.tx() as tx:
+        with store.tx(system=True) as tx:
             tenant = tx.tenant(r["tenant_id"])
         schema = load_schema(tenant["schema_name"] if tenant else "default")
         tdef = schema.types.get(r["type"])
         texts.append(record_text(r, tdef.label if tdef else r["type"]))
     vectors = embedder.embed_documents(texts)
-    with store.tx() as tx:
+    with store.tx(system=True) as tx:
         for r, vec in zip(rows, vectors):
             # Only store if the record has not changed since we read it.
             tx.set_embedding(r["id"], vec, if_updated_at=r["updated_at"])
