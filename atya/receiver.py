@@ -37,7 +37,7 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
                 tenant = tx.create_tenant(
                     telegram_user_id=user_id, telegram_chat_id=chat_id,
                     display_name=sender.get("first_name") or sender.get("username"),
-                    actor="receiver")
+                    timezone=settings.owner_timezone, actor="receiver")
                 log.info("created owner tenant %s", tenant["id"])
             else:
                 log.info("drop: unknown sender id=%s username=%s", user_id, sender.get("username"))

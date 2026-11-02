@@ -24,26 +24,33 @@ class LLMError(Exception):
 
 
 class LLM(Protocol):
-    def classify(self, text: str) -> str: ...
-    def plan_fanout(self, *, schema: Schema, raw_content: str, captured_at: str,
+    # `now` / `captured_local` are human-readable local times with weekday and
+    # timezone, e.g. "Tuesday 2026-11-03 00:12 (Asia/Kolkata)".
+    def classify(self, text: str) -> dict: ...   # {"intent": log|query|chat, "reply": str}
+    def plan_fanout(self, *, schema: Schema, raw_content: str, captured_local: str,
                     context: dict[str, list[dict]]) -> dict: ...
-    def plan_query(self, *, schema: Schema, question: str, today: str) -> dict: ...
-    def answer(self, *, schema: Schema, question: str, records: list[dict], today: str) -> str: ...
+    def plan_query(self, *, schema: Schema, question: str, now: str) -> dict: ...
+    def answer(self, *, schema: Schema, question: str, records: list[dict], now: str) -> str: ...
 
 
 # --- prompts -------------------------------------------------------------------
 
-CLASSIFY_SYSTEM = """You classify a single incoming message as either a "log" or a "query".
+CLASSIFY_SYSTEM = """You classify a single message sent to a personal memory bot as "log", "query" or "chat".
 
 - log = a capture: a declarative statement, observation, event, link, person mention, commitment, decision, journal entry, reading material, training log, meal log, etc.
 - query = a question or request for information ("what / who / when / where / why / how / can / should / is / are / show me / list / how many", or any other request to retrieve known data).
+- chat = pure small talk addressed to the bot with nothing to save and nothing to look up: greetings, thanks, "ok", "are you there?", "test".
 
-Tie-breaker: if the message is genuinely ambiguous, output "query" — answering is safer than a spurious write.
+Tie-breakers: a message with any real information in it is "log", even if it starts with a greeting ("hi, met Rahul today" = log). If it is genuinely ambiguous between log and query, output "query".
+
+For chat only, also write a reply: one short, friendly line. If it is a greeting, mention that they can send anything to remember or ask about what they saved. No emoji.
 
 Output exactly one JSON object, no prose, no markdown fences:
 {"intent": "log"}
 OR
-{"intent": "query"}"""
+{"intent": "query"}
+OR
+{"intent": "chat", "reply": "<one short line>"}"""
 
 FANOUT_SYSTEM = """You are the inbox processor for a personal memory system. For each captured message you produce a structured fan-out PLAN: which records to create, of which type, with which field values. Code executes the plan against the database and validates every value.
 
@@ -93,7 +100,8 @@ Output ONLY a JSON object with this shape, no prose, no markdown fences:
 - Best effort: omit any optional field you can't fill confidently.
 - Empty plan is valid: for pure noise output {{"writes": [], "processor_notes": "no actionable content"}}."""
 
-FANOUT_USER = """Captured at: {captured_at}
+FANOUT_USER = """Captured at: {captured_local}
+Resolve every relative date in the message ("today", "tomorrow", "by Friday", "next week") against this local capture time. "By <weekday>" = the next such weekday on or after the capture date. Write dates as YYYY-MM-DD in this timezone.
 
 Existing records you may reference by ID:
 {context}
@@ -142,7 +150,7 @@ You may ONLY use the records provided in the user message. Do not guess, do not 
 # Style
 - Concise, declarative, no preamble. Telegram-friendly: short lines, no markdown headers.
 - Refer to records by their ID in brackets, e.g. [TSK-12], so the owner can find them.
-- Today is {today}. Use it for anything relative ("last week", "overdue").
+- Now is {now}. Use it for anything relative ("last week", "overdue", "this Friday").
 - If the records are empty or insufficient, say so plainly and say what would need to be captured."""
 
 
@@ -161,21 +169,25 @@ class ClaudeLLM:
             messages=[{"role": "user", "content": user}])
         return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
 
-    def classify(self, text: str) -> str:
+    def classify(self, text: str) -> dict:
         raw = self._call(model=CLASSIFIER_MODEL, system=CLASSIFY_SYSTEM,
-                         user=text or "(empty)", max_tokens=20, cache=False)
-        intent = str(parse_json(raw).get("intent", "")).lower().strip()
-        if intent not in ("log", "query"):
+                         user=text or "(empty)", max_tokens=120, cache=False)
+        obj = parse_json(raw)
+        intent = str(obj.get("intent", "")).lower().strip()
+        if intent not in ("log", "query", "chat"):
             raise LLMError(f"unexpected intent {intent!r}")
-        return intent
+        reply = str(obj.get("reply") or "").strip()
+        if intent == "chat" and not reply:
+            reply = "Hi. Send me anything you want remembered, or ask me about what you've saved."
+        return {"intent": intent, "reply": reply}
 
-    def plan_fanout(self, *, schema: Schema, raw_content: str, captured_at: str,
+    def plan_fanout(self, *, schema: Schema, raw_content: str, captured_local: str,
                     context: dict[str, list[dict]]) -> dict:
         system = FANOUT_SYSTEM.format(
             hard_rules=schema.rules_hard, routing_rules=schema.rules_routing,
             vocabularies=schema.render_vocabularies(), types=schema.render_types(),
             children=schema.render_children())
-        user = FANOUT_USER.format(captured_at=captured_at, context=render_context(context),
+        user = FANOUT_USER.format(captured_local=captured_local, context=render_context(context),
                                   raw_content=raw_content[:8000])
         plan = parse_json(self._call(model=MODEL, system=system, user=user, max_tokens=2048))
         if not isinstance(plan.get("writes", []), list):
@@ -184,19 +196,19 @@ class ClaudeLLM:
         plan.setdefault("processor_notes", "")
         return plan
 
-    def plan_query(self, *, schema: Schema, question: str, today: str) -> dict:
+    def plan_query(self, *, schema: Schema, question: str, now: str) -> dict:
         system = PLAN_SYSTEM.format(types=schema.render_types(), lenses=schema.rules_lenses,
                                     max_types=MAX_TYPES_TO_SEARCH)
         plan = parse_json(self._call(model=MODEL, system=system,
-                                     user=f"Today: {today}\nQuestion: {question}", max_tokens=300))
+                                     user=f"Now: {now}\nQuestion: {question}", max_tokens=300))
         types = [t for t in plan.get("types", []) if isinstance(t, str)][:MAX_TYPES_TO_SEARCH]
         return {"types": types, "search": str(plan.get("search", "")),
                 "rationale": str(plan.get("rationale", ""))}
 
-    def answer(self, *, schema: Schema, question: str, records: list[dict], today: str) -> str:
+    def answer(self, *, schema: Schema, question: str, records: list[dict], now: str) -> str:
         system = ANSWER_SYSTEM.format(hard_rules=schema.rules_hard,
                                       vocabularies=schema.render_vocabularies(),
-                                      lenses=schema.rules_lenses, today=today)
+                                      lenses=schema.rules_lenses, now=now)
         data = json.dumps(records, ensure_ascii=False, default=str)
         if len(data) > 60000:
             data = data[:60000] + " ...[truncated]"

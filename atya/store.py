@@ -89,6 +89,11 @@ class Tx:
     def tenant_by_telegram(self, telegram_user_id: int) -> dict | None:
         return self._one("SELECT * FROM tenants WHERE telegram_user_id = %s", (telegram_user_id,))
 
+    def set_timezone(self, tenant_id: uuid.UUID, timezone: str, *, actor: str = "system") -> None:
+        self.conn.execute("UPDATE tenants SET timezone = %s WHERE id = %s", (timezone, tenant_id))
+        self.audit(tenant_id, actor=actor, action="update", target_table="tenants",
+                   target_id=tenant_id, summary=f"timezone set to {timezone}")
+
     def tenant(self, tenant_id: uuid.UUID) -> dict | None:
         return self._one("SELECT * FROM tenants WHERE id = %s", (tenant_id,))
 

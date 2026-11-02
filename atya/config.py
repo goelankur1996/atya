@@ -30,6 +30,7 @@ class Settings:
     # Until invites exist (milestone 5), only this Telegram user is served.
     # Their tenant row is created on their first message.
     owner_telegram_user_id: int | None
+    owner_timezone: str = "UTC"
     poll_interval: int = 5
     reclaim_minutes: int = 5
     max_attempts: int = 3
@@ -49,6 +50,7 @@ def load_settings() -> Settings:
         telegram_bot_token=need("TELEGRAM_BOT_TOKEN"),
         anthropic_api_key=need("ANTHROPIC_API_KEY"),
         owner_telegram_user_id=int(owner) if owner.isdigit() else None,
+        owner_timezone=os.environ.get("OWNER_TIMEZONE", "UTC").strip() or "UTC",
         poll_interval=int(os.environ.get("POLL_INTERVAL_SECONDS", "5")),
         reclaim_minutes=int(os.environ.get("PROCESSING_RECLAIM_MINUTES", "5")),
         max_attempts=int(os.environ.get("MAX_ATTEMPTS", "3")),

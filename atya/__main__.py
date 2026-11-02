@@ -11,6 +11,7 @@ import signal
 import sys
 import threading
 import time
+from zoneinfo import ZoneInfo
 
 import psycopg
 
@@ -35,6 +36,25 @@ def _supervise(name: str, target, *args) -> None:
         time.sleep(5)
 
 
+def sync_owner_timezone(store: Store, settings) -> None:
+    """Keep the owner's account timezone in line with OWNER_TIMEZONE.
+
+    Interim until users set their own timezone during onboarding (milestone 5).
+    """
+    if not settings.owner_telegram_user_id:
+        return
+    try:
+        ZoneInfo(settings.owner_timezone)
+    except Exception:
+        log.error("OWNER_TIMEZONE %r is not a valid timezone; ignoring", settings.owner_timezone)
+        return
+    with store.tx() as tx:
+        t = tx.tenant_by_telegram(settings.owner_telegram_user_id)
+        if t and t["timezone"] != settings.owner_timezone:
+            tx.set_timezone(t["id"], settings.owner_timezone)
+            log.info("owner timezone set to %s", settings.owner_timezone)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                         format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
@@ -45,6 +65,7 @@ def main() -> None:
     load_schema("default")  # fail fast on a broken schema file
 
     store = Store(settings.database_url)
+    sync_owner_timezone(store, settings)
     tg = Telegram(settings.telegram_bot_token)
     llm = ClaudeLLM(settings.anthropic_api_key)
 

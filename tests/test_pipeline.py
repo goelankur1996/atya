@@ -50,16 +50,19 @@ class FakeLLM:
         if self.fail_times:
             self.fail_times -= 1
             raise RuntimeError("model overloaded")
-        return self.intent.get(text, "log")
+        intent = self.intent.get(text, "log")
+        return {"intent": intent, "reply": "Hi there." if intent == "chat" else ""}
 
-    def plan_fanout(self, *, schema, raw_content, captured_at, context):
+    def plan_fanout(self, *, schema, raw_content, captured_local, context):
         self.last_context = context
+        self.last_captured_local = captured_local
         return self.plans[raw_content]
 
-    def plan_query(self, *, schema, question, today):
+    def plan_query(self, *, schema, question, now):
+        self.last_now = now
         return self.query_plans[question]
 
-    def answer(self, *, schema, question, records, today):
+    def answer(self, *, schema, question, records, now):
         self.seen_records = records
         return "Answer: " + ", ".join(r["id"] for r in records)
 
@@ -67,7 +70,7 @@ class FakeLLM:
 @pytest.fixture
 def settings(db_url):
     return Settings(database_url=db_url, telegram_bot_token="x", anthropic_api_key="x",
-                    owner_telegram_user_id=OWNER, max_attempts=2)
+                    owner_telegram_user_id=OWNER, owner_timezone="Asia/Kolkata", max_attempts=2)
 
 
 @pytest.fixture
@@ -229,3 +232,40 @@ def test_split_long_message():
     from atya.telegram import split_message
     parts = split_message(("para " * 300 + "\n\n") * 5, limit=4096)
     assert all(len(p) <= 4096 for p in parts) and len(parts) >= 2
+
+
+def test_chat_gets_a_reply_and_saves_nothing(store, settings, clean):
+    tg, llm = FakeTelegram(), FakeLLM()
+    llm.intent["hello"] = "chat"
+    tg.push("hello")
+    run_all(store, tg, llm, settings)
+    assert tg.sent[-1][1] == "Hi there."
+    t = owner_tenant(store)
+    with store.tx() as tx:
+        row = tx._one("SELECT status, intent FROM inbox WHERE tenant_id = %s", (t["id"],))
+        assert row == {"status": "responded", "intent": "chat"}
+        assert tx._one("SELECT count(*) AS n FROM records WHERE tenant_id = %s", (t["id"],))["n"] == 0
+
+
+def test_model_sees_local_time_with_weekday(store, settings, clean):
+    import datetime as dt
+    from atya.processor import local_label
+    from zoneinfo import ZoneInfo
+    # 2026-11-02 19:00 UTC is Tuesday 00:30 in India.
+    utc = dt.datetime(2026, 11, 2, 19, 0, tzinfo=dt.timezone.utc)
+    assert local_label(utc, ZoneInfo("Asia/Kolkata")) == "Tuesday 2026-11-03 00:30 (Asia/Kolkata)"
+
+    tg, llm = FakeTelegram(), FakeLLM()
+    llm.plans["note"] = {"writes": []}
+    tg.push("note")
+    run_all(store, tg, llm, settings)
+    assert llm.last_captured_local.endswith("(Asia/Kolkata)")
+    assert owner_tenant(store)["timezone"] == "Asia/Kolkata"
+
+
+def test_owner_timezone_sync(store, settings, clean):
+    from atya.__main__ import sync_owner_timezone
+    with store.tx() as tx:
+        tx.create_tenant(telegram_user_id=OWNER, telegram_chat_id=555)   # created as UTC
+    sync_owner_timezone(store, settings)
+    assert owner_tenant(store)["timezone"] == "Asia/Kolkata"

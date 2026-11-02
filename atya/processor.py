@@ -39,12 +39,18 @@ def record_ref(schema: Schema, rec: dict) -> str:
     return f"{prefix}-{rec['seq']}"
 
 
-def _today(tenant: dict) -> dt.date:
+def _tz(tenant: dict) -> ZoneInfo:
     try:
-        tz = ZoneInfo(tenant.get("timezone") or "UTC")
+        return ZoneInfo(tenant.get("timezone") or "UTC")
     except Exception:
-        tz = ZoneInfo("UTC")
-    return dt.datetime.now(tz).date()
+        return ZoneInfo("UTC")
+
+
+def local_label(moment: dt.datetime, tz: ZoneInfo) -> str:
+    """'Tuesday 2026-11-03 00:12 (Asia/Kolkata)': weekday included so the model
+    never has to work out which day of the week a date falls on."""
+    m = moment.astimezone(tz)
+    return f"{m:%A %Y-%m-%d %H:%M} ({tz.key})"
 
 
 def _is_uuid(s: Any) -> bool:
@@ -156,7 +162,8 @@ class FanoutExecutor:
             matches = self.tx.find_by_title(self.tid, "person", title)
             if len(matches) == 1:
                 p = matches[0]
-                fields.setdefault("Last Contact", self.inbox["captured_at"].date().isoformat())
+                local_day = self.inbox["captured_at"].astimezone(_tz(self.tenant)).date()
+                fields.setdefault("Last Contact", local_day.isoformat())
                 new_ctx = fields.get("Context")
                 if new_ctx and p["fields"].get("Context") and new_ctx not in p["fields"]["Context"]:
                     fields["Context"] = f"{p['fields']['Context']}\n{new_ctx}"
@@ -250,7 +257,8 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings) -> str:
         tenant = tx.tenant(row["tenant_id"])
     assert tenant is not None
     schema = load_schema(tenant["schema_name"])
-    today = _today(tenant).isoformat()
+    tz = _tz(tenant)
+    now = local_label(dt.datetime.now(dt.timezone.utc), tz)
 
     try:
         if not raw.strip():
@@ -258,21 +266,28 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings) -> str:
                 tx.finish_inbox(row["id"], status="failed", notes="empty content")
             return "failed"
 
-        intent = llm.classify(raw)
+        cls = llm.classify(raw)
+        intent = cls["intent"]
+        if intent == "chat":
+            with store.tx() as tx:
+                tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=cls["reply"],
+                              inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]))
+                tx.finish_inbox(row["id"], status="responded", intent="chat", notes="small talk; nothing saved")
+            return "responded"
         if intent == "log":
             with store.tx() as tx:
                 context = fanout_context(tx, tenant["id"])
             plan = llm.plan_fanout(schema=schema, raw_content=raw,
-                                   captured_at=row["captured_at"].isoformat(), context=context)
+                                   captured_local=local_label(row["captured_at"], tz), context=context)
             with store.tx() as tx:
                 notes = FanoutExecutor(tx, schema, tenant, row).run(plan)
                 tx.finish_inbox(row["id"], status="processed", notes=notes, intent="log")
             return "processed"
 
-        plan = llm.plan_query(schema=schema, question=raw, today=today)
+        plan = llm.plan_query(schema=schema, question=raw, now=now)
         with store.tx() as tx:
             records = gather_records(tx, schema, tenant["id"], plan)
-        answer = llm.answer(schema=schema, question=raw, records=records, today=today)
+        answer = llm.answer(schema=schema, question=raw, records=records, now=now)
         with store.tx() as tx:
             tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=answer,
                           inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]))
