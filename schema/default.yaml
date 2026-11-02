@@ -1,0 +1,290 @@
+# ATYA default schema, version 1.
+#
+# Converted from the Notion "System Schema" page and the property schemas of
+# every registered Notion database (snapshot 2026-11-02). This file replaces
+# the Notion page as the source of rules for the processor: every tenant points
+# at a schema version, and the processor validates every write against it.
+#
+# Conventions
+# - Record types are keyed by a short slug (task, person, ...). `label` is the
+#   name the AI and the user see; it matches the old Notion database name.
+# - Field types: text, number, date, url, email, select, multi_select,
+#   checkbox, relation.
+# - `options` on a select may be a list or `{vocab: <name>}` to share a
+#   vocabulary. Deprecated options stay valid for stored rows but the processor
+#   must never assign them to new captures.
+# - `verbatim_body: true` means the record body MUST be the inbox raw text,
+#   byte for byte (old Hard Rule 0a). The processor enforces this in code.
+# - Auto-increment IDs from Notion (Task ID, Person ID, ...) become
+#   `prefix` + a per-tenant sequence number (TSK-12).
+# - Child trackers (`child: ...`) follow the old Child Database pattern:
+#   spine = Source + Project relation + date field, create-or-leave on rerun.
+
+version: 1
+name: default
+
+vocabularies:
+  area:
+    options: [work, personal, health, relationships, learning, finance, home]
+    deprecated: [julep]
+    note: >-
+      julep is retained so historical rows stay valid and queryable; never
+      assign it to new captures. Professional/work captures route to work. The
+      specific employer or venture is captured via the related Project, never
+      baked into Area.
+  mood:
+    options: [energized, focused, scattered, frustrated, content, tired]
+  relationship:
+    options: [colleague, friend, family, founder, investor, mentor, contact, ex-colleague]
+
+types:
+
+  task:
+    label: Tasks
+    prefix: TSK
+    description: Actionable items. First thing to check each morning.
+    title_field: Title
+    fields:
+      Status:       {type: select, options: [inbox, next, in_progress, waiting, done, dropped], default: inbox}
+      Priority:     {type: select, options: [P0, P1, P2, P3]}
+      Area:         {type: select, options: {vocab: area}}
+      Due Date:     {type: date}
+      Completed At: {type: date}
+      Notes:        {type: text}
+      Project:      {type: relation, to: project}
+      People:       {type: relation, to: person, many: true}
+
+  project:
+    label: Projects
+    prefix: PRJ
+    description: Initiatives that group tasks and have a goal. Active work threads.
+    title_field: Title
+    fields:
+      Status:      {type: select, options: [active, on_hold, completed, archived]}
+      Area:        {type: select, options: {vocab: area}}
+      Goal:        {type: text}
+      Target Date: {type: date}
+      People:      {type: relation, to: person, many: true}
+
+  thought:
+    label: Thoughts
+    prefix: THT
+    description: >-
+      Atomic observations, reflections and feelings. Free-form but tagged.
+      The body is the full verbatim capture; Summary is optional AI metadata.
+    title_field: Title
+    verbatim_body: true
+    fields:
+      Area:        {type: select, options: {vocab: area}}
+      Mood:        {type: select, options: {vocab: mood}}
+      Summary:     {type: text}
+      Captured At: {type: date}
+      Flag:        {type: select, options: [Dropped]}
+      Project:     {type: relation, to: project}
+      People:      {type: relation, to: person, many: true}
+
+  decision:
+    label: Decisions
+    prefix: DEC
+    description: Commitments and choices made, with reasoning. Distinct from thoughts because they are decisions to act.
+    title_field: Title
+    fields:
+      Decision:     {type: text}
+      Reasoning:    {type: text}
+      Decided At:   {type: date}
+      Revisit Date: {type: date}
+      Project:      {type: relation, to: project}
+      People:       {type: relation, to: person, many: true}
+
+  person:
+    label: People
+    prefix: PER
+    description: Contacts with context. Working memory of who's who and what's going on with them.
+    title_field: Name
+    fields:
+      Role:          {type: text}
+      Company:       {type: text}
+      Relationship:  {type: select, options: {vocab: relationship}}
+      Context:       {type: text}
+      Notes:         {type: text}
+      Email:         {type: email}
+      LinkedIn:      {type: url}
+      Last Contact:  {type: date}
+      Next Followup: {type: date}
+      Projects:      {type: relation, to: project, many: true}
+
+  library:
+    label: Library
+    prefix: LIB
+    description: >-
+      Everything read, watched or listened to, or wanted: books, articles,
+      blogs, websites, movies, TV series, videos, songs, podcasts.
+    title_field: Title
+    fields:
+      Status:            {type: select, options: [queued, reading, watching, listening, done, abandoned]}
+      Type:              {type: select, options: [read, watch, listen]}
+      Format:            {type: select, options: [Movie, TV Series, Video, Song, Podcast, Book, Blog, Website, Article, Other]}
+      Priority:          {type: select, options: [now, soon, someday]}
+      Link:              {type: url}
+      Why Interesting:   {type: text}
+      Estimated Minutes: {type: number}
+      Captured At:       {type: date}
+
+  journal:
+    label: Journal
+    prefix: JNL
+    description: >-
+      Daily journal / diary. Date-anchored narrative entries, distinct from
+      atomic Thoughts. Body is the verbatim capture kept as one block.
+    title_field: Title
+    verbatim_body: true
+    fields:
+      Date:       {type: date}
+      Covers:     {type: text, description: "Subject period the entry is about, when different from Date (when written)."}
+      Area:       {type: select, options: {vocab: area}}
+      Mood:       {type: select, options: {vocab: mood}}
+      Energy:     {type: select, options: [1 - depleted, 2 - low, 3 - ok, 4 - good, 5 - high]}
+      Sleep:      {type: text, description: "Bedtime, wake time, duration, interruptions, quality signal."}
+      Highlights: {type: text, description: Short summary line of the day}
+      Project:    {type: relation, to: project}
+      People:     {type: relation, to: person, many: true}
+      Decisions:  {type: relation, to: decision, many: true}
+
+  # --- Child trackers (project-scoped) -----------------------------------
+
+  fitness:
+    label: Fitness — Training Log
+    prefix: FIT
+    description: Training log to progress from zero to 10 pullups. Each session's work and notes.
+    title_field: Entry
+    child:
+      parent_project: 10-Pullup Goal
+      date_field: Date
+      trigger: >-
+        Captures about pullups, hangs, grip, bodyweight training, bodyweight,
+        running, or progress toward 10 pullups.
+      agent_fillable: [Date, What I Did, Notes, Bodyweight (kg), Pullups (max), Pushups (max), Dead Hang (s), Run (km), How It Felt, Type]
+    fields:
+      Date:            {type: date}
+      Type:            {type: select, options: [Workout, Weekly Review, Test]}
+      What I Did:      {type: text}
+      Notes:           {type: text}
+      How It Felt:     {type: select, options: [Easy, Moderate, Hard, Failed]}
+      Bodyweight (kg): {type: number}
+      Pullups (max):   {type: number}
+      Pushups (max):   {type: number}
+      Dead Hang (s):   {type: number}
+      Run (km):        {type: number}
+      Project:         {type: relation, to: project}
+
+  robotics_milestone:
+    label: Robotics Learning — Milestones
+    prefix: ROB
+    description: Granular tracking of every milestone across all phases of the robotics learning journey.
+    title_field: Milestone
+    child:
+      parent_project: Learn Robotics
+      date_field: Date Logged
+      trigger: Captures about robotics study, ROS, hardware projects, or robotics-learning progress.
+      agent_fillable: [Date Logged, Hours Spent, Notes]
+      human_only_unless_explicit: [Phase, Status]
+    fields:
+      Date Logged:     {type: date}
+      Phase:           {type: select, options: [Phase 1, Phase 1.5, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7]}
+      Status:          {type: select, options: [Not Started, In Progress, Done, Blocked, Skipped Deliberately]}
+      Hours Spent:     {type: number}
+      Hours Estimated: {type: number}
+      Date Completed:  {type: date}
+      Notes:           {type: text}
+      Project:         {type: relation, to: project}
+
+  meal:
+    label: Meals Log
+    prefix: MEAL
+    description: Daily meal log. Holds full meal detail.
+    title_field: Meal
+    child:
+      parent_project: 10-Pullup Goal
+      date_field: Date
+      trigger: Captures describing food or drink consumed — meals, snacks, what was eaten or drunk, diet notes.
+      agent_fillable: [Date, Meal Type, What I Ate, Notes, How I Felt]
+      only_if_stated: [Est. Calories, Protein (g)]
+    fields:
+      Date:          {type: date}
+      Meal Type:     {type: select, options: [Breakfast, Lunch, Dinner, Snack, Drink]}
+      What I Ate:    {type: text}
+      Notes:         {type: text}
+      How I Felt:    {type: select, options: [Great, Fine, Heavy, Off]}
+      Est. Calories: {type: number}
+      Protein (g):   {type: number}
+      Project:       {type: relation, to: project}
+
+  vla_milestone:
+    label: VLA Milestones
+    prefix: VLA
+    description: The VLA plan's tasks across its 20 checkpoints.
+    title_field: Task
+    child:
+      parent_project: VLA Learning
+      date_field: Date
+      trigger: >-
+        Captures about the VLA plan's 20 checkpoints — pi0.5/openpi, the
+        SO-101 rig, the DROID 75k audit, the hygiene checker, the VLM
+        instruction loop, long-horizon tasks, failure detection/recovery, the
+        eval harness, or EnvHub. Overlaps the Robotics Learning trigger;
+        multi-match writes to both are expected and correct.
+      agent_fillable: [Date, Status, Notes]
+      human_only: [Task ID, Checkpoint, Tier, Detail, Hours, Depends on, Bucket, Emphasised in source]
+    fields:
+      Date:                 {type: date}
+      Status:               {type: select, options: [Not started, In progress, Done]}
+      Notes:                {type: text}
+      Task ID:              {type: text}
+      Checkpoint:           {type: number}
+      Tier:                 {type: select, options: ["0", "1", "1b", "2", "3", "4"]}
+      Bucket:               {type: select, options: [Checkpointed, Ongoing, Unscheduled, Maybe, Killed]}
+      Detail:               {type: text}
+      Hours:                {type: text}
+      Depends on:           {type: text}
+      Emphasised in source: {type: checkbox}
+      Project:              {type: relation, to: project}
+
+rules:
+
+  hard: |
+    1. Inbox is the single front door. Nothing enters the records store except through an inbox row first. Every resulting record links back to its inbox row (source_inbox_id). This applies to the AI acting on the user's behalf exactly as it applies to the automated processor.
+    2. The database is the source of truth. Never rely on memory for data that lives in the database. Always query.
+    3. Retrieve before generate. Every answer starts with an explicit search step, then generates from retrieved records.
+    4. Use record IDs, never names, for cross-references. Names can collide or change.
+    5. Use exact vocabulary values from this schema. Writes that would create new select options are rejected.
+    6. Every write logs to the audit log: actor, action, target table, target id, summary, source data.
+    7. Every record traces back to its origin via source_inbox_id. Records imported from Notion keep their Notion page ID in fields; a blank origin means "origin unrecorded", not "manual". Do not backfill a guess.
+    8. Idempotency. Reprocessing an inbox row must not create duplicates: all records from one inbox row are written in one transaction together with the row's status change, so a failed attempt leaves nothing behind and a rerun starts clean.
+    9. Replies to the user's own questions go to the outbox autonomously. Anything sent to third parties, calendar changes and deletions require explicit user approval.
+    10. The audit log is never edited or deleted by automation.
+    11. Child trackers follow the child pattern: spine present (source, Project relation, date), registered in this schema before use, field authority and create-or-leave respected. Never write to an unregistered type.
+    0a. Verbatim: for types with verbatim_body, the record body is the inbox raw text, byte for byte. Never paraphrase, summarize or rewrite it.
+    0b. A journal body is kept as one block, never split.
+    0c. Journal Date = when written; the subject period goes in Covers.
+
+  routing: |
+    One inbox row can produce several records across several types.
+
+    - Person mentioned (new) → create a person (Name, Role, Company, Relationship best guess, Context, LinkedIn if a URL is present).
+    - Person mentioned (existing) → update Last Contact; append to Context if there is new information.
+    - Actionable item → create a task (Title, Status=inbox, Priority best guess, Project if inferable, People if mentioned, Area best guess, Notes).
+    - Observation / reflection / feeling (atomic, single topic) → create a thought. Body = the full verbatim capture (0a). The AI sets derived metadata only: Title, Mood if expressed, Area, Project/People if relevant. An optional short AI summary may go in Summary; it never replaces the body.
+    - Day narrative / diary entry → create a journal entry. Body = verbatim capture, one block (0a, 0b). Title = the written date. Date = when written; Covers = subject period if different (0c). Mood / Energy / Sleep / Highlights only if expressed. Per-day data (sleep, workouts) is also extracted to the relevant child trackers, dated to when it happened. Thoughts = atomic fragment; Journal = dated narrative; when ambiguous prefer Thoughts unless it is clearly a whole-day reflection.
+      - Sleep: when sleep is mentioned in any capture, fill Journal.Sleep with as much detail as possible: bedtime, wake time, total duration, interruptions, quality signal. One-line vague entries ("slept well") are not enough.
+    - Commitment / choice made → create a decision (Title, Decision, Reasoning, Decided At = today, Project/People if relevant).
+    - Media to consume or consumed (books, articles, blogs, websites, movies, TV, videos, songs, podcasts) → library.
+      - To consume ("want to read X", a recommendation, a link) → library record, Status=queued, with Type, Format, Priority. No journal entry.
+      - Consumed ("watched X", "I loved X") → library record with Status=done plus a journal mention of the event. If a matching queued library record exists, flip it to done instead of creating a duplicate.
+      - A link with no consume verb → library, Status=queued, Priority=soon.
+
+    Child trackers (after the core fan-out): for every child type whose trigger matches, also create a record: link it to the child's parent project, set its date field, fill agent-fillable fields best effort, leave the rest blank, and flag low-confidence writes in processor notes. Multi-match → write to all matching children and note it.
+
+  lenses: |
+    Derived lenses are computed at query time, never stored as tags.
+    - Discipline (follow-through and consistency): ratio of tasks done vs dropped; count of stale commitments (tasks/decisions waiting or open past their date); cadence of dated logs in health and learning, including child trackers; decisions made vs acted on. Report the signals, not a single score.
+    - Social health (state of relationships): People.Last Contact recency against desired cadence; interaction frequency; balance across friend / family / colleague; promises to people kept vs outstanding.
