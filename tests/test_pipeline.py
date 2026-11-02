@@ -269,3 +269,56 @@ def test_owner_timezone_sync(store, settings, clean):
         tx.create_tenant(telegram_user_id=OWNER, telegram_chat_id=555)   # created as UTC
     sync_owner_timezone(store, settings)
     assert owner_tenant(store)["timezone"] == "Asia/Kolkata"
+
+
+def test_capture_can_close_an_existing_task(store, settings, clean):
+    tg, llm = FakeTelegram(), FakeLLM()
+    a, b = "Remind me to call Meera on Friday.", "Spoke to Meera already. Meeting her and David on 11th."
+    llm.plans[a] = {"writes": [{"type": "task", "title": "Call Meera",
+                                "fields": {"Status": "next", "Due Date": "2026-11-06"}}]}
+    tg.push(a)
+    run_all(store, tg, llm, settings)
+    with store.tx() as tx:
+        t = tx.tenant_by_telegram(OWNER)
+        task_id = tx.list_records(t["id"], "task")[0]["id"]
+    llm.plans[b] = {"updates": [{"id": str(task_id), "fields": {"Status": "done", "Completed At": "2026-11-03"}}],
+                    "writes": [{"type": "task", "title": "Meeting with Meera and David",
+                                "fields": {"Due Date": "2026-11-11"}}]}
+    tg.push(b)
+    run_all(store, tg, llm, settings)
+    ctx = {r["title"]: r["note"] for r in llm.last_context["Open tasks"]}
+    assert ctx["Call Meera"] == "TSK-1; next; due 2026-11-06 (Friday)"
+    with store.tx() as tx:
+        tasks = {r["title"]: r for r in tx.list_records(t["id"], "task")}
+        assert tasks["Call Meera"]["fields"]["Status"] == "done"
+        assert tasks["Call Meera"]["fields"]["Completed At"] == "2026-11-03"
+        assert len(tasks) == 2
+        notes = tx._one("SELECT processor_notes FROM inbox WHERE raw_content = %s AND tenant_id = %s",
+                        (b, t["id"]))["processor_notes"]
+        assert "TSK-1 (updated)" in notes and "TSK-2" in notes
+
+
+def test_update_respects_user_edits_and_bad_ids(store, settings, clean):
+    tg, llm = FakeTelegram(), FakeLLM()
+    with store.tx() as tx:
+        t = tx.create_tenant(telegram_user_id=OWNER, telegram_chat_id=555)
+        task, _ = tx.create_record(t["id"], S, "task", title="Ship v2", fields={"Status": "next"})
+        tx.update_record(t["id"], S, task["id"], {"Status": "waiting"}, by_user=True)
+    llm.plans["x"] = {"updates": [{"id": str(task["id"]), "fields": {"Status": "done"}},
+                                  {"id": "TSK-9", "fields": {"Status": "done"}}]}
+    tg.push("x")
+    run_all(store, tg, llm, settings)
+    with store.tx() as tx:
+        assert tx.record(t["id"], task["id"])["fields"]["Status"] == "waiting"
+        notes = tx._one("SELECT processor_notes FROM inbox WHERE tenant_id = %s", (t["id"],))["processor_notes"]
+        assert "edited by user" in notes and "not a record ID" in notes
+
+
+def test_answer_records_carry_weekdays(store, tenant):
+    from atya import processor
+    with store.tx() as tx:
+        tx.create_record(tenant["id"], S, "task", title="Meeting with Meera and David",
+                         fields={"Due Date": "2026-11-11"})
+        recs = processor.gather_records(tx, S, tenant["id"], {"types": ["task"], "search": "Meera"})
+    assert recs[0]["fields"]["Due Date"] == "2026-11-11 (Wednesday)"
+    assert recs[0]["created"].endswith("day)")

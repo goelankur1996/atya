@@ -29,6 +29,8 @@ SEARCH_LIMIT = 30
 RECENT_PER_TYPE = 15
 CONTEXT_PROJECTS = 80
 CONTEXT_PEOPLE = 200
+CONTEXT_OPEN_TASKS = 100
+CONTEXT_DECISIONS = 30
 BODY_CHARS_FOR_ANSWER = 1500
 
 
@@ -52,6 +54,26 @@ def local_label(moment: dt.datetime, tz: ZoneInfo) -> str:
     never has to work out which day of the week a date falls on."""
     m = moment.astimezone(tz)
     return f"{m:%A %Y-%m-%d %H:%M} ({tz.key})"
+
+
+def with_weekday(value: Any) -> Any:
+    """'2026-11-11' -> '2026-11-11 (Wednesday)'. Models get weekdays wrong when
+    left to work them out, so every date they see carries its weekday."""
+    if isinstance(value, str) and len(value) >= 10:
+        try:
+            d = dt.date.fromisoformat(value[:10])
+        except ValueError:
+            return value
+        return f"{value} ({d:%A})"
+    return value
+
+
+def dated_fields(schema: Schema, type_key: str, fields: dict) -> dict:
+    tdef = schema.types.get(type_key)
+    if tdef is None:
+        return fields
+    return {k: (with_weekday(v) if k in tdef.fields and tdef.fields[k].type == "date" else v)
+            for k, v in fields.items()}
 
 
 def _is_uuid(s: Any) -> bool:
@@ -81,7 +103,19 @@ def fanout_context(tx: Tx, tenant_id: uuid.UUID) -> dict[str, list[dict]]:
         "SELECT id, title, concat_ws(', ', fields->>'Relationship', fields->>'Company') AS note "
         "FROM records WHERE tenant_id = %s AND type = 'person' ORDER BY updated_at DESC LIMIT %s",
         (tenant_id, CONTEXT_PEOPLE))
-    return {"Projects": projects, "People": people}
+    tasks = tx._all(
+        "SELECT id, seq, title, fields FROM records WHERE tenant_id = %s AND type = 'task' "
+        "AND coalesce(fields->>'Status', '') NOT IN ('done', 'dropped') "
+        "ORDER BY updated_at DESC LIMIT %s", (tenant_id, CONTEXT_OPEN_TASKS))
+    open_tasks = [{"id": t["id"], "title": t["title"], "note": "; ".join(filter(None, [
+        f"TSK-{t['seq']}", t["fields"].get("Status"),
+        f"due {with_weekday(t['fields']['Due Date'])}" if t["fields"].get("Due Date") else None]))}
+        for t in tasks]
+    decisions = tx._all(
+        "SELECT id, title, concat('DEC-', seq) AS note FROM records WHERE tenant_id = %s "
+        "AND type = 'decision' ORDER BY updated_at DESC LIMIT %s", (tenant_id, CONTEXT_DECISIONS))
+    return {"Projects": projects, "People": people, "Open tasks": open_tasks,
+            "Recent decisions": decisions}
 
 
 class FanoutExecutor:
@@ -95,6 +129,12 @@ class FanoutExecutor:
         self.written: list[str] = []
 
     def run(self, plan: dict) -> str:
+        for u in plan.get("updates", []) or []:
+            if isinstance(u, dict):
+                try:
+                    self._update(u)
+                except (KeyError, TypeError, ValueError) as e:
+                    self.notes.append(f"skipped an update: {e}")
         writes = [w for w in plan.get("writes", []) if isinstance(w, dict)]
         # People and projects first, so other writes can reference them by title.
         order = {"person": 0, "project": 1}
@@ -114,6 +154,27 @@ class FanoutExecutor:
         if self.notes:
             parts.append("Notes: " + "; ".join(self.notes))
         return "\n".join(parts) or "no actionable content"
+
+    def _update(self, u: dict) -> None:
+        """Change an existing record (e.g. mark a task done). User-edited fields stay as they are."""
+        rid = str(u.get("id") or "")
+        if not _is_uuid(rid):
+            self.notes.append(f"update target {rid!r} is not a record ID")
+            return
+        rec = self.tx.record(self.tid, uuid.UUID(rid))
+        if rec is None:
+            self.notes.append(f"update target {rid} not found")
+            return
+        fields = self._resolve_relations(rec["type"], dict(u.get("fields") or {}))
+        tdef = self.schema.types[rec["type"]]
+        if tdef.child:
+            for f in tdef.child.human_only:
+                if fields.pop(f, None) is not None:
+                    self.notes.append(f"{tdef.label}.{f} is human-only; not set")
+        if not fields:
+            return
+        self.notes += self.tx.update_record(self.tid, self.schema, rec["id"], fields)
+        self.written.append(f"{record_ref(self.schema, rec)} (updated)")
 
     def _type_key(self, w: dict) -> str | None:
         t = self.schema.type(str(w.get("type") or w.get("database") or ""))
@@ -259,10 +320,11 @@ def gather_records(tx: Tx, schema: Schema, tenant_id: uuid.UUID, plan: dict,
         body = r.get("body") or ""
         out.append({
             "id": record_ref(schema, r), "type": schema.types[r["type"]].label if r["type"] in schema.types else r["type"],
-            "title": r["title"], "fields": r["fields"],
+            "title": r["title"], "fields": dated_fields(schema, r["type"], r["fields"]),
             **({"body": body[:BODY_CHARS_FOR_ANSWER]} if body else {}),
             **({"links": links} if links else {}),
-            "created": r["created_at"].date().isoformat(), "updated": r["updated_at"].date().isoformat(),
+            "created": with_weekday(r["created_at"].date().isoformat()),
+            "updated": with_weekday(r["updated_at"].date().isoformat()),
         })
     return out
 

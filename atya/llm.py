@@ -81,8 +81,21 @@ Output ONLY a JSON object with this shape, no prose, no markdown fences:
       "rationale": "<one short sentence: why this write>"
     }}
   ],
-  "processor_notes": "<one or two sentences summarising what you created>"
+  "updates": [
+    {{
+      "id": "<ID of an existing record from the Existing records lists>",
+      "fields": {{"<Field Name>": <new value>, ...}},
+      "rationale": "<one short sentence>"
+    }}
+  ],
+  "processor_notes": "<one or two sentences summarising what you created or changed>"
 }}
+
+# Updates vs new records
+- If the message reports progress on something that already exists, UPDATE it instead of creating a new record: a task done ("spoke to Meera already", "sent it") → Status "done" and Completed At = the capture date; a task dropped → Status "dropped"; rescheduled → new Due Date; blocked on someone → Status "waiting".
+- Never create a task that duplicates an open task; update the open one.
+- A message can do both: e.g. close one task and create a follow-up.
+- Only update records listed under Existing records, by their ID.
 
 # Field value formats
 - text / url / email: a string
@@ -98,12 +111,12 @@ Output ONLY a JSON object with this shape, no prose, no markdown fences:
 - Never write to types not listed above. Never set human-only fields of child trackers.
 - People: one write per person mentioned. If the person already exists (see Existing records), still write them with the same name; code updates the existing record instead of duplicating it.
 - Best effort: omit any optional field you can't fill confidently.
-- Empty plan is valid: for pure noise output {{"writes": [], "processor_notes": "no actionable content"}}."""
+- Empty plan is valid: for pure noise output {{"writes": [], "updates": [], "processor_notes": "no actionable content"}}."""
 
 FANOUT_USER = """Captured at: {captured_local}
 Resolve every relative date in the message ("today", "tomorrow", "by Friday", "next week") against this local capture time. "By <weekday>" = the next such weekday on or after the capture date. Write dates as YYYY-MM-DD in this timezone.
 
-Existing records you may reference by ID:
+Existing records (reference or update them by ID):
 {context}
 
 Message:
@@ -148,7 +161,9 @@ You may ONLY use the records provided in the user message. Do not guess, do not 
 {lenses}
 
 # Style
-- Concise, declarative, no preamble. Telegram-friendly: short lines, no markdown headers.
+- Concise, declarative, no preamble. Telegram-friendly short lines.
+- Plain text only. No Markdown at all: no **bold**, no `backticks`, no # headers. Lists as plain "1." lines.
+- Dates are given with their weekday; copy the weekday as given, never work one out yourself.
 - Refer to records by their ID in brackets, e.g. [TSK-12], so the owner can find them.
 - Now is {now}. Use it for anything relative ("last week", "overdue", "this Friday").
 - If the records are empty or insufficient, say so plainly and say what would need to be captured."""
@@ -193,7 +208,10 @@ class ClaudeLLM:
         if not isinstance(plan.get("writes", []), list):
             raise LLMError("plan.writes is not a list")
         plan.setdefault("writes", [])
+        plan.setdefault("updates", [])
         plan.setdefault("processor_notes", "")
+        if not isinstance(plan["updates"], list):
+            raise LLMError("plan.updates is not a list")
         return plan
 
     def plan_query(self, *, schema: Schema, question: str, now: str) -> dict:
