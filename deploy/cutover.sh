@@ -28,7 +28,7 @@ cd /opt/atya
 ./fetch-env.sh
 docker compose down -v
 docker compose up -d db
-docker compose run --rm app python -m atya.notion_import
+docker compose run --rm -T app python -m atya.notion_import
 docker compose up -d
 sleep 5
 docker compose logs --tail=20 app"
