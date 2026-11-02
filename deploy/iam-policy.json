@@ -1,89 +1,99 @@
 {
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "AtyaImageRepo",
-      "Effect": "Allow",
-      "Action": [
-        "ecr:CreateRepository", "ecr:DescribeRepositories", "ecr:DescribeImages",
-        "ecr:BatchCheckLayerAvailability", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart",
-        "ecr:CompleteLayerUpload", "ecr:PutImage", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"
-      ],
-      "Resource": "arn:aws:ecr:us-east-1:086561359888:repository/atya"
-    },
-    {
-      "Sid": "EcrLogin",
-      "Effect": "Allow",
-      "Action": "ecr:GetAuthorizationToken",
-      "Resource": "*"
-    },
-    {
-      "Sid": "AtyaBackupBucket",
-      "Effect": "Allow",
-      "Action": [
-        "s3:CreateBucket", "s3:ListBucket", "s3:PutBucketPublicAccessBlock",
-        "s3:PutLifecycleConfiguration", "s3:GetObject", "s3:PutObject"
-      ],
-      "Resource": ["arn:aws:s3:::atya-backups-086561359888", "arn:aws:s3:::atya-backups-086561359888/*"]
-    },
-    {
-      "Sid": "AtyaServerRole",
-      "Effect": "Allow",
-      "Action": [
-        "iam:GetRole", "iam:CreateRole", "iam:PutRolePolicy", "iam:PassRole",
-        "iam:GetInstanceProfile", "iam:CreateInstanceProfile", "iam:AddRoleToInstanceProfile"
-      ],
-      "Resource": [
-        "arn:aws:iam::086561359888:role/atya-ec2",
-        "arn:aws:iam::086561359888:instance-profile/atya-ec2"
-      ]
-    },
-    {
-      "Sid": "AtyaServerRoleOnlyTheseManagedPolicies",
-      "Effect": "Allow",
-      "Action": "iam:AttachRolePolicy",
-      "Resource": "arn:aws:iam::086561359888:role/atya-ec2",
-      "Condition": {
-        "ArnEquals": {
-          "iam:PolicyARN": [
-            "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
-            "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-          ]
-        }
-      }
-    },
-    {
-      "Sid": "AtyaSecretsAndAmiLookup",
-      "Effect": "Allow",
-      "Action": ["ssm:PutParameter", "ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
-      "Resource": [
-        "arn:aws:ssm:us-east-1:086561359888:parameter/atya/*",
-        "arn:aws:ssm:us-east-1::parameter/aws/service/ami-amazon-linux-latest/*"
-      ]
-    },
-    {
-      "Sid": "RunCommandsOnServer",
-      "Effect": "Allow",
-      "Action": "ssm:SendCommand",
-      "Resource": [
-        "arn:aws:ec2:us-east-1:086561359888:instance/*",
-        "arn:aws:ssm:us-east-1::document/AWS-RunShellScript"
-      ]
-    },
-    {
-      "Sid": "ReadCommandResults",
-      "Effect": "Allow",
-      "Action": ["ssm:GetCommandInvocation", "ssm:ListCommandInvocations"],
-      "Resource": "*"
-    },
-    {
-      "Sid": "LaunchAndManageServer",
-      "Effect": "Allow",
-      "Action": [
-        "ec2:Describe*", "ec2:CreateSecurityGroup", "ec2:RunInstances", "ec2:CreateTags",
-        "ec2:StartInstances", "ec2:StopInstances", "ec2:RebootInstances"
-      ],
-      "Resource": "*"
+ "Version": "2012-10-17",
+ "Statement": [
+  {
+   "Effect": "Allow",
+   "Action": "ecr:*",
+   "Resource": "arn:aws:ecr:us-east-1:086561359888:repository/atya"
+  },
+  {
+   "Effect": "Allow",
+   "Action": "ecr:GetAuthorizationToken",
+   "Resource": "*"
+  },
+  {
+   "Effect": "Allow",
+   "Action": [
+    "s3:CreateBucket",
+    "s3:ListBucket",
+    "s3:PutBucketPublicAccessBlock",
+    "s3:PutLifecycleConfiguration",
+    "s3:GetObject",
+    "s3:PutObject"
+   ],
+   "Resource": [
+    "arn:aws:s3:::atya-backups-086561359888",
+    "arn:aws:s3:::atya-backups-086561359888/*"
+   ]
+  },
+  {
+   "Effect": "Allow",
+   "Action": [
+    "iam:GetRole",
+    "iam:CreateRole",
+    "iam:PutRolePolicy",
+    "iam:PassRole",
+    "iam:GetInstanceProfile",
+    "iam:CreateInstanceProfile",
+    "iam:AddRoleToInstanceProfile"
+   ],
+   "Resource": [
+    "arn:aws:iam::086561359888:role/atya-ec2",
+    "arn:aws:iam::086561359888:instance-profile/atya-ec2"
+   ]
+  },
+  {
+   "Effect": "Allow",
+   "Action": "iam:AttachRolePolicy",
+   "Resource": "arn:aws:iam::086561359888:role/atya-ec2",
+   "Condition": {
+    "ArnEquals": {
+     "iam:PolicyARN": [
+      "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+      "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+     ]
     }
-  ]
+   }
+  },
+  {
+   "Effect": "Allow",
+   "Action": [
+    "ssm:PutParameter",
+    "ssm:GetParameter*"
+   ],
+   "Resource": [
+    "arn:aws:ssm:us-east-1:086561359888:parameter/atya/*",
+    "arn:aws:ssm:us-east-1::parameter/aws/service/ami-amazon-linux-latest/*"
+   ]
+  },
+  {
+   "Effect": "Allow",
+   "Action": "ssm:SendCommand",
+   "Resource": [
+    "arn:aws:ec2:us-east-1:086561359888:instance/*",
+    "arn:aws:ssm:us-east-1::document/AWS-RunShellScript"
+   ]
+  },
+  {
+   "Effect": "Allow",
+   "Action": [
+    "ssm:GetCommandInvocation",
+    "ssm:ListCommandInvocations"
+   ],
+   "Resource": "*"
+  },
+  {
+   "Effect": "Allow",
+   "Action": [
+    "ec2:Describe*",
+    "ec2:CreateSecurityGroup",
+    "ec2:RunInstances",
+    "ec2:CreateTags",
+    "ec2:StartInstances",
+    "ec2:StopInstances",
+    "ec2:RebootInstances"
+   ],
+   "Resource": "*"
+  }
+ ]
 }
