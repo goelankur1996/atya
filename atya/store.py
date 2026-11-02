@@ -432,6 +432,57 @@ class Tx:
                    source_data={"preview": body[:300]})
         return row["id"]
 
+    def log_sent(self, tenant_id: uuid.UUID, *, chat_id: int, body: str,
+                 inbox_id: uuid.UUID | None = None, actor: str = "commands") -> uuid.UUID:
+        """Record a message the bot already sent directly (command replies)."""
+        row = self._one(
+            "INSERT INTO outbox (tenant_id, inbox_id, chat_id, body, status, sent_at) "
+            "VALUES (%s, %s, %s, %s, 'sent', now()) RETURNING id",
+            (tenant_id, inbox_id, chat_id, body))
+        assert row is not None
+        self.audit(tenant_id, actor=actor, action="send", target_table="outbox",
+                   target_id=row["id"], summary="command reply sent",
+                   source_data={"preview": body[:300]})
+        return row["id"]
+
+    # --- conversation view (web) ----------------------------------------------
+
+    def messages_page(self, tenant_id: uuid.UUID, *, kind: str = "all", query: str = "",
+                      limit: int = 50, offset: int = 0) -> list[dict]:
+        """Inbox rows, newest first. kind: all | log | query | chat | command | failed."""
+        where = ["tenant_id = %s"]
+        params: list[Any] = [tenant_id]
+        if kind in ("log", "query", "chat", "command"):
+            where.append("intent = %s")
+            params.append(kind)
+        elif kind == "failed":
+            where.append("(status = 'failed' OR id IN (SELECT inbox_id FROM outbox "
+                         "WHERE tenant_id = %s AND status = 'failed' AND inbox_id IS NOT NULL))")
+            params.append(tenant_id)
+        if query:
+            where.append("raw_content ILIKE %s")
+            params.append("%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
+        return self._all(
+            f"SELECT * FROM inbox WHERE {' AND '.join(where)} "  # noqa: S608 (fixed fragments)
+            "ORDER BY captured_at DESC, seq DESC LIMIT %s OFFSET %s", (*params, limit, offset))
+
+    def outbox_for(self, inbox_ids: list[uuid.UUID]) -> list[dict]:
+        return self._all("SELECT * FROM outbox WHERE inbox_id = ANY(%s) ORDER BY created_at",
+                         (inbox_ids,))
+
+    def records_for(self, inbox_ids: list[uuid.UUID]) -> list[dict]:
+        return self._all("SELECT id, type, seq, title, source_inbox_id FROM records "
+                         "WHERE source_inbox_id = ANY(%s) ORDER BY created_at", (inbox_ids,))
+
+    def unlinked_outbox(self, tenant_id: uuid.UUID, *, after: dt.datetime | None,
+                        before: dt.datetime | None) -> list[dict]:
+        """Bot messages not tied to an inbox row, between two times."""
+        return self._all(
+            "SELECT * FROM outbox WHERE tenant_id = %s AND inbox_id IS NULL "
+            "AND (%s::timestamptz IS NULL OR created_at >= %s) "
+            "AND (%s::timestamptz IS NULL OR created_at < %s) ORDER BY created_at DESC",
+            (tenant_id, after, after, before, before))
+
     def claim_outbox(self, *, limit: int = 10, reclaim_after_minutes: int = 5) -> list[dict]:
         rows = self._all(
             "UPDATE outbox SET status = 'sending', attempts = attempts + 1 "

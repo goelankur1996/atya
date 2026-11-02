@@ -164,7 +164,7 @@ def test_export_contains_everything_and_only_mine(store, settings, clean):
     assert {"README.txt", "raw_inbox.jsonl", "audit_log.jsonl", "schema.yaml",
             "records/task.csv", "records/person.csv"} <= names
     inbox = [json.loads(l) for l in z.read("raw_inbox.jsonl").decode().splitlines()]
-    assert [m["raw_content"] for m in inbox] == [msg]
+    assert [m["raw_content"] for m in inbox] == [msg, "/export"]   # commands are kept too
     task_md = next(n for n in names if n.startswith("markdown/Tasks/TSK-1"))
     md = z.read(task_md).decode()
     assert "[[PER-1 Asha]]" in md and "2026-11-06" in md and "From message: INB-1" in md
@@ -207,3 +207,31 @@ def test_owner_cannot_delete_from_chat(store, settings, clean):
     tg.push("/delete")
     poll(store, tg, settings)
     assert texts(tg, 555)[-1] == "The owner account can't be deleted from chat."
+
+
+def test_commands_and_replies_are_kept_with_secrets_hidden(store, settings, clean):
+    from atya.config import Settings
+    s2 = Settings(**{**settings.__dict__, "web_base_url": "https://atya.test"})
+    tg, llm = FakeTelegram(), FakeLLM()
+    tg.push("/start")
+    tg.push("/help")
+    tg.push("/web")
+    run_all(store, tg, llm, s2)
+    with store.tx(system=True) as tx:
+        t = tx.tenant_by_telegram(OWNER)
+        rows = tx._all("SELECT raw_content, intent, status, processor_notes FROM inbox "
+                       "WHERE tenant_id = %s ORDER BY seq", (t["id"],))
+        sent = tx._all("SELECT body, status FROM outbox WHERE tenant_id = %s ORDER BY created_at", (t["id"],))
+    # /start created the account, so it came before there was anything to log against.
+    assert [(r["raw_content"], r["intent"], r["status"]) for r in rows] == [
+        ("/help", "command", "responded"), ("/web", "command", "responded")]
+    assert rows[1]["processor_notes"] == "web:link-sent"
+    assert sent[0]["body"].startswith("Send me anything") and sent[0]["status"] == "sent"
+    assert "/login/[hidden]" in sent[1]["body"]
+    token = tg.sent[-1][1].split("/login/")[1].split()[0]
+    assert token not in sent[1]["body"]
+    # The same update delivered twice is handled once.
+    from atya import receiver
+    receiver.handle_update(store, tg, s2, tg.queue[-1])
+    with store.tx(system=True) as tx:
+        assert tx._one("SELECT count(*) AS n FROM inbox WHERE tenant_id = %s", (t["id"],))["n"] == 2

@@ -41,8 +41,19 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
                        name=sender.get("first_name") or sender.get("username"), tenant=tenant)
 
     if text.startswith("/"):
+        if tenant is not None and tenant["status"] == "active":
+            # Keep the command in the inbox (already answered) so the
+            # conversation can be reviewed; replies are logged against it.
+            with store.tx(tenant["id"]) as tx:
+                ctx.inbox_id = tx.add_inbox(
+                    tenant["id"], source="telegram", raw_content=text, status="responded",
+                    captured_at=dt.datetime.fromtimestamp(msg.get("date") or time.time(), tz=dt.timezone.utc),
+                    source_message_id=f"telegram:{chat_id}:{msg.get('message_id')}",
+                    sender=sender.get("username") or str(user_id))
+            if ctx.inbox_id is None:
+                return "dedup"
         try:
-            return commands.handle(ctx, text)
+            outcome = commands.handle(ctx, text)
         except Exception:
             # Commands are not retried (a retry could repeat an export or an invite).
             log.exception("command %r failed", text.split()[0])
@@ -50,7 +61,15 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
                 ctx.reply("Sorry, that failed on my side. Please try again in a minute.")
             except Exception:
                 pass
-            return "error:command"
+            outcome = "error:command"
+        if ctx.inbox_id is not None:
+            try:
+                with store.tx(tenant["id"]) as tx:
+                    tx.conn.execute("UPDATE inbox SET intent = 'command', processor_notes = %s, "
+                                    "processed_at = now() WHERE id = %s", (outcome, ctx.inbox_id))
+            except Exception:
+                log.warning("could not record command outcome", exc_info=True)
+        return outcome
 
     if tenant is None:
         if ctx.is_owner:  # the owner may start by just talking to the bot

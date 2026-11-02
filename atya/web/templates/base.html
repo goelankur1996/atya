@@ -11,6 +11,11 @@
 <header>
   <a class="brand" href="{{ url_for('home') }}">ATYA</a>
   {% if tenant %}
+  <nav>
+    <a href="{{ url_for('home') }}">Records</a>
+    <a href="{{ url_for('messages') }}">Messages</a>
+    <a href="{{ url_for('db_tables') }}">Database</a>
+  </nav>
   <form class="search" action="{{ url_for('search') }}" method="get">
     <input type="search" name="q" placeholder="Search everything" value="{{ q|default('') }}" aria-label="Search">
   </form>
@@ -20,7 +25,7 @@
   </form>
   {% endif %}
 </header>
-<main>
+<main{% block main_class %}{% endblock %}>
 {% block body %}{% endblock %}
 </main>
 </body>

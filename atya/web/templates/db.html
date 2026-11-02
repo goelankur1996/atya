@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Database · ATYA{% endblock %}
+{% block body %}
+<h1>Database</h1>
+<p class="muted">Your rows in each table, exactly as stored. Read-only. Other users' rows are not visible here or anywhere else.</p>
+<table>
+  <thead><tr><th>Table</th><th>What it holds</th><th class="num">Rows</th></tr></thead>
+  <tbody>
+  {% for name, (col, order, desc) in tables.items() %}
+    <tr>
+      <td class="ref"><a href="{{ url_for('db_table', name=name) }}">{{ name }}</a></td>
+      <td>{{ desc }}</td>
+      <td class="num">{{ counts[name] }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

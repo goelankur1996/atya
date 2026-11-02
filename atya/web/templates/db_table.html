@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} · Database · ATYA{% endblock %}
+{% block main_class %} class="wide"{% endblock %}
+{% block body %}
+<p class="crumbs"><a href="{{ url_for('db_tables') }}">Database</a></p>
+<h1 class="ref-title">{{ name }}</h1>
+<p class="muted">{{ desc }} Long values are cut at 600 characters; the export has everything.</p>
+{% if rows %}
+<div class="raw-wrap">
+<table class="raw">
+  <thead><tr>{% for c in columns %}<th>{{ c }}</th>{% endfor %}</tr></thead>
+  <tbody>
+  {% for row in rows %}
+    <tr>{% for cell in row %}<td{% if cell.null %} class="null"{% endif %}>{{ cell.text }}{% if cell.cut %} <span class="muted">({{ cell.cut }} chars)</span>{% endif %}</td>{% endfor %}</tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="pager">
+  {% if page > 1 %}<a href="{{ url_for('db_table', name=name, page=page-1) }}">Previous</a>{% endif %}
+  {% if more %}<a href="{{ url_for('db_table', name=name, page=page+1) }}">Next</a>{% endif %}
+</p>
+{% else %}
+<p class="muted">No rows.</p>
+{% endif %}
+{% endblock %}

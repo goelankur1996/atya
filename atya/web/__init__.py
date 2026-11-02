@@ -36,6 +36,24 @@ COOKIE = "atya_session"
 SESSION_DAYS = 30
 PAGE_SIZE = 50
 MAX_PAGE = 10_000
+MESSAGE_KINDS = {"all": "All", "log": "Captures", "query": "Questions", "chat": "Chat",
+                 "command": "Commands", "failed": "Failed"}
+# Tables a user can browse raw: (column that holds their id, sort order, what it is).
+# service_state is system-wide and not shown.
+RAW_TABLES = {
+    "inbox": ("tenant_id", "captured_at DESC, seq DESC", "Every message you sent, verbatim, and what happened to it."),
+    "outbox": ("tenant_id", "created_at DESC", "Every message the bot sent you or queued for you."),
+    "records": ("tenant_id", "updated_at DESC", "Tasks, people, journal entries and the other typed records."),
+    "record_links": ("tenant_id", "created_at DESC", "Links between records (task to project, thought to person)."),
+    "audit_log": ("tenant_id", "at DESC, id DESC", "Every change made to your data, newest first. Append-only."),
+    "tenants": ("id", "created_at DESC", "Your account."),
+    "invites": ("created_by", "created_at DESC", "Invite codes you created."),
+    "seq_counters": ("tenant_id", "scope", "Counters behind IDs like TSK-12."),
+    "sessions": ("tenant_id", "created_at DESC", "Web sign-ins (only a hash of each is stored)."),
+    "login_tokens": ("tenant_id", "expires_at DESC", "Sign-in links sent by /web (hashes only)."),
+    "attachments": ("tenant_id", "created_at DESC", "Files you sent (not stored yet)."),
+}
+RAW_CELL_CHARS = 600
 LIST_COLUMNS = ("Status", "Due Date", "Date", "Priority", "Area", "Relationship", "Type", "Mood")
 
 
@@ -93,7 +111,8 @@ def create_app(store: Store, settings: Settings) -> Flask:
 
     @app.context_processor
     def helpers() -> dict:
-        return {"ref": ref, "fmt_time": fmt_time, "fmt_value": fmt_value, "csrf": g.get("csrf", ""),
+        return {"ref": ref, "fmt_time": fmt_time, "fmt_value": fmt_value, "status_label": status_label,
+                "csrf": g.get("csrf", ""),
                 "tenant": g.get("tenant"), "schema": g.get("schema")}
 
     def ref(rec: dict) -> str:
@@ -187,6 +206,76 @@ def create_app(store: Store, settings: Settings) -> Flask:
             with tx() as t:
                 rows = t.search_text(g.tenant["id"], q, limit=PAGE_SIZE)
         return render_template("search.html", q=q, rows=rows)
+
+    # --- conversation ----------------------------------------------------------
+
+    @app.get("/messages")
+    def messages():
+        need_login()
+        kind = request.args.get("kind", "all")
+        if kind not in MESSAGE_KINDS:
+            kind = "all"
+        q = clean_text(request.args.get("q", ""))[:200]
+        page = min(MAX_PAGE, max(1, request.args.get("page", 1, type=int)))
+        tid = g.tenant["id"]
+        with tx() as t:
+            # One extra row on each side: the last row of the previous page and
+            # the first of the next mark the time window this page covers.
+            start = (page - 1) * PAGE_SIZE
+            rows = t.messages_page(tid, kind=kind, query=q, limit=PAGE_SIZE + 2 if page > 1 else PAGE_SIZE + 1,
+                                   offset=start - 1 if page > 1 else 0)
+            prev_row = rows.pop(0) if page > 1 and rows else None
+            more = len(rows) > PAGE_SIZE
+            rows = rows[:PAGE_SIZE]
+            ids = [r["id"] for r in rows]
+            replies: dict = {}
+            for o in t.outbox_for(ids):
+                replies.setdefault(o["inbox_id"], []).append(o)
+            filed: dict = {}
+            for r in t.records_for(ids):
+                filed.setdefault(r["source_inbox_id"], []).append(r)
+            # Bot messages with no message of yours behind them (e.g. imported
+            # from v1), placed in time order on the unfiltered view.
+            extra: list[dict] = []
+            if kind == "all" and not q:
+                newest = prev_row["captured_at"] if prev_row else None
+                oldest = rows[-1]["captured_at"] if rows and more else None
+                extra = t.unlinked_outbox(tid, after=oldest, before=newest)
+        items = [{"kind": "in", "at": r["captured_at"], "row": r,
+                  "replies": replies.get(r["id"], []), "filed": filed.get(r["id"], [])} for r in rows]
+        items += [{"kind": "out", "at": o["created_at"], "row": o} for o in extra]
+        items.sort(key=lambda i: i["at"], reverse=True)
+        return render_template("messages.html", items=items, kind=kind, kinds=MESSAGE_KINDS, q=q,
+                               page=page, more=more)
+
+    # --- raw database ----------------------------------------------------------
+
+    @app.get("/db")
+    def db_tables():
+        need_login()
+        tid = g.tenant["id"]
+        with tx() as t:
+            counts = {name: t.conn.execute(
+                f"SELECT count(*) AS n FROM {name} WHERE {col} = %s", (tid,)).fetchone()["n"]  # noqa: S608
+                for name, (col, _order, _desc) in RAW_TABLES.items()}
+        return render_template("db.html", tables=RAW_TABLES, counts=counts)
+
+    @app.get("/db/<name>")
+    def db_table(name: str):
+        need_login()
+        if name not in RAW_TABLES:
+            abort(404)
+        col, order, desc = RAW_TABLES[name]
+        page = min(MAX_PAGE, max(1, request.args.get("page", 1, type=int)))
+        with tx() as t:
+            cur = t.conn.execute(
+                f"SELECT * FROM {name} WHERE {col} = %s ORDER BY {order} LIMIT %s OFFSET %s",  # noqa: S608
+                (g.tenant["id"], PAGE_SIZE + 1, (page - 1) * PAGE_SIZE))
+            rows = cur.fetchall()
+            columns = [d.name for d in cur.description or []]
+        return render_template("db_table.html", name=name, desc=desc, columns=columns,
+                               rows=[[raw_cell(c, r[c]) for c in columns] for r in rows[:PAGE_SIZE]],
+                               page=page, more=len(rows) > PAGE_SIZE)
 
     # --- one record ------------------------------------------------------------
 
@@ -288,6 +377,38 @@ def create_app(store: Store, settings: Settings) -> Flask:
 def clean_text(v: str) -> str:
     """Normalise submitted text: browser newlines, NUL bytes (Postgres rejects them)."""
     return v.replace("\r\n", "\n").replace("\x00", "").strip()
+
+
+def status_label(m: dict) -> str:
+    """Plain words for what happened to an inbox row."""
+    status, intent = m["status"], m.get("intent")
+    if status in ("pending", "processing"):
+        return "waiting"
+    if status == "failed":
+        return "failed"
+    return {"log": "filed", "query": "answered", "chat": "chat", "command": "command"}.get(
+        intent or "", status)
+
+
+def raw_cell(column: str, value: Any) -> dict:
+    """One cell of the raw table view: display text, plus whether it was cut."""
+    if value is None:
+        return {"text": "null", "null": True}
+    if column == "embedding":
+        return {"text": "[vector, 1024 numbers]"}
+    if column == "search_text":
+        return {"text": "[search index]"}
+    if column.endswith("_hash"):
+        return {"text": str(value)[:10] + "…"}
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    elif isinstance(value, dt.datetime):
+        text = value.isoformat(sep=" ", timespec="seconds")
+    else:
+        text = str(value)
+    if len(text) > RAW_CELL_CHARS:
+        return {"text": text[:RAW_CELL_CHARS] + "…", "cut": len(text)}
+    return {"text": text}
 
 
 def num_str(value: float | int) -> str:

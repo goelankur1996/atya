@@ -65,10 +65,24 @@ class Ctx:
     chat_id: int
     name: str | None
     tenant: dict | None
+    # Inbox row of the command being handled; replies are logged against it.
+    inbox_id: object | None = None
 
     def reply(self, text: str, buttons: list[list[tuple[str, str]]] | None = None,
-              preview: bool = True) -> None:
+              preview: bool = True, *, log_text: str | None = None) -> None:
+        """Send a reply. log_text: what to store instead (e.g. with a secret hidden)."""
         self.tg.send_message(self.chat_id, text, buttons=buttons, preview=preview)
+        self.note_sent(log_text if log_text is not None else text)
+
+    def note_sent(self, text: str) -> None:
+        """Keep a copy of a directly-sent message in the outbox (best effort)."""
+        if self.inbox_id is None or self.tenant is None:
+            return
+        try:
+            with self.store.tx(self.tenant["id"]) as tx:
+                tx.log_sent(self.tenant["id"], chat_id=self.chat_id, body=text, inbox_id=self.inbox_id)
+        except Exception:
+            log.warning("could not log a sent message", exc_info=True)
 
     @property
     def is_owner(self) -> bool:
@@ -196,8 +210,9 @@ def web_link(ctx: Ctx) -> str:
     with ctx.store.tx(ctx.tenant["id"]) as tx:
         tx.create_login_token(ctx.tenant["id"], hashlib.sha256(token.encode()).hexdigest(),
                               LOGIN_LINK_MINUTES)
-    ctx.reply(f"Your sign-in link (works once, for {LOGIN_LINK_MINUTES} minutes):\n{base}/login/{token}\n\n"
-              "Don't forward it: anyone who opens it first gets into your account.", preview=False)
+    msg = (f"Your sign-in link (works once, for {LOGIN_LINK_MINUTES} minutes):\n{base}/login/{{}}\n\n"
+           "Don't forward it: anyone who opens it first gets into your account.")
+    ctx.reply(msg.format(token), preview=False, log_text=msg.format("[hidden]"))
     return "web:link-sent"
 
 
@@ -212,6 +227,7 @@ def export(ctx: Ctx) -> str:
         return "export-too-large"
     ctx.tg.send_document(ctx.chat_id, filename, data,
                          caption="Everything you've sent and everything filed for you. README.txt explains the files.")
+    ctx.note_sent(f"[file: {filename}, {len(data) // 1024} KB]")
     return "exported"
 
 
@@ -228,9 +244,10 @@ def delete(ctx: Ctx, arg: str) -> str:
         code = secrets.token_hex(2).upper()
         with ctx.store.tx(system=True) as tx:
             tx.set_state(key, {"code": code, "expires": (now + dt.timedelta(minutes=DELETE_CONFIRM_MINUTES)).isoformat()})
-        ctx.reply("This permanently erases your account: every message, record and log. It can't be undone.\n\n"
-                  f"I'll send you a final export first. To confirm, within {DELETE_CONFIRM_MINUTES} minutes send:\n"
-                  f"/delete {code}")
+        msg = ("This permanently erases your account: every message, record and log. It can't be undone.\n\n"
+               f"I'll send you a final export first. To confirm, within {DELETE_CONFIRM_MINUTES} minutes send:\n"
+               "/delete {}")
+        ctx.reply(msg.format(code), log_text=msg.format("[code hidden]"))
         return "delete:confirm-requested"
     if not pending or arg.strip().upper() != pending["code"] or now > dt.datetime.fromisoformat(pending["expires"]):
         ctx.reply("That confirmation code doesn't match or has expired. Send /delete to start again.")
@@ -239,6 +256,7 @@ def delete(ctx: Ctx, arg: str) -> str:
     with ctx.store.tx(system=True) as tx:
         counts = tx.delete_tenant(ctx.tenant["id"])
         tx.set_state(key, None)
+    ctx.inbox_id = None  # everything is gone; nothing left to log against
     log.info("deleted tenant %s: %s", ctx.tenant["id"], counts)
     ctx.reply("Done. Your account and all your data have been erased. The zip above is your only copy.")
     return "deleted"

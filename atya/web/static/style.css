@@ -45,3 +45,25 @@ code { background: var(--soft); padding: 1px 5px; border-radius: 3px; }
   header { flex-wrap: wrap; }
   main { padding: 14px; }
 }
+header nav { display: flex; gap: 14px; }
+header nav a { color: var(--text); }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0 0 10px; }
+.tabs strong { color: var(--text); }
+.msg-search input { width: 100%; max-width: 420px; margin-bottom: 16px; }
+ol.thread { list-style: none; padding: 0; margin: 0; }
+.msg { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; }
+.msg.out { background: var(--soft); }
+.msg.nested { margin: 10px 0 0 24px; }
+.msg .meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.msg .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg .filed, .msg .notes { font-size: 13px; margin-top: 6px; color: var(--muted); }
+.status { border: 1px solid var(--line); border-radius: 10px; padding: 0 7px; }
+.status.s-failed { border-color: #111; color: #111; font-weight: 600; }
+.status.s-pending, .status.s-processing { color: var(--blue); border-color: #c8daf3; }
+.raw-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 4px; }
+table.raw { font-family: ui-monospace, Menlo, monospace; font-size: 12px; width: max-content; min-width: 100%; }
+table.raw td { white-space: pre-wrap; max-width: 420px; overflow-wrap: anywhere; }
+table.raw td.null { color: #aaa; }
+table.raw th { position: sticky; top: 0; background: #fff; white-space: nowrap; }
+h1.ref-title { font-family: ui-monospace, Menlo, monospace; }
+main.wide { max-width: none; }

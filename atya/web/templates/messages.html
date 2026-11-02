@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Messages · ATYA{% endblock %}
+{% block body %}
+<h1>Messages</h1>
+<p class="tabs">
+  {% for k, label in kinds.items() %}
+    {% if k == kind %}<strong>{{ label }}</strong>{% else %}<a href="{{ url_for('messages', kind=k, q=q or None) }}">{{ label }}</a>{% endif %}
+  {% endfor %}
+</p>
+<form class="msg-search" action="{{ url_for('messages') }}" method="get">
+  <input type="hidden" name="kind" value="{{ kind }}">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search your messages" aria-label="Search your messages">
+</form>
+
+{% if not items %}
+<p class="muted">No messages{% if q %} containing “{{ q }}”{% endif %}.</p>
+{% endif %}
+
+<ol class="thread">
+{% for it in items %}
+  {% if it.kind == "in" %}
+  {% set m = it.row %}
+  <li class="msg in">
+    <div class="meta">
+      <span class="ref">INB-{{ m.seq }}</span>
+      <span>{{ fmt_time(m.captured_at) }}</span>
+      <span class="status s-{{ m.status }}">{{ status_label(m) }}</span>
+      {% if m.source != "telegram" %}<span class="muted">via {{ m.source|replace("_", " ") }}</span>{% endif %}
+    </div>
+    <div class="text">{{ m.raw_content }}</div>
+    {% if it.filed %}
+    <div class="filed">Filed:
+      {% for r in it.filed %}<a class="ref" href="{{ url_for('record_view', ref_str=ref(r)) }}" title="{{ r.title }}">{{ ref(r) }}</a> {{ r.title }}{% if not loop.last %} · {% endif %}{% endfor %}
+    </div>
+    {% endif %}
+    {% if m.processor_notes and m.intent != "command" %}<div class="notes">{{ m.processor_notes }}</div>{% endif %}
+    {% for o in it.replies %}
+    <div class="msg out nested">
+      <div class="meta"><span>Bot</span><span>{{ fmt_time(o.sent_at or o.created_at) }}</span>
+        {% if o.status != "sent" %}<span class="status s-{{ o.status }}">{{ o.status }}{% if o.error %}: {{ o.error }}{% endif %}</span>{% endif %}</div>
+      <div class="text">{{ o.body }}</div>
+    </div>
+    {% endfor %}
+  </li>
+  {% else %}
+  {% set o = it.row %}
+  <li class="msg out">
+    <div class="meta"><span>Bot</span><span>{{ fmt_time(o.sent_at or o.created_at) }}</span>
+      {% if o.status != "sent" %}<span class="status s-{{ o.status }}">{{ o.status }}</span>{% endif %}</div>
+    <div class="text">{{ o.body }}</div>
+  </li>
+  {% endif %}
+{% endfor %}
+</ol>
+
+<p class="pager">
+  {% if page > 1 %}<a href="{{ url_for('messages', kind=kind, q=q or None, page=page-1) }}">Newer</a>{% endif %}
+  {% if more %}<a href="{{ url_for('messages', kind=kind, q=q or None, page=page+1) }}">Older</a>{% endif %}
+</p>
+{% endblock %}

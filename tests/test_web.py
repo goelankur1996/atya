@@ -294,3 +294,83 @@ def test_cross_site_login_post_rejected(app, store, settings, tenant):
     assert c.post("/login", data={"token": token}, headers={"Origin": "https://evil.example"}).status_code == 400
     assert c.post("/login", data={"token": token}, headers={"Sec-Fetch-Site": "cross-site"}).status_code == 400
     assert c.post("/login", data={"token": token}, headers={"Origin": "https://atya.test"}).status_code == 302
+
+
+def test_messages_page_shows_conversation(app, store, settings, tenant):
+    import datetime as dt
+    now = dt.datetime.now(dt.timezone.utc)
+    with store.tx(system=True) as tx:
+        cap = tx.add_inbox(tenant["id"], source="telegram", raw_content="Met Meera, call her Friday",
+                           captured_at=now - dt.timedelta(minutes=5))
+        tx.finish_inbox(cap, status="processed", intent="log", notes="created PER-1, TSK-1")
+        tx.create_record(tenant["id"], S, "task", title="Call Meera", source_inbox_id=cap)
+        q = tx.add_inbox(tenant["id"], source="telegram", raw_content="what do I owe Meera?",
+                         captured_at=now - dt.timedelta(minutes=4))
+        tx.finish_inbox(q, status="responded", intent="query", notes="searched task for 'Meera'; 1 records")
+        out = tx.add_outbox(tenant["id"], chat_id=1, body="A call by Friday (TSK-1).", inbox_id=q)
+        tx.finish_outbox(out, ok=True)
+        bad = tx.add_inbox(tenant["id"], source="telegram", raw_content="<script>x</script> broken one",
+                           captured_at=now - dt.timedelta(minutes=3))
+        tx.finish_inbox(bad, status="failed", notes="gave up after 3 attempts: boom")
+        orphan = tx.add_outbox(tenant["id"], chat_id=1, body="Old reminder from v1")
+    client, _ = sign_in(app, store, settings, tenant)
+    page = client.get("/messages").get_data(as_text=True)
+    for text in ("Met Meera, call her Friday", "filed", "TSK-1", "what do I owe Meera?", "answered",
+                 "A call by Friday", "failed", "gave up after 3 attempts", "Old reminder from v1"):
+        assert text in page, text
+    assert "<script>x</script>" not in page and "&lt;script&gt;" in page
+    assert page.index("broken one") < page.index("what do I owe") < page.index("Met Meera")  # newest first
+    failed = client.get("/messages?kind=failed").get_data(as_text=True)
+    assert "broken one" in failed and "Met Meera" not in failed and "Old reminder" not in failed
+    questions = client.get("/messages?kind=query").get_data(as_text=True)
+    assert "what do I owe" in questions and "broken one" not in questions
+    found = client.get("/messages?q=owe").get_data(as_text=True)
+    assert "what do I owe" in found and "Met Meera, call" not in found
+    assert client.get("/messages?q=100%25_").status_code == 200
+    assert client.get("/messages?kind=bogus&page=-3").status_code == 200
+
+
+def test_messages_pagination_keeps_unlinked_bot_messages_in_order(app, store, settings, tenant):
+    import datetime as dt
+    from atya import web as webmod
+    base = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    n = webmod.PAGE_SIZE + 5
+    with store.tx(system=True) as tx:
+        for i in range(n):
+            tx.add_inbox(tenant["id"], source="telegram", raw_content=f"note number {i:03d}",
+                         captured_at=base + dt.timedelta(hours=i), status="processed")
+        # A bot message between note 3 and note 4 (both on page 2).
+        o = tx.add_outbox(tenant["id"], chat_id=1, body="between three and four")
+        tx.conn.execute("UPDATE outbox SET created_at = %s WHERE id = %s", (base + dt.timedelta(hours=3, minutes=30), o))
+    client, _ = sign_in(app, store, settings, tenant)
+    p1 = client.get("/messages").get_data(as_text=True)
+    p2 = client.get("/messages?page=2").get_data(as_text=True)
+    assert "between three and four" not in p1
+    assert p2.count("between three and four") == 1
+    assert p2.index("note number 004") < p2.index("between three and four") < p2.index("note number 003")
+
+
+def test_raw_database_view(app, store, settings, tenant):
+    with store.tx(system=True) as tx:
+        other = tx.create_tenant(telegram_user_id=999_222_333, telegram_chat_id=3, display_name="other")
+        tx.add_inbox(other["id"], source="telegram", raw_content="other user's raw message")
+        tx.add_inbox(tenant["id"], source="telegram", raw_content="my raw message " + "x" * 700)
+        tx.create_record(tenant["id"], S, "task", title="Raw task", fields={"Status": "next"})
+    try:
+        client, _ = sign_in(app, store, settings, tenant)
+        idx = client.get("/db").get_data(as_text=True)
+        assert "inbox" in idx and "audit_log" in idx and "service_state" not in idx
+        inbox = client.get("/db/inbox").get_data(as_text=True)
+        assert "my raw message" in inbox and "other user" not in inbox and "chars)" in inbox
+        recs = client.get("/db/records").get_data(as_text=True)
+        assert "Raw task" in recs and "[search index]" in recs and "&#34;Status&#34;" in recs
+        sess = client.get("/db/sessions").get_data(as_text=True)
+        assert "…" in sess
+        for name in ("tenants", "outbox", "record_links", "audit_log", "invites", "seq_counters",
+                     "login_tokens", "attachments"):
+            assert client.get(f"/db/{name}").status_code == 200, name
+        assert client.get("/db/service_state").status_code == 404
+        assert client.get("/db/inbox;drop").status_code == 404
+    finally:
+        with store.tx(system=True) as tx:
+            tx.delete_tenant(other["id"])
