@@ -16,7 +16,9 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import hmac
+import json
 import logging
+import re
 import secrets
 import zoneinfo
 from typing import Any
@@ -33,6 +35,7 @@ log = logging.getLogger("web")
 COOKIE = "atya_session"
 SESSION_DAYS = 30
 PAGE_SIZE = 50
+MAX_PAGE = 10_000
 LIST_COLUMNS = ("Status", "Due Date", "Date", "Priority", "Area", "Relationship", "Type", "Mood")
 
 
@@ -122,8 +125,19 @@ def create_app(store: Store, settings: Settings) -> Flask:
         # Does not consume the token (link previews would burn it).
         return render_template("login.html", token=token)
 
+    def same_origin_only() -> None:
+        """Block cross-site form posts to /login (login CSRF): another site
+        could otherwise sign a visitor into the attacker's own account."""
+        if request.headers.get("Sec-Fetch-Site") == "cross-site":
+            abort(400, "Open the sign-in link directly from Telegram.")
+        origin = request.headers.get("Origin")
+        allowed = (settings.web_base_url or request.host_url).rstrip("/")
+        if origin and origin != "null" and origin.rstrip("/") != allowed:
+            abort(400, "Open the sign-in link directly from Telegram.")
+
     @app.post("/login")
     def login():
+        same_origin_only()
         token = request.form.get("token", "")
         with store.tx(system=True) as t:
             tenant_id = t.use_login_token(_hash(token)) if token else None
@@ -156,7 +170,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
     def type_list(type_key: str):
         need_login()
         tdef = g.schema.types.get(type_key) or abort(404)
-        page = max(1, request.args.get("page", 1, type=int))
+        page = min(MAX_PAGE, max(1, request.args.get("page", 1, type=int)))
         with tx() as t:
             rows = t.list_records(g.tenant["id"], type_key, limit=PAGE_SIZE + 1,
                                   offset=(page - 1) * PAGE_SIZE)
@@ -167,7 +181,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
     @app.get("/search")
     def search():
         need_login()
-        q = request.args.get("q", "").strip()
+        q = clean_text(request.args.get("q", ""))[:500]
         rows: list[dict] = []
         if q:
             with tx() as t:
@@ -177,9 +191,12 @@ def create_app(store: Store, settings: Settings) -> Flask:
     # --- one record ------------------------------------------------------------
 
     def load_record(ref_str: str) -> tuple[TypeDef, dict]:
-        prefix, _, seq = ref_str.upper().rpartition("-")
+        m = re.fullmatch(r"([A-Za-z_]+)-([0-9]{1,9})", ref_str)
+        if not m:
+            abort(404)
+        prefix, seq = m.group(1).upper(), m.group(2)
         tdef = next((td for td in g.schema.types.values() if td.prefix == prefix), None)
-        if tdef is None or not seq.isdigit():
+        if tdef is None:
             abort(404)
         with tx() as t:
             rec = t.record_by_ref(g.tenant["id"], tdef.key, int(seq))
@@ -199,7 +216,12 @@ def create_app(store: Store, settings: Settings) -> Flask:
             history = t.audit_for(g.tenant["id"], rec["id"])
         fields = [(f, form_value(f, rec["fields"].get(f.name), links.get(f.name, set())))
                   for f in tdef.fields.values()]
+        # What the form showed, so a save only applies what the user changed
+        # (not stale values over changes the bot made after the page loaded).
+        orig = {"title": rec["title"],
+                **{f.name: sorted(v) if isinstance(v, set) else v for f, v in fields}}
         return render_template("record.html", tdef=tdef, rec=rec, fields=fields, pickers=pickers,
+                               orig_json=json.dumps(orig, ensure_ascii=False),
                                backlinks=backlinks, source=source, history=history,
                                problems=problems or [], saved=request.args.get("saved") == "1"), status
 
@@ -214,11 +236,13 @@ def create_app(store: Store, settings: Settings) -> Flask:
         need_login()
         check_csrf()
         tdef, rec = load_record(ref_str)
+        try:
+            orig = json.loads(request.form.get("orig", ""))
+            assert isinstance(orig, dict)
+        except (ValueError, AssertionError):
+            abort(400, "This form has expired. Go back, reload the page and try again.")
+        changes, clear = diff_form(tdef, orig, request.form)
         with tx() as t:
-            current_links: dict[str, set[str]] = {}
-            for l in t.links_from(rec["id"]):
-                current_links.setdefault(l["field"], set()).add(str(l["to_id"]))
-            changes, clear = diff_form(tdef, rec, current_links, request.form)
             problems: list[str] = []
             if changes or clear:
                 problems = t.update_record(g.tenant["id"], g.schema, rec["id"], changes,
@@ -261,6 +285,17 @@ def create_app(store: Store, settings: Settings) -> Flask:
 
 # --- form <-> field values ----------------------------------------------------
 
+def clean_text(v: str) -> str:
+    """Normalise submitted text: browser newlines, NUL bytes (Postgres rejects them)."""
+    return v.replace("\r\n", "\n").replace("\x00", "").strip()
+
+
+def num_str(value: float | int) -> str:
+    if isinstance(value, float) and value.is_integer() and abs(value) < 1e15:
+        return str(int(value))
+    return str(value)
+
+
 def form_value(f: FieldDef, value: Any, links: set[str]) -> Any:
     """What the edit form shows for a stored value."""
     if f.type == "relation":
@@ -271,8 +306,8 @@ def form_value(f: FieldDef, value: Any, links: set[str]) -> Any:
         return bool(value)
     if value is None:
         return ""
-    if f.type == "number":
-        return f"{value:g}" if isinstance(value, float) else str(value)
+    if f.type == "number" and isinstance(value, (int, float)):
+        return num_str(value)
     return str(value)
 
 
@@ -284,53 +319,54 @@ def fmt_value(f: FieldDef, value: Any) -> str:
         return ", ".join(map(str, value))
     if isinstance(value, bool):
         return "yes" if value else "no"
-    if isinstance(value, float):
-        return f"{value:g}"
+    if isinstance(value, (int, float)):
+        return num_str(value)
     return str(value)
 
 
-def diff_form(tdef: TypeDef, rec: dict, current_links: dict[str, set[str]],
-              form) -> tuple[dict[str, Any], list[str]]:
+def diff_form(tdef: TypeDef, orig: dict[str, Any], form) -> tuple[dict[str, Any], list[str]]:
     """Turn a submitted edit form into (changes, fields to clear).
 
-    Only fields whose value actually changed are returned, so saving the form
-    doesn't mark untouched fields as user-edited.
+    Compares each submitted value with what the form originally showed
+    (`orig`), not with the record as it is now. So only fields the user
+    actually changed are saved and marked user-edited, and a change the bot
+    made while the page was open is not reverted by an untouched field.
     """
     changes: dict[str, Any] = {}
     clear: list[str] = []
-    title = (form.get("title") or "").strip()
-    if title and title != rec["title"]:
+    title = clean_text(form.get("title") or "")
+    if title and title != str(orig.get("title", "")).strip():
         changes[tdef.title_field] = title
     for f in tdef.fields.values():
+        if f.name not in orig:
+            continue
         key = f"f:{f.name}"
+        before = orig[f.name]
         if f.type == "checkbox":
             if f"present:{f.name}" not in form:
                 continue
             new = key in form
-            if new != bool(rec["fields"].get(f.name)):
+            if new != bool(before):
                 changes[f.name] = new
             continue
         if f.type in ("multi_select", "relation"):
             if f"present:{f.name}" not in form:
                 continue
-            new_set = {v for v in form.getlist(key) if v}
-            old_set = current_links.get(f.name, set()) if f.type == "relation" \
-                else set(rec["fields"].get(f.name) or [])
-            if new_set == old_set:
+            new_set = {clean_text(v) for v in form.getlist(key) if clean_text(v)}
+            if new_set == set(before or []):
                 continue
             if not new_set:
                 clear.append(f.name)
             elif f.type == "relation":
                 changes[f.name] = sorted(new_set)
             else:
-                changes[f.name] = [o for o in (*f.options, *f.deprecated) if o in new_set]
+                ordered = [o for o in (*f.options, *f.deprecated) if o in new_set]
+                changes[f.name] = ordered + sorted(new_set - set(ordered))
             continue
         if key not in form:
             continue
-        # Browsers send textarea newlines as \r\n and may trim whitespace; compare
-        # normalised text so an untouched field isn't seen as changed.
-        new = form.get(key, "").replace("\r\n", "\n").strip()
-        old = form_value(f, rec["fields"].get(f.name), set()).strip()
+        new = clean_text(form.get(key, ""))
+        old = str(before or "").strip()
         if f.type == "number" and new and old:
             try:
                 if float(new) == float(old):

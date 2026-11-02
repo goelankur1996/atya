@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import functools
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -184,7 +185,13 @@ def _coerce(fdef: FieldDef, value: Any, allow_deprecated: bool) -> Any:
     if t == "number":
         if isinstance(value, bool):
             raise ValueError("expected a number, got a boolean")
-        return float(value)
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"not a number: {value!r}") from None
+        if not math.isfinite(num):
+            raise ValueError(f"not a finite number: {value!r}")
+        return num
     if t == "checkbox":
         if isinstance(value, bool):
             return value

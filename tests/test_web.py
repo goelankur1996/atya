@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import io
 import re
 import zipfile
@@ -53,6 +54,13 @@ def csrf(client, path="/"):
     m = re.search(r'name="csrf" value="([0-9a-f]+)"', client.get(path).get_data(as_text=True))
     assert m
     return m.group(1)
+
+
+def page_form(client, path):
+    """csrf + orig hidden fields of a record page, as a browser would send them."""
+    page = client.get(path).get_data(as_text=True)
+    orig = re.search(r'name="orig" value="([^"]*)"', page).group(1)
+    return {"csrf": csrf(client, path), "orig": html.unescape(orig)}
 
 
 def test_signed_out_and_bad_links(app):
@@ -114,8 +122,7 @@ def test_edit_marks_only_changed_fields_and_bot_respects_them(app, store, settin
         task, _ = tx.create_record(tenant["id"], S, "task", title="Call Meera",
                                    fields={"Status": "next", "Priority": "P2", "Due Date": "2026-11-06"})
     client, _ = sign_in(app, store, settings, tenant)
-    token = csrf(client, "/r/TSK-1")
-    form = {"csrf": token, "title": "Call Meera", "f:Status": "waiting", "f:Priority": "P2",
+    form = {**page_form(client, "/r/TSK-1"), "title": "Call Meera", "f:Status": "waiting", "f:Priority": "P2",
             "f:Due Date": "", "f:Notes": "", "f:Completed At": "", "f:Area": "",
             "present:Project": "1", "present:People": "1"}
     r = client.post("/r/TSK-1", data=form)
@@ -141,15 +148,17 @@ def test_edit_relations_and_bad_values(app, store, settings, tenant):
         task, _ = tx.create_record(tenant["id"], S, "task", title="Plan offsite",
                                    fields={"People": [str(p1["id"])]})
     client, _ = sign_in(app, store, settings, tenant)
-    token = csrf(client, "/r/TSK-1")
-    r = client.post("/r/TSK-1", data={"csrf": token, "title": "Plan offsite",
+    base = page_form(client, "/r/TSK-1")
+    r = client.post("/r/TSK-1", data={**base, "title": "Plan offsite",
                                       "present:People": "1", "f:People": [str(p2["id"])]})
     assert r.status_code == 302
     with store.tx(system=True) as tx:
         assert {l["to_id"] for l in tx.links_from(task["id"])} == {p2["id"]}
-    r = client.post("/r/TSK-1", data={"csrf": token, "title": "Plan offsite", "f:Status": "someday"})
+    base = page_form(client, "/r/TSK-1")
+    r = client.post("/r/TSK-1", data={**base, "title": "Plan offsite", "f:Status": "someday"})
     assert r.status_code == 400 and "not an allowed option" in r.get_data(as_text=True)
-    r = client.post("/r/TSK-1", data={"csrf": token, "title": "Plan offsite",
+    base = page_form(client, "/r/TSK-1")
+    r = client.post("/r/TSK-1", data={**base, "title": "Plan offsite",
                                       "present:People": "1", "f:People": []})
     with store.tx(system=True) as tx:
         assert tx.links_from(task["id"]) == []
@@ -160,8 +169,7 @@ def test_verbatim_body_not_editable(app, store, settings, tenant):
         th, _ = tx.create_record(tenant["id"], S, "thought", title="On focus", body="Exact words here.")
     client, _ = sign_in(app, store, settings, tenant)
     ref = f"{S.types['thought'].prefix}-1"
-    token = csrf(client, f"/r/{ref}")
-    client.post(f"/r/{ref}", data={"csrf": token, "title": "On focus", "body": "Rewritten!"})
+    client.post(f"/r/{ref}", data={**page_form(client, f"/r/{ref}"), "title": "On focus", "body": "Rewritten!"})
     with store.tx(system=True) as tx:
         assert tx.record(tenant["id"], th["id"])["body"] == "Exact words here."
 
@@ -232,8 +240,57 @@ def test_untouched_multiline_text_is_not_marked_edited(app, store, settings, ten
     client, _ = sign_in(app, store, settings, tenant)
     page = client.get("/r/TSK-1").get_data(as_text=True)
     assert "<textarea" in page
-    r = client.post("/r/TSK-1", data={"csrf": csrf(client, "/r/TSK-1"), "title": "T",
+    r = client.post("/r/TSK-1", data={**page_form(client, "/r/TSK-1"), "title": "T",
                                       "f:Notes": "line one\r\nline two", "f:Status": "next"})
     assert r.status_code == 302
     with store.tx(system=True) as tx:
         assert tx.record(tenant["id"], task["id"])["user_edited_fields"] == []
+
+
+def test_untouched_fields_dont_revert_bot_changes(app, store, settings, tenant):
+    with store.tx(system=True) as tx:
+        task, _ = tx.create_record(tenant["id"], S, "task", title="Ship it",
+                                   fields={"Status": "next", "Priority": "P2"})
+    client, _ = sign_in(app, store, settings, tenant)
+    base = page_form(client, "/r/TSK-1")                          # page opened: Status next
+    with store.tx(system=True) as tx:                             # bot closes it meanwhile
+        tx.update_record(tenant["id"], S, task["id"], {"Status": "done"})
+    r = client.post("/r/TSK-1", data={**base, "title": "Ship it", "f:Status": "next", "f:Priority": "P1"})
+    assert r.status_code == 302
+    with store.tx(system=True) as tx:
+        rec = tx.record(tenant["id"], task["id"])
+    assert rec["fields"]["Status"] == "done" and rec["fields"]["Priority"] == "P1"
+    assert rec["user_edited_fields"] == ["Priority"]
+
+
+def test_odd_input_does_not_crash(app, store, settings, tenant):
+    with store.tx(system=True) as tx:
+        tx.create_record(tenant["id"], S, "task", title="T", fields={"Status": "next"})
+        tx.create_record(tenant["id"], S, "fitness", title="Run", fields={})
+    client, _ = sign_in(app, store, settings, tenant)
+    assert client.get("/r/TSK-\u00b2").status_code == 404
+    assert client.get("/r/TSK-99999999999999").status_code == 404
+    assert client.get("/search?q=a%00b").status_code == 200
+    assert client.get("/t/task?page=99999999999999999999").status_code == 200
+    base = page_form(client, "/r/TSK-1")
+    r = client.post("/r/TSK-1", data={**base, "title": "T\x00x", "f:Notes": "a\x00b"})
+    assert r.status_code == 302
+    r = client.post("/r/TSK-1", data={**page_form(client, "/r/TSK-1"), "title": "Tx"})
+    assert client.post("/r/TSK-1", data={"csrf": base["csrf"], "title": "x"}).status_code == 400  # no orig
+    num_field = next(f.name for f in S.types["fitness"].fields.values() if f.type == "number")
+    ref = f"{S.types['fitness'].prefix}-1"
+    r = client.post(f"/r/{ref}", data={**page_form(client, f"/r/{ref}"), "title": "Run",
+                                       f"f:{num_field}": "nan"})
+    assert r.status_code == 400 and "finite" in r.get_data(as_text=True)
+    r = client.post(f"/r/{ref}", data={**page_form(client, f"/r/{ref}"), "title": "Run",
+                                       f"f:{num_field}": "1234567"})
+    assert "1234567" in client.get(f"/r/{ref}").get_data(as_text=True)
+
+
+def test_cross_site_login_post_rejected(app, store, settings, tenant):
+    path = link_for(store, FakeTelegram(), settings, tenant)
+    token = path.rsplit("/", 1)[1]
+    c = app.test_client()
+    assert c.post("/login", data={"token": token}, headers={"Origin": "https://evil.example"}).status_code == 400
+    assert c.post("/login", data={"token": token}, headers={"Sec-Fetch-Site": "cross-site"}).status_code == 400
+    assert c.post("/login", data={"token": token}, headers={"Origin": "https://atya.test"}).status_code == 302

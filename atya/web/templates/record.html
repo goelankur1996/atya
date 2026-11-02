@@ -14,6 +14,7 @@
 
 <form method="post" class="record">
   <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="orig" value="{{ orig_json }}">
   <label class="title">
     <span>{{ tdef.title_field }}{% if tdef.title_field in rec.user_edited_fields %} <em>edited by you</em>{% endif %}</span>
     <input type="text" name="title" value="{{ rec.title }}" required>
@@ -57,10 +58,6 @@
       <input type="{{ 'date' if (not v or v|length == 10) else 'text' }}" name="{{ name }}" value="{{ v }}">
     {% elif f.type == "number" %}
       <input type="number" step="any" name="{{ name }}" value="{{ v }}">
-    {% elif f.type == "url" %}
-      <input type="url" name="{{ name }}" value="{{ v }}">
-    {% elif f.type == "email" %}
-      <input type="email" name="{{ name }}" value="{{ v }}">
     {% else %}
       {% if v|length > 80 or "\n" in v %}
       <textarea name="{{ name }}" rows="4">{{ v }}</textarea>
