@@ -8,7 +8,8 @@ into typed records, and ask questions answered from your own data.
 - `assistant_bot/` — v1 (Telegram → Notion). Still the live system; untouched.
 - `atya/` — v2, being built milestone by milestone (see the v2 spec).
   - **Milestone 1 (done):** Postgres tables, storage layer, schema file.
-  - Next: receiver / processor / sender on Postgres.
+  - **Milestone 2 (code done, live test pending):** receiver / processor / sender on Postgres.
+  - Next: search with embeddings (Voyage).
 
 ## Layout (v2)
 
@@ -19,9 +20,26 @@ into typed records, and ask questions answered from your own data.
 | `atya/schema.py` | Loads and checks the schema file; validates every write. |
 | `atya/store.py` | All database access. Every change writes its audit row in the same transaction. |
 | `atya/migrate.py` | Applies pending migrations. |
+| `atya/receiver.py` | Telegram long-poll -> inbox (no AI). Polling offset kept in the database. |
+| `atya/processor.py` | Claims inbox rows, classifies, then writes records (capture) or answers (question). All writes for one message commit together. |
+| `atya/sender.py` | Outbox -> Telegram. |
+| `atya/llm.py` | The four Claude calls (prompts ported from v1). |
+| `atya/__main__.py` | Runs migrations, then the three workers as supervised threads. |
 | `tests/` | Schema tests (no database needed) and storage tests (need Postgres + pgvector). |
 
-## Running
+## Running the bot locally
+
+```bash
+cp .env.example .env      # test bot token, your Telegram user ID, Anthropic key
+docker compose up -d --build
+docker compose logs -f app
+```
+
+Only one copy of a bot may poll Telegram at a time, so use a separate test bot
+while v1 is still running on the real one. `DEPLOY.md` describes v1 and is out
+of date for v2.
+
+## Tests
 
 ```bash
 pip install -r requirements-dev.txt

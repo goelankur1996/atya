@@ -1,15 +1,32 @@
-name: personal-assistant-bot
-
-# One image, one process running all three workers (receiver / processor / sender)
-# as threads. They still coordinate only through Notion — this is just packaging.
+# Local / single-box setup: Postgres with pgvector + the ATYA app.
+#   cp .env.example .env   # fill in the values
+#   docker compose up -d --build && docker compose logs -f app
+name: atya
 
 services:
-  bot:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: atya
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-atya-local}
+      POSTGRES_DB: atya
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atya -d atya"]
+      interval: 5s
+      retries: 10
+
+  app:
     build: .
     restart: unless-stopped
     env_file: .env
-    volumes:
-      - receiver-state:/app/state
+    environment:
+      DATABASE_URL: postgresql://atya:${POSTGRES_PASSWORD:-atya-local}@db:5432/atya
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
-  receiver-state:
+  pgdata:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -18,3 +20,36 @@ def database_url() -> str:
     if not url:
         raise RuntimeError("DATABASE_URL is not set")
     return url
+
+
+@dataclass(frozen=True)
+class Settings:
+    database_url: str
+    telegram_bot_token: str
+    anthropic_api_key: str
+    # Until invites exist (milestone 5), only this Telegram user is served.
+    # Their tenant row is created on their first message.
+    owner_telegram_user_id: int | None
+    poll_interval: int = 5
+    reclaim_minutes: int = 5
+    max_attempts: int = 3
+
+
+def load_settings() -> Settings:
+    def need(name: str) -> str:
+        v = os.environ.get(name, "").strip()
+        if not v:
+            print(f"FATAL: {name} is not set", file=sys.stderr)
+            sys.exit(1)
+        return v
+
+    owner = os.environ.get("OWNER_TELEGRAM_USER_ID", "").strip()
+    return Settings(
+        database_url=need("DATABASE_URL"),
+        telegram_bot_token=need("TELEGRAM_BOT_TOKEN"),
+        anthropic_api_key=need("ANTHROPIC_API_KEY"),
+        owner_telegram_user_id=int(owner) if owner.isdigit() else None,
+        poll_interval=int(os.environ.get("POLL_INTERVAL_SECONDS", "5")),
+        reclaim_minutes=int(os.environ.get("PROCESSING_RECLAIM_MINUTES", "5")),
+        max_attempts=int(os.environ.get("MAX_ATTEMPTS", "3")),
+    )

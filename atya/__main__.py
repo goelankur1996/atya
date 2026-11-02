@@ -1,0 +1,66 @@
+"""Entry point: migrate, then run receiver / processor / sender as supervised threads.
+
+Workers share nothing but the database. A crash in one is logged and the
+worker restarts after 5 s; the others keep running.
+"""
+
+from __future__ import annotations
+
+import logging
+import signal
+import sys
+import threading
+import time
+
+import psycopg
+
+from . import processor, receiver, sender
+from .config import load_settings
+from .llm import ClaudeLLM
+from .migrate import migrate
+from .schema import load_schema
+from .store import Store
+from .telegram import Telegram
+
+log = logging.getLogger("main")
+
+
+def _supervise(name: str, target, *args) -> None:
+    while True:
+        try:
+            target(*args)
+            log.warning("[%s] returned unexpectedly; restarting in 5s", name)
+        except Exception:
+            log.exception("[%s] crashed; restarting in 5s", name)
+        time.sleep(5)
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout,
+                        format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    settings = load_settings()
+    with psycopg.connect(settings.database_url) as conn:
+        applied = migrate(conn)
+    log.info("migrations applied: %s", applied or "none")
+    load_schema("default")  # fail fast on a broken schema file
+
+    store = Store(settings.database_url)
+    tg = Telegram(settings.telegram_bot_token)
+    llm = ClaudeLLM(settings.anthropic_api_key)
+
+    for name, target, args in [
+        ("receiver", receiver.run, (store, tg, settings)),
+        ("processor", processor.run, (store, llm, settings)),
+        ("sender", sender.run, (store, tg, settings)),
+    ]:
+        threading.Thread(target=_supervise, args=(name, target, *args), daemon=True, name=name).start()
+
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    stop.wait()
+    log.info("shutting down")
+
+
+if __name__ == "__main__":
+    main()

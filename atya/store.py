@@ -334,6 +334,18 @@ class Tx:
                    target_table="outbox", target_id=outbox_id,
                    summary="delivered" if ok else f"delivery failed: {(error or '')[:200]}")
 
+    # --- service state -------------------------------------------------------
+
+    def get_state(self, key: str) -> Any:
+        row = self._one("SELECT value FROM service_state WHERE key = %s", (key,))
+        return row["value"] if row else None
+
+    def set_state(self, key: str, value: Any) -> None:
+        self.conn.execute(
+            "INSERT INTO service_state (key, value) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+            (key, Jsonb(value)))
+
     # --- tenant deletion -----------------------------------------------------
 
     def delete_tenant(self, tenant_id: uuid.UUID) -> dict[str, int]:

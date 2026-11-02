@@ -1,22 +1,20 @@
-# Convenience wrapper around docker compose for the online deploy.
-# Usage: make up | make down | make logs | make ps | make build | make pull
+# Usage: make up | down | logs | ps | test
+.PHONY: up down logs ps test psql
 
-.PHONY: up down restart build logs ps
-
-up:          ## Build (if needed) and start all three services in the background
+up:
 	docker compose up -d --build
 
-down:        ## Stop and remove the containers (keeps the polling-offset volume)
+down:
 	docker compose down
 
-restart:     ## Restart all services
-	docker compose restart
+logs:
+	docker compose logs -f --tail=100 app
 
-build:       ## Rebuild images without starting
-	docker compose build
-
-logs:        ## Tail logs from all services (Ctrl+C to stop following)
-	docker compose logs -f --tail=100
-
-ps:          ## Show service status
+ps:
 	docker compose ps
+
+psql:
+	docker compose exec db psql -U atya atya
+
+test:
+	TEST_DATABASE_URL=$${TEST_DATABASE_URL:?set TEST_DATABASE_URL} pytest -q
