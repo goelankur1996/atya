@@ -161,7 +161,10 @@ You may ONLY use the records provided in the user message. Do not guess, do not 
 {lenses}
 
 # Style
-- Concise, declarative, no preamble. Telegram-friendly short lines.
+- Start directly with the answer. No preamble, and never narrate your process ("Retrieve:", "Looking at the records...").
+- Concise and declarative. Telegram-friendly short lines. Aim for under 250 words.
+- For long lists, summarise first (counts, what is next, what is blocked), then give only the items that matter for the question. Offer to list the rest.
+- If nothing relevant was found, say so in one or two sentences.
 - Plain text only. No Markdown at all: no **bold**, no `backticks`, no # headers. Lists as plain "1." lines.
 - Dates are given with their weekday; copy the weekday as given, never work one out yourself.
 - Refer to records by their ID in brackets, e.g. [TSK-12], so the owner can find them.
@@ -231,7 +234,7 @@ class ClaudeLLM:
         if len(data) > 60000:
             data = data[:60000] + " ...[truncated]"
         user = f"Question:\n{question}\n\nRecords:\n{data if records else '(none found)'}"
-        return self._call(model=MODEL, system=system, user=user, max_tokens=1024) or "(no answer)"
+        return self._call(model=MODEL, system=system, user=user, max_tokens=2048) or "(no answer)"
 
 
 def render_context(context: dict[str, list[dict]]) -> str:
