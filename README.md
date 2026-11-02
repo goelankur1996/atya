@@ -9,8 +9,8 @@ into typed records, and ask questions answered from your own data.
 - `atya/` — v2, being built milestone by milestone (see the v2 spec).
   - **Milestone 1 (done):** Postgres tables, storage layer, schema file.
   - **Milestone 2 (done, tested live):** receiver / processor / sender on Postgres.
-  - **Milestone 3 (code done, live test pending):** hybrid search: full text + Voyage embeddings.
-  - Next: Notion import, AWS deploy, cutover.
+  - **Milestone 3 (done, tested live):** hybrid search: full text + Voyage embeddings.
+  - **Milestone 4 (in progress):** Notion importer done (trial import pending); AWS deploy and cutover next.
 
 ## Layout (v2)
 
@@ -25,6 +25,7 @@ into typed records, and ask questions answered from your own data.
 | `atya/processor.py` | Claims inbox rows, classifies, then writes records (capture) or answers (question). All writes for one message commit together. |
 | `atya/sender.py` | Outbox -> Telegram. |
 | `atya/llm.py` | The four Claude calls (prompts ported from v1). |
+| `atya/notion_import.py` | One-time, re-runnable import of the v1 Notion OS (inbox, 11 databases, relations, outbox, audit log). Keeps Notion IDs (TSK-41 stays TSK-41). `--dry-run` writes nothing. |
 | `atya/embeddings.py` | Voyage client + background worker that (re-)embeds records whose content changed. Optional: without `VOYAGE_API_KEY`, search is full text only. |
 | `atya/__main__.py` | Runs migrations, then the three workers as supervised threads. |
 | `tests/` | Schema tests (no database needed) and storage tests (need Postgres + pgvector). |

@@ -55,6 +55,15 @@ class Tx:
 
     # --- shared --------------------------------------------------------------
 
+    def claim_seq(self, tenant_id: uuid.UUID, scope: str, value: int) -> int:
+        """Use a specific sequence number (imports keep their old IDs) and make
+        sure later numbers are allocated above it."""
+        self.conn.execute(
+            "INSERT INTO seq_counters (tenant_id, scope, value) VALUES (%s, %s, %s) "
+            "ON CONFLICT (tenant_id, scope) DO UPDATE SET value = GREATEST(seq_counters.value, EXCLUDED.value)",
+            (tenant_id, scope, value))
+        return value
+
     def next_seq(self, tenant_id: uuid.UUID, scope: str) -> int:
         row = self._one(
             "INSERT INTO seq_counters (tenant_id, scope, value) VALUES (%s, %s, 1) "
@@ -102,19 +111,20 @@ class Tx:
     def add_inbox(self, tenant_id: uuid.UUID, *, source: str, raw_content: str,
                   captured_at: dt.datetime | None = None, source_message_id: str | None = None,
                   sender: str | None = None, status: str = "pending",
-                  actor: str = "receiver") -> uuid.UUID | None:
+                  actor: str = "receiver", seq: int | None = None,
+                  external_id: str | None = None) -> uuid.UUID | None:
         """Store a raw capture verbatim. Returns None if it is a duplicate."""
         if source_message_id is not None:
             dup = self._one("SELECT id FROM inbox WHERE tenant_id = %s AND source = %s "
                             "AND source_message_id = %s", (tenant_id, source, source_message_id))
             if dup:
                 return None
-        seq = self.next_seq(tenant_id, "inbox")
+        seq = self.claim_seq(tenant_id, "inbox", seq) if seq else self.next_seq(tenant_id, "inbox")
         row = self._one(
-            "INSERT INTO inbox (tenant_id, seq, source, source_message_id, sender, raw_content, captured_at, status) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            "INSERT INTO inbox (tenant_id, seq, source, source_message_id, sender, raw_content, captured_at, "
+            "status, external_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (tenant_id, seq, source, source_message_id, sender, raw_content,
-             captured_at or dt.datetime.now(dt.timezone.utc), status))
+             captured_at or dt.datetime.now(dt.timezone.utc), status, external_id))
         assert row is not None
         self.audit(tenant_id, actor=actor, action="create", target_table="inbox",
                    target_id=row["id"], summary=f"captured INB-{seq} from {source}")
@@ -125,13 +135,16 @@ class Tx:
 
         SKIP LOCKED lets several workers run without taking the same row.
         """
-        return self._all(
+        rows = self._all(
             "UPDATE inbox SET status = 'processing', attempts = attempts + 1, claimed_at = now() "
             "WHERE id IN ("
             "  SELECT id FROM inbox WHERE status = 'pending' "
             "     OR (status = 'processing' AND claimed_at < now() - make_interval(mins => %s)) "
-            "  ORDER BY captured_at LIMIT %s FOR UPDATE SKIP LOCKED) "
+            "  ORDER BY captured_at, seq LIMIT %s FOR UPDATE SKIP LOCKED) "
             "RETURNING *", (reclaim_after_minutes, limit))
+        # UPDATE ... RETURNING does not keep the subquery's order: messages must
+        # be handled in the order they were sent (a capture before a question about it).
+        return sorted(rows, key=lambda r: (r["captured_at"], r["seq"]))
 
     def finish_inbox(self, inbox_id: uuid.UUID, *, status: str, notes: str | None = None,
                      intent: str | None = None, actor: str = "processor") -> None:
@@ -154,7 +167,9 @@ class Tx:
     def create_record(self, tenant_id: uuid.UUID, schema: Schema, type_key: str, *,
                       title: str, fields: dict[str, Any] | None = None, body: str | None = None,
                       source_inbox_id: uuid.UUID | None = None, actor: str = "processor",
-                      allow_deprecated: bool = False) -> tuple[dict, list[str]]:
+                      allow_deprecated: bool = False, seq: int | None = None,
+                      external_id: str | None = None,
+                      enforce_verbatim: bool = True) -> tuple[dict, list[str]]:
         """Validate and insert one record with its links. Returns (record, dropped)."""
         tdef = schema.types.get(type_key)
         if tdef is None:
@@ -163,7 +178,7 @@ class Tx:
         if not title:
             raise StoreError(f"{tdef.label}: title is required")
 
-        if tdef.verbatim_body and source_inbox_id is not None:
+        if tdef.verbatim_body and source_inbox_id is not None and enforce_verbatim:
             inbox = self._one("SELECT raw_content FROM inbox WHERE id = %s AND tenant_id = %s",
                               (source_inbox_id, tenant_id))
             if inbox is None:
@@ -175,15 +190,17 @@ class Tx:
 
         result = schema.validate(type_key, fields or {}, allow_deprecated=allow_deprecated)
         values = dict(result.fields)
-        for fname, fdef in tdef.fields.items():
-            if fdef.default is not None and fname not in values and fdef.type != "relation":
-                values[fname] = fdef.default
+        if external_id is None:  # defaults are for new captures, not imported history
+            for fname, fdef in tdef.fields.items():
+                if fdef.default is not None and fname not in values and fdef.type != "relation":
+                    values[fname] = fdef.default
 
-        seq = self.next_seq(tenant_id, f"record:{type_key}")
+        scope = f"record:{type_key}"
+        seq = self.claim_seq(tenant_id, scope, seq) if seq else self.next_seq(tenant_id, scope)
         rec = self._one(
-            "INSERT INTO records (tenant_id, type, seq, title, body, fields, source_inbox_id) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *",
-            (tenant_id, type_key, seq, title[:500], body, Jsonb(values), source_inbox_id))
+            "INSERT INTO records (tenant_id, type, seq, title, body, fields, source_inbox_id, external_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+            (tenant_id, type_key, seq, title[:500], body, Jsonb(values), source_inbox_id, external_id))
         assert rec is not None
         dropped = list(result.dropped)
         for fname, ids in result.links.items():
@@ -342,11 +359,12 @@ class Tx:
         return row["id"]
 
     def claim_outbox(self, *, limit: int = 10, reclaim_after_minutes: int = 5) -> list[dict]:
-        return self._all(
+        rows = self._all(
             "UPDATE outbox SET status = 'sending', attempts = attempts + 1 "
             "WHERE id IN ("
             "  SELECT id FROM outbox WHERE (status = 'pending' AND (scheduled_for IS NULL OR scheduled_for <= now())) "
             "  ORDER BY created_at LIMIT %s FOR UPDATE SKIP LOCKED) RETURNING *", (limit,))
+        return sorted(rows, key=lambda r: r["created_at"])
 
     def finish_outbox(self, outbox_id: uuid.UUID, *, ok: bool, error: str | None = None,
                       actor: str = "sender") -> None:
