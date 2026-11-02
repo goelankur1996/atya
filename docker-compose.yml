@@ -1,0 +1,15 @@
+name: personal-assistant-bot
+
+# One image, one process running all three workers (receiver / processor / sender)
+# as threads. They still coordinate only through Notion — this is just packaging.
+
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - receiver-state:/app/state
+
+volumes:
+  receiver-state:

@@ -1,0 +1,17 @@
+# Secrets — never commit. The committed template is .env.example.
+.env
+**/.env
+
+# Python / local cruft
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.pyc
+**/*.tmp
+
+# Local runtime state (lives in the docker volume online)
+capture-receiver/state/
+processing-agent/.state/
+
+# Local runtime state
+state/

@@ -1,0 +1,11 @@
+__pycache__
+*.pyc
+.venv
+.env
+state/
+capture-receiver/
+outbox-sender/
+processing-agent/
+capture-receiver.zip
+.git
+.DS_Store
