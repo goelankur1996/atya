@@ -1,26 +1,27 @@
 {% extends "base.html" %}
 {% block title %}Search · ATYA{% endblock %}
 {% block body %}
-<h1>Search</h1>
+<section>
+  <h1>Search</h1>
+  <form class="searchbox compact" action="{{ url_for('search') }}" method="get" role="search">
+    <label class="sr-only" for="sq">Search everything</label>
+    <input id="sq" type="search" name="q" value="{{ q }}" placeholder="Search everything you've told ATYA" autofocus>
+  </form>
+  {% if q %}<p class="muted small flush">Matches whole words; any one word is enough. To ask a question, message the bot.</p>{% endif %}
+</section>
 {% if q %}
   {% if rows %}
-  <p class="muted">{{ rows|length }} result{{ "" if rows|length == 1 else "s" }} for “{{ q }}”. Matches whole words; any one word is enough.</p>
-  <table>
-    <tbody>
+  <div class="box">
     {% for r in rows %}
-      <tr>
-        <td class="ref"><a href="{{ url_for('record_view', ref_str=ref(r)) }}">{{ ref(r) }}</a></td>
-        <td><a href="{{ url_for('record_view', ref_str=ref(r)) }}">{{ r.title }}</a></td>
-        <td class="muted">{{ schema.types[r.type].label if r.type in schema.types else r.type }}</td>
-        <td class="muted">{{ fmt_time(r.updated_at) }}</td>
-      </tr>
+    <a class="row" href="{{ url_for('record_view', ref_str=ref(r)) }}">
+      <span class="ref">{{ ref(r) }}</span>
+      <span class="grow">{{ r.title }}</span>
+      <span class="side">{{ schema.types[r.type].label if r.type in schema.types else r.type }}</span>
+    </a>
     {% endfor %}
-    </tbody>
-  </table>
+  </div>
   {% else %}
-  <p>Nothing matches “{{ q }}”. Try other words: search matches words, not meaning. To ask a question, message the bot.</p>
+  <p>Nothing matches “{{ q }}”. Try other words.</p>
   {% endif %}
-{% else %}
-<p class="muted">Type in the box at the top.</p>
 {% endif %}
 {% endblock %}

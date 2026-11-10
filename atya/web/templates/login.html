@@ -1,10 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Sign in · ATYA{% endblock %}
-{% block body %}
-<h1>Sign in</h1>
-<p>This link works once. Press continue to sign in on this device for 30 days.</p>
-<form action="{{ url_for('login') }}" method="post">
-  <input type="hidden" name="token" value="{{ token }}">
-  <button type="submit">Continue</button>
-</form>
+{% block page %}
+<div class="center">
+  <h1>Sign in</h1>
+  <p>This link works once. Continue to stay signed in on this device for 30 days.</p>
+  <form action="{{ url_for('login') }}" method="post">
+    <input type="hidden" name="token" value="{{ token }}">
+    <button class="btn primary" type="submit">Continue</button>
+  </form>
+</div>
 {% endblock %}

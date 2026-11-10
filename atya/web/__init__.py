@@ -20,6 +20,7 @@ import json
 import logging
 import re
 import secrets
+import uuid
 import zoneinfo
 from typing import Any
 
@@ -36,6 +37,7 @@ COOKIE = "atya_session"
 SESSION_DAYS = 30
 PAGE_SIZE = 50
 MAX_PAGE = 10_000
+CLOSED_STATUSES = ("done", "dropped", "completed", "archived", "abandoned", "cancelled")
 MESSAGE_KINDS = {"all": "All", "log": "Captures", "query": "Questions", "chat": "Chat",
                  "command": "Commands", "failed": "Failed"}
 # Tables a user can browse raw: (column that holds their id, sort order, what it is).
@@ -90,7 +92,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
     @app.after_request
     def headers(resp: Response) -> Response:
         resp.headers["Content-Security-Policy"] = (
-            "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; "
+            "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; form-action 'self'; "
             "frame-ancestors 'none'; base-uri 'none'")
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["Referrer-Policy"] = "no-referrer"
@@ -111,7 +113,8 @@ def create_app(store: Store, settings: Settings) -> Flask:
 
     @app.context_processor
     def helpers() -> dict:
-        return {"ref": ref, "fmt_time": fmt_time, "fmt_value": fmt_value, "status_label": status_label,
+        return {"ref": ref, "fmt_time": fmt_time, "fmt_clock": fmt_clock, "fmt_day": fmt_day,
+                "fmt_value": fmt_value, "status_label": status_label,
                 "csrf": g.get("csrf", ""),
                 "tenant": g.get("tenant"), "schema": g.get("schema")}
 
@@ -119,14 +122,35 @@ def create_app(store: Store, settings: Settings) -> Flask:
         tdef = g.schema.types.get(rec["type"])
         return f"{tdef.prefix if tdef else rec['type'].upper()}-{rec['seq']}"
 
+    def user_tz() -> dt.tzinfo:
+        try:
+            return zoneinfo.ZoneInfo(g.tenant["timezone"])
+        except Exception:
+            return dt.timezone.utc
+
+    def local_now() -> dt.datetime:
+        return dt.datetime.now(user_tz())
+
     def fmt_time(ts: dt.datetime | None) -> str:
         if ts is None:
             return ""
-        try:
-            tz = zoneinfo.ZoneInfo(g.tenant["timezone"])
-        except Exception:
-            tz = dt.timezone.utc
-        return ts.astimezone(tz).strftime("%a %d %b %Y, %H:%M")
+        local = ts.astimezone(user_tz())
+        today = local_now().date()
+        if local.date() == today:
+            return local.strftime("Today, %H:%M")
+        if local.date() == today - dt.timedelta(days=1):
+            return local.strftime("Yesterday, %H:%M")
+        if local.year == today.year:
+            return local.strftime("%a %-d %b, %H:%M")
+        return local.strftime("%-d %b %Y, %H:%M")
+
+    def fmt_clock(ts: dt.datetime | None) -> str:
+        return ts.astimezone(user_tz()).strftime("%H:%M") if ts else ""
+
+    def fmt_day(ts: dt.datetime | None) -> str:
+        if ts is None:
+            return ""
+        return day_label(ts.astimezone(user_tz()).date().isoformat(), local_now().date(), long=True)
 
     # --- sign in / out -----------------------------------------------------
 
@@ -134,10 +158,31 @@ def create_app(store: Store, settings: Settings) -> Flask:
     def home():
         if g.tenant is None:
             return render_template("signed_out.html")
+        tid = g.tenant["id"]
+        now = local_now()
+        due: list[dict] = []
         with tx() as t:
-            counts = t.count_by_type(g.tenant["id"])
-        types = [(td, counts.get(td.key, 0)) for td in g.schema.types.values()]
-        return render_template("home.html", types=types)
+            counts = t.count_by_type(tid)
+            if "task" in g.schema.types:
+                until = (now.date() + dt.timedelta(days=6)).isoformat()
+                due = t.due_records(tid, "task", until=until, closed=CLOSED_STATUSES)
+                for d in due:
+                    d["linked"] = [l["title"] for l in t.linked_titles(d["id"])][:2]
+            recent = t.messages_page(tid, limit=5)
+            filed: dict = {}
+            for r in t.records_for([m["id"] for m in recent]):
+                filed.setdefault(r["source_inbox_id"], []).append(r)
+        today = now.date().isoformat()
+        for d in due:
+            day = str(d["fields"].get("Due Date", ""))[:10]
+            d["due_label"] = day_label(day, now.date())
+            d["overdue"] = day < today
+            d["today"] = day == today
+        main_types = [(td, counts.get(td.key, 0)) for td in g.schema.types.values() if not td.child]
+        trackers = [(td, counts.get(td.key, 0)) for td in g.schema.types.values() if td.child]
+        return render_template("home.html", main_types=main_types, trackers=trackers, due=due,
+                               recent=recent, filed=filed, greeting=greeting(now),
+                               today_label=now.strftime("%A, %-d %B"))
 
     @app.get("/login/<token>")
     def login_page(token: str):
@@ -245,8 +290,25 @@ def create_app(store: Store, settings: Settings) -> Flask:
                   "replies": replies.get(r["id"], []), "filed": filed.get(r["id"], [])} for r in rows]
         items += [{"kind": "out", "at": o["created_at"], "row": o} for o in extra]
         items.sort(key=lambda i: i["at"], reverse=True)
+        last_day = None
+        for it in items:
+            day = fmt_day(it["at"])
+            it["day"] = day if day != last_day else None
+            last_day = day
         return render_template("messages.html", items=items, kind=kind, kinds=MESSAGE_KINDS, q=q,
                                page=page, more=more)
+
+    @app.post("/messages/<inbox_id>/retry")
+    def message_retry(inbox_id: str):
+        need_login()
+        check_csrf()
+        try:
+            iid = uuid.UUID(inbox_id)
+        except ValueError:
+            abort(404)
+        with tx() as t:
+            t.retry_inbox(g.tenant["id"], iid)
+        return redirect(url_for("messages", kind=request.form.get("kind") or None))
 
     # --- raw database ----------------------------------------------------------
 
@@ -377,6 +439,31 @@ def create_app(store: Store, settings: Settings) -> Flask:
 def clean_text(v: str) -> str:
     """Normalise submitted text: browser newlines, NUL bytes (Postgres rejects them)."""
     return v.replace("\r\n", "\n").replace("\x00", "").strip()
+
+
+def greeting(now: dt.datetime) -> str:
+    h = now.hour
+    return "Good morning" if 5 <= h < 12 else "Good afternoon" if 12 <= h < 17 else "Good evening"
+
+
+def day_label(iso_day: str, today: dt.date, *, long: bool = False) -> str:
+    """'Today', 'Tomorrow', 'Yesterday', a weekday this week, else '11 Nov'."""
+    try:
+        d = dt.date.fromisoformat(iso_day[:10])
+    except ValueError:
+        return iso_day
+    delta = (d - today).days
+    if delta == 0:
+        return "Today"
+    if delta == 1:
+        return "Tomorrow"
+    if delta == -1:
+        return "Yesterday"
+    if long:
+        return d.strftime("%A, %-d %B") if d.year == today.year else d.strftime("%-d %B %Y")
+    if 1 < delta < 7:
+        return d.strftime("%a")
+    return d.strftime("%-d %b") if d.year == today.year else d.strftime("%-d %b %Y")
 
 
 def status_label(m: dict) -> str:

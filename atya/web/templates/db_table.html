@@ -1,12 +1,15 @@
 {% extends "base.html" %}
+{% set active = "db" %}
 {% block title %}{{ name }} · Database · ATYA{% endblock %}
 {% block main_class %} class="wide"{% endblock %}
 {% block body %}
-<p class="crumbs"><a href="{{ url_for('db_tables') }}">Database</a></p>
-<h1 class="ref-title">{{ name }}</h1>
-<p class="muted">{{ desc }} Long values are cut at 600 characters; the export has everything.</p>
+<div class="record-head">
+  <p class="crumbs"><a href="{{ url_for('db_tables') }}">Database</a></p>
+  <h1 class="mono">{{ name }}</h1>
+  <p class="muted small flush">{{ desc }} Long values are cut at 600 characters; the export has everything.</p>
+</div>
 {% if rows %}
-<div class="raw-wrap">
+<div class="table-wrap">
 <table class="raw">
   <thead><tr>{% for c in columns %}<th>{{ c }}</th>{% endfor %}</tr></thead>
   <tbody>

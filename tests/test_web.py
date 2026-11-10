@@ -374,3 +374,61 @@ def test_raw_database_view(app, store, settings, tenant):
     finally:
         with store.tx(system=True) as tx:
             tx.delete_tenant(other["id"])
+
+
+def test_home_due_this_week_and_lately(app, store, settings, tenant):
+    import datetime as dt
+    import zoneinfo
+    today = dt.datetime.now(zoneinfo.ZoneInfo(tenant["timezone"] or "UTC")).date()
+    with store.tx(system=True) as tx:
+        prj, _ = tx.create_record(tenant["id"], S, "project", title="VLA rig")
+        tx.create_record(tenant["id"], S, "task", title="Overdue thing",
+                         fields={"Status": "next", "Due Date": (today - dt.timedelta(days=2)).isoformat()})
+        tx.create_record(tenant["id"], S, "task", title="Due today thing",
+                         fields={"Status": "next", "Due Date": today.isoformat(), "Project": [str(prj["id"])]})
+        tx.create_record(tenant["id"], S, "task", title="Done thing",
+                         fields={"Status": "done", "Due Date": today.isoformat()})
+        tx.create_record(tenant["id"], S, "task", title="Far future thing",
+                         fields={"Status": "next", "Due Date": (today + dt.timedelta(days=30)).isoformat()})
+        msg = tx.add_inbox(tenant["id"], source="telegram", raw_content="remember the rig calibration")
+        tx.finish_inbox(msg, status="processed", intent="log")
+    client, _ = sign_in(app, store, settings, tenant)
+    page = client.get("/").get_data(as_text=True)
+    assert "Due this week" in page
+    assert "Overdue thing" in page and "Overdue · " in page
+    assert "Due today thing" in page and "VLA rig" in page and ">Today<" in page
+    assert "Done thing" not in page and "Far future thing" not in page
+    assert page.index("Overdue thing") < page.index("Due today thing")
+    assert "remember the rig calibration" in page and "Lately" in page
+    assert "Good " in page
+
+
+def test_retry_failed_message(app, store, settings, tenant):
+    with store.tx(system=True) as tx:
+        bad = tx.add_inbox(tenant["id"], source="telegram", raw_content="this one broke")
+        tx.conn.execute("UPDATE inbox SET status = 'failed', attempts = 3 WHERE id = %s", (bad,))
+        ok = tx.add_inbox(tenant["id"], source="telegram", raw_content="this one is fine")
+        tx.finish_inbox(ok, status="processed", intent="log")
+    client, _ = sign_in(app, store, settings, tenant)
+    page = client.get("/messages").get_data(as_text=True)
+    assert "Retry" in page
+    token = csrf(client, "/messages")
+    assert client.post(f"/messages/{bad}/retry", data={"csrf": token}).status_code == 302
+    assert client.post(f"/messages/{ok}/retry", data={"csrf": token}).status_code == 302
+    assert client.post(f"/messages/{bad}/retry", data={}).status_code == 400          # csrf
+    assert client.post("/messages/not-a-uuid/retry", data={"csrf": token}).status_code == 404
+    with store.tx(system=True) as tx:
+        assert tx.inbox_row(bad)["status"] == "pending" and tx.inbox_row(bad)["attempts"] == 0
+        assert tx.inbox_row(ok)["status"] == "processed"
+
+
+def test_pages_use_no_inline_styles_and_fonts_are_self_hosted(app, store, settings, tenant):
+    with store.tx(system=True) as tx:
+        tx.create_record(tenant["id"], S, "task", title="T", fields={"Status": "next"})
+    client, _ = sign_in(app, store, settings, tenant)
+    for path in ("/", "/t/task", "/r/TSK-1", "/messages", "/search?q=t", "/db", "/db/inbox"):
+        r = client.get(path)
+        assert r.status_code == 200, path
+        assert 'style="' not in r.get_data(as_text=True), path       # CSP blocks inline styles
+        assert "font-src 'self'" in r.headers["Content-Security-Policy"]
+    assert client.get("/static/fonts/inter-latin-wght.woff2").status_code == 200

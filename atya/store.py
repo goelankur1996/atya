@@ -337,6 +337,12 @@ class Tx:
         return self._all("SELECT field, to_id FROM record_links WHERE from_id = %s ORDER BY field",
                          (record_id,))
 
+    def linked_titles(self, record_id: uuid.UUID) -> list[dict]:
+        """Records this one links to, with titles (for compact display)."""
+        return self._all("SELECT l.field, r.id, r.type, r.seq, r.title FROM record_links l "
+                         "JOIN records r ON r.id = l.to_id WHERE l.from_id = %s ORDER BY l.field, r.title",
+                         (record_id,))
+
     def links_to(self, record_id: uuid.UUID) -> list[dict]:
         """Records that link to this one (e.g. a project's tasks)."""
         return self._all("SELECT l.field, r.id, r.type, r.seq, r.title FROM record_links l "
@@ -465,6 +471,27 @@ class Tx:
         return self._all(
             f"SELECT * FROM inbox WHERE {' AND '.join(where)} "  # noqa: S608 (fixed fragments)
             "ORDER BY captured_at DESC, seq DESC LIMIT %s OFFSET %s", (*params, limit, offset))
+
+    def retry_inbox(self, tenant_id: uuid.UUID, inbox_id: uuid.UUID) -> bool:
+        """Send a failed message back to the processor. False if it isn't failed."""
+        row = self._one("UPDATE inbox SET status = 'pending', attempts = 0, claimed_at = NULL "
+                        "WHERE id = %s AND tenant_id = %s AND status = 'failed' RETURNING seq",
+                        (inbox_id, tenant_id))
+        if row is None:
+            return False
+        self.audit(tenant_id, actor="web", action="update", target_table="inbox", target_id=inbox_id,
+                   summary=f"INB-{row['seq']} retry requested")
+        return True
+
+    def due_records(self, tenant_id: uuid.UUID, type_key: str, *, until: str,
+                    closed: tuple[str, ...], limit: int = 10) -> list[dict]:
+        """Open records of a type with a Due Date on or before `until` (overdue included)."""
+        return self._all(
+            "SELECT * FROM records WHERE tenant_id = %s AND type = %s "
+            "AND coalesce(fields->>'Due Date', '') <> '' AND left(fields->>'Due Date', 10) <= %s "
+            "AND NOT (coalesce(fields->>'Status', '') = ANY(%s)) "
+            "ORDER BY left(fields->>'Due Date', 10), seq LIMIT %s",
+            (tenant_id, type_key, until, list(closed), limit))
 
     def outbox_for(self, inbox_ids: list[uuid.UUID]) -> list[dict]:
         return self._all("SELECT * FROM outbox WHERE inbox_id = ANY(%s) ORDER BY created_at",
