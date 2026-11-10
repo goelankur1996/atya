@@ -1,5 +1,12 @@
 // Small progressive enhancements. Every page works without this file.
 document.documentElement.classList.add("js");
+// Track the sticky top bar's height, so bars pinned under it sit right below it.
+function setTopHeight() {
+  var top = document.querySelector("header.top");
+  if (top) document.documentElement.style.setProperty("--top-h", top.offsetHeight + "px");
+}
+document.addEventListener("DOMContentLoaded", setTopHeight);
+window.addEventListener("resize", setTopHeight);
 // Selects marked data-autosubmit save as soon as they change.
 document.addEventListener("change", function (e) {
   var el = e.target;
@@ -37,7 +44,7 @@ document.addEventListener("DOMContentLoaded", function () {
   if (first && hint) {
     new IntersectionObserver(function (es) {
       hint.hidden = es[0].isIntersecting;
-    }, { rootMargin: "-140px 0px 0px 0px" }).observe(first);
+    }, { rootMargin: "-220px 0px 0px 0px" }).observe(first);
     hint.addEventListener("click", function () { window.scrollBy({ top: -window.innerHeight * 0.7, behavior: "smooth" }); });
   }
   if (jump) {
