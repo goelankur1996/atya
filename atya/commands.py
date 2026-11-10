@@ -20,6 +20,7 @@ import secrets
 import zoneinfo
 from dataclasses import dataclass
 
+from . import briefs
 from .config import Settings
 from .export import build_export
 from .schema import load_schema
@@ -45,6 +46,7 @@ Ask me questions about it: "what do I owe Rahul?", "what did I decide about pric
 Progress counts too: "sent the deck to Meera" closes that task.
 
 Commands:
+/brief 9am - a morning list of what's due, every day at that time (/brief off to stop)
 /web - a one-time link to browse, search and edit your records in a browser
 /export - download everything you've sent and everything I've filed, as a zip
 /delete - permanently erase your account and data
@@ -145,6 +147,8 @@ def handle(ctx: Ctx, text: str) -> str:
         return "help"
     if cmd == "/invite":
         return invite(ctx)
+    if cmd == "/brief":
+        return brief(ctx, arg)
     if cmd == "/web":
         return web_link(ctx)
     if cmd == "/export":
@@ -197,6 +201,41 @@ def invite(ctx: Ctx) -> str:
         link = "this bot"
     ctx.reply(f"Invite code (one use): {code}\n\nSend them this:\nOpen {link} and send:\n/start {code}")
     return "invite-created"
+
+
+def brief(ctx: Ctx, arg: str) -> str:
+    """/brief [time|off]: the daily morning brief, in the user's own timezone."""
+    assert ctx.tenant is not None
+    tid = ctx.tenant["id"]
+    with ctx.store.tx(tid) as tx:
+        current = tx.tenant(tid)
+    if not arg:
+        if current and current.get("brief_time"):
+            ctx.reply(f"Your morning brief comes at {briefs.fmt_time(current['brief_time'])} "
+                      f"({current['timezone']}). Change it with /brief 8:30, stop it with /brief off.")
+        else:
+            ctx.reply("The morning brief is off. Turn it on with a time, for example /brief 9am: "
+                      "every day at that time I'll send what's overdue, due today and due this week.")
+        return "brief:status"
+    if arg.lower() in ("off", "stop", "no", "none"):
+        with ctx.store.tx(tid) as tx:
+            tx.set_brief(tid, None)
+        ctx.reply("Morning brief turned off. /brief 9am turns it back on.")
+        return "brief:off"
+    at = briefs.parse_time(arg)
+    if at is None:
+        ctx.reply("I didn't understand that time. Try /brief 9am, /brief 8:30 or /brief 19:00.")
+        return "brief:bad-time"
+    now = briefs.local_now(current["timezone"] if current else "UTC")
+    # Already past that time today: start tomorrow rather than sending one right now.
+    skip = now.date() if now.time() >= at else None
+    with ctx.store.tx(tid) as tx:
+        tx.set_brief(tid, at, skip_until=skip)
+    when = "tomorrow" if skip else "today"
+    ctx.reply(f"Done. Every day at {briefs.fmt_time(at)} ({current['timezone'] if current else 'UTC'}) "
+              f"I'll send what's overdue, due today and due this week. First one {when}. "
+              "/brief off stops it.")
+    return "brief:on"
 
 
 def web_link(ctx: Ctx) -> str:

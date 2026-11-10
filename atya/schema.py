@@ -19,6 +19,9 @@ from .config import SCHEMA_DIR
 
 FIELD_TYPES = {"text", "number", "date", "url", "email", "select", "multi_select", "checkbox", "relation"}
 
+# Status values that mean a record is finished (shared by the web view and the brief).
+CLOSED_STATUSES = ("done", "dropped", "completed", "archived", "abandoned", "cancelled")
+
 
 class SchemaError(Exception):
     """The schema file itself is invalid."""

@@ -28,7 +28,7 @@ from flask import Flask, Response, abort, g, redirect, render_template, request,
 
 from ..config import Settings
 from ..export import build_export
-from ..schema import FieldDef, TypeDef, load_schema
+from ..schema import CLOSED_STATUSES, FieldDef, TypeDef, load_schema
 from ..store import Store
 
 log = logging.getLogger("web")
@@ -37,7 +37,6 @@ COOKIE = "atya_session"
 SESSION_DAYS = 30
 PAGE_SIZE = 50
 MAX_PAGE = 10_000
-CLOSED_STATUSES = ("done", "dropped", "completed", "archived", "abandoned", "cancelled")
 MESSAGE_KINDS = {"all": "All", "log": "Captures", "query": "Questions", "chat": "Chat",
                  "command": "Commands", "failed": "Failed"}
 # Tables a user can browse raw: (column that holds their id, sort order, what it is).

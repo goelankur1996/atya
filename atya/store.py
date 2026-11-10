@@ -561,6 +561,42 @@ class Tx:
                    summary=f"INB-{row['seq']} retry requested")
         return True
 
+    # --- morning brief -----------------------------------------------------------
+
+    def set_brief(self, tenant_id: uuid.UUID, at: dt.time | None, *,
+                  skip_until: dt.date | None = None) -> None:
+        """Turn the daily brief on at a local time, or off (None).
+
+        skip_until: mark that local date as already sent (set when the chosen
+        time has already passed today, so the first brief comes tomorrow).
+        """
+        self.conn.execute("UPDATE tenants SET brief_time = %s, brief_last_date = %s WHERE id = %s",
+                          (at, skip_until, tenant_id))
+        self.audit(tenant_id, actor="commands", action="update", target_table="tenants",
+                   target_id=tenant_id,
+                   summary=f"morning brief {'set to ' + at.strftime('%H:%M') if at else 'turned off'}")
+
+    def brief_candidates(self) -> list[dict]:
+        """Active users with a brief time (system scope; the caller checks the clock)."""
+        return self._all("SELECT id, timezone, brief_time, brief_last_date, telegram_chat_id, schema_name "
+                         "FROM tenants WHERE status = 'active' AND brief_time IS NOT NULL "
+                         "AND telegram_chat_id IS NOT NULL")
+
+    def claim_brief(self, tenant_id: uuid.UUID, local_day: dt.date) -> bool:
+        """Mark today's brief as sent; False if it already was (exactly once per day)."""
+        row = self._one("UPDATE tenants SET brief_last_date = %s WHERE id = %s AND brief_time IS NOT NULL "
+                        "AND (brief_last_date IS NULL OR brief_last_date < %s) RETURNING id",
+                        (local_day, tenant_id, local_day))
+        return row is not None
+
+    def count_open(self, tenant_id: uuid.UUID, type_key: str, closed: tuple[str, ...],
+                   status: str | None = None) -> int:
+        row = self._one("SELECT count(*) AS n FROM records WHERE tenant_id = %s AND type = %s "
+                        "AND NOT (coalesce(fields->>'Status', '') = ANY(%s)) "
+                        "AND (%s::text IS NULL OR fields->>'Status' = %s)",
+                        (tenant_id, type_key, list(closed), status, status))
+        return row["n"] if row else 0
+
     def due_records(self, tenant_id: uuid.UUID, type_key: str, *, until: str,
                     closed: tuple[str, ...], limit: int = 10) -> list[dict]:
         """Open records of a type with a Due Date on or before `until` (overdue included)."""
