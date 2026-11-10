@@ -349,7 +349,9 @@ def create_app(store: Store, settings: Settings) -> Flask:
         items = [{"kind": "in", "at": r["captured_at"], "row": r,
                   "replies": replies.get(r["id"], []), "filed": filed.get(r["id"], [])} for r in rows]
         items += [{"kind": "out", "at": o["created_at"], "row": o} for o in extra]
-        items.sort(key=lambda i: i["at"], reverse=True)
+        # Read like a chat: oldest at the top of the page, newest at the bottom.
+        # (Page 1 is still the newest 50; "Older" pages go back in time.)
+        items.sort(key=lambda i: i["at"])
         last_day = None
         for it in items:
             day = fmt_day(it["at"])

@@ -20,3 +20,8 @@ document.addEventListener("change", function (e) {
     el.closest("label").classList.toggle("on", el.checked);
   }
 });
+// Messages open at the newest message (bottom), like a chat.
+document.addEventListener("DOMContentLoaded", function () {
+  var end = document.getElementById("latest");
+  if (end && !location.hash) end.scrollIntoView({ block: "end" });
+});

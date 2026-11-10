@@ -21,6 +21,7 @@
 <p class="muted">No messages{% if q %} containing “{{ q }}”{% endif %}.</p>
 {% endif %}
 
+{% if more %}<p class="pager center-text"><a href="{{ url_for('messages', kind=kind if kind != 'all' else None, q=q or None, page=page+1) }}">Older messages</a></p>{% endif %}
 <ol class="thread">
 {% for it in items %}
   {% if it.day %}<li class="day">{{ it.day }}</li>{% endif %}
@@ -64,8 +65,6 @@
 {% endfor %}
 </ol>
 
-<p class="pager">
-  {% if page > 1 %}<a href="{{ url_for('messages', kind=kind if kind != 'all' else None, q=q or None, page=page-1) }}">Newer</a>{% endif %}
-  {% if more %}<a href="{{ url_for('messages', kind=kind if kind != 'all' else None, q=q or None, page=page+1) }}">Older</a>{% endif %}
-</p>
+{% if page > 1 %}<p class="pager center-text"><a href="{{ url_for('messages', kind=kind if kind != 'all' else None, q=q or None, page=page-1) }}">Newer messages</a></p>{% endif %}
+<div id="latest" class="thread-end" aria-hidden="true"></div>
 {% endblock %}

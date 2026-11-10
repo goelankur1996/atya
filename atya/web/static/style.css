@@ -261,3 +261,5 @@ h1.with-icon { display: flex; align-items: center; gap: 14px; }
 }
 .pills input:checked + span.none { background: var(--chip); border-color: var(--line-2); color: var(--text-3); }
 @media (max-width: 640px) { .top { gap: 10px 14px; } .top nav { gap: 14px; } }
+.center-text { justify-content: center; }
+.thread-end { height: 1px; scroll-margin-bottom: 24px; }

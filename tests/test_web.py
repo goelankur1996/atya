@@ -319,7 +319,8 @@ def test_messages_page_shows_conversation(app, store, settings, tenant):
                  "A call by Friday", "failed", "gave up after 3 attempts", "Old reminder from v1"):
         assert text in page, text
     assert "<script>x</script>" not in page and "&lt;script&gt;" in page
-    assert page.index("broken one") < page.index("what do I owe") < page.index("Met Meera")  # newest first
+    assert page.index("Met Meera") < page.index("what do I owe") < page.index("broken one")  # chat order
+    assert page.index("broken one") < page.index('id="latest"')                              # opens at the end
     failed = client.get("/messages?kind=failed").get_data(as_text=True)
     assert "broken one" in failed and "Met Meera" not in failed and "Old reminder" not in failed
     questions = client.get("/messages?kind=query").get_data(as_text=True)
@@ -347,7 +348,9 @@ def test_messages_pagination_keeps_unlinked_bot_messages_in_order(app, store, se
     p2 = client.get("/messages?page=2").get_data(as_text=True)
     assert "between three and four" not in p1
     assert p2.count("between three and four") == 1
-    assert p2.index("note number 004") < p2.index("between three and four") < p2.index("note number 003")
+    assert p2.index("note number 003") < p2.index("between three and four") < p2.index("note number 004")
+    assert p1.index("Older messages") < p1.index("note number 005") < p1.index("note number 054")
+    assert "Older messages" not in p2 and p2.index("note number 004") < p2.index("Newer messages")
 
 
 def test_raw_database_view(app, store, settings, tenant):
