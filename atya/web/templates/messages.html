@@ -55,6 +55,7 @@
         <span>{{ fmt_clock(m.captured_at) }}</span>
         {% if m.source == "web" %}<span>· from the web</span>{% elif m.source != "telegram" %}<span>· via {{ m.source|replace("_", " ") }}</span>{% endif %}
         {% if failed %}<span class="pill dark">failed</span>{% elif not waiting %}<span>· {{ status_label(m) }}</span>{% endif %}
+        {% for f in it.files %}<a class="reflink file" href="{{ url_for('file_download', attachment_id=f.id) }}">📎 {{ f.filename|truncate(36) }}{% if f.pages %} <span class="muted">· {{ f.pages }} p.</span>{% endif %}</a>{% endfor %}
         {% for r in it.filed %}<a class="reflink" href="{{ url_for('record_view', ref_str=ref(r)) }}"><span class="ref">{{ ref(r) }}</span>{{ r.title|truncate(40) }}</a>{% endfor %}
       </div>
       {% if m.processor_notes and m.intent != "command" and not waiting %}<div class="meta">{{ m.processor_notes }}</div>{% endif %}
@@ -103,11 +104,18 @@
   Latest
 </a>
 
-<form class="composer" action="{{ url_for('message_send') }}" method="post" id="composer">
+<form class="composer" action="{{ url_for('message_send') }}" method="post" id="composer" enctype="multipart/form-data">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   {% if note == "commands" %}<p class="composer-note">Commands like /brief and /export work in Telegram for now. Send them to the bot there.</p>{% endif %}
+  {% if note == "file" %}<p class="composer-note">{{ why or "That file couldn't be saved." }}</p>{% endif %}
+  <p class="composer-file" id="file-chip" hidden><span id="file-name"></span> <button type="button" class="linkbtn" id="file-clear">Remove</button></p>
+  <label class="attachbtn" title="Attach a PDF (up to 20 MB)">
+    <input type="file" name="file" id="file" accept="application/pdf,.pdf">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5l-8.6 8.6a5 5 0 01-7.1-7.1l8.6-8.6a3.3 3.3 0 014.7 4.7l-8.6 8.6a1.7 1.7 0 01-2.4-2.4l7.9-7.9"></path></svg>
+    <span class="sr-only">Attach a PDF</span>
+  </label>
   <label class="sr-only" for="say">Message</label>
-  <textarea id="say" name="text" rows="1" placeholder="Write a note, a task, or a question…" maxlength="8000" required></textarea>
+  <textarea id="say" name="text" rows="1" placeholder="Write a note, a task, or a question…" maxlength="8000"></textarea>
   <button class="sendbtn" type="submit" aria-label="Send">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>
   </button>

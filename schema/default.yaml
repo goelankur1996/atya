@@ -130,6 +130,24 @@ types:
       Estimated Minutes: {type: number}
       Captured At:       {type: date}
 
+  document:
+    label: Documents
+    prefix: DOC
+    description: >-
+      Files the owner sent (PDFs): contracts, invoices, receipts, reports,
+      papers, statements, letters. One record per file. The original file is
+      kept and linked; Summary holds a short AI summary, the body holds key
+      points. Reading material the owner wants to consume goes to library.
+    title_field: Title
+    fields:
+      Kind:      {type: select, options: [contract, invoice, receipt, report, paper, statement, letter, presentation, form, other]}
+      Date:      {type: date}
+      From:      {type: text}
+      Summary:   {type: text}
+      Area:      {type: select, options: {vocab: area}}
+      Project:   {type: relation, to: project}
+      People:    {type: relation, to: person, many: true}
+
   journal:
     label: Journal
     prefix: JNL
@@ -281,6 +299,7 @@ rules:
       - To consume ("want to read X", a recommendation, a link) → library record, Status=queued, with Type, Format, Priority. No journal entry.
       - Consumed ("watched X", "I loved X") → library record with Status=done plus a journal mention of the event. If a matching queued library record exists, flip it to done instead of creating a duplicate.
       - A link with no consume verb → library, Status=queued, Priority=soon.
+    - A file (PDF) attached → exactly one document record for the file: Title (from the document, not the file name, unless nothing better), Kind, Date (the document's own date if it has one), From (sender / issuer / author), Summary (2-3 sentences), body = key points as short lines, Area, Project/People if relevant. Plus tasks only for actions the caption asks for or the document clearly requires of the owner (a payment due, a form to sign, a deadline), with the due date. People named as counterparties → link or create persons as usual.
 
     Child trackers (after the core fan-out): for every child type whose trigger matches, also create a record: link it to the child's parent project, set its date field, fill agent-fillable fields best effort, leave the rest blank, and flag low-confidence writes in processor notes. Multi-match → write to all matching children and note it.
 

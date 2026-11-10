@@ -593,6 +593,58 @@ class Tx:
                    summary=f"INB-{row['seq']} retry requested")
         return True
 
+    # --- attachments (PDFs) ------------------------------------------------------
+
+    def add_attachment(self, tenant_id: uuid.UUID, *, inbox_id: uuid.UUID, filename: str,
+                       mime_type: str, data: bytes, sha256: str, actor: str = "receiver") -> uuid.UUID:
+        row = self._one(
+            "INSERT INTO attachments (tenant_id, inbox_id, filename, mime_type, bytes, data, sha256) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (tenant_id, inbox_id, filename[:255], mime_type, len(data), data, sha256))
+        assert row is not None
+        self.audit(tenant_id, actor=actor, action="create", target_table="attachments", target_id=row["id"],
+                   summary=f"file saved: {filename[:120]} ({len(data) // 1024} KB)")
+        return row["id"]
+
+    def attachments_for(self, inbox_ids: list[uuid.UUID]) -> list[dict]:
+        """Attachment metadata (not the file bytes) for some inbox rows."""
+        return self._all("SELECT id, inbox_id, record_id, filename, mime_type, bytes, pages, extraction, "
+                         "created_at FROM attachments WHERE inbox_id = ANY(%s) ORDER BY created_at", (inbox_ids,))
+
+    def attachments_of_record(self, record_id: uuid.UUID) -> list[dict]:
+        return self._all("SELECT id, inbox_id, filename, mime_type, bytes, pages, extraction, created_at "
+                         "FROM attachments WHERE record_id = %s ORDER BY created_at", (record_id,))
+
+    def attachment(self, tenant_id: uuid.UUID, attachment_id: uuid.UUID, *, with_data: bool = False) -> dict | None:
+        cols = "*" if with_data else ("id, inbox_id, record_id, filename, mime_type, bytes, pages, extraction, "
+                                      "text, created_at")
+        return self._one(f"SELECT {cols} FROM attachments WHERE id = %s AND tenant_id = %s",  # noqa: S608
+                         (attachment_id, tenant_id))
+
+    def save_extraction(self, tenant_id: uuid.UUID, attachment_id: uuid.UUID, *, pages: int,
+                        extraction: str, text: str, chunks: list[tuple[int | None, str]]) -> None:
+        """Store what was read from a file, replacing any earlier attempt."""
+        self.conn.execute("UPDATE attachments SET pages = %s, extraction = %s, text = %s WHERE id = %s",
+                          (pages, extraction, text, attachment_id))
+        self.conn.execute("DELETE FROM attachment_chunks WHERE attachment_id = %s", (attachment_id,))
+        for i, (page, content) in enumerate(chunks, 1):
+            self.conn.execute(
+                "INSERT INTO attachment_chunks (tenant_id, attachment_id, seq, page, content) "
+                "VALUES (%s, %s, %s, %s, %s)", (tenant_id, attachment_id, i, page, content))
+
+    def link_attachment(self, attachment_id: uuid.UUID, record_id: uuid.UUID) -> None:
+        self.conn.execute("UPDATE attachments SET record_id = %s WHERE id = %s", (record_id, attachment_id))
+
+    def search_chunks(self, tenant_id: uuid.UUID, query: str, *, limit: int = 6) -> list[dict]:
+        """Best-matching passages from the user's files (any word matches, ranked)."""
+        return self._all(
+            "SELECT c.content, c.page, a.filename, r.type, r.seq, r.title, ts_rank(c.search, q) AS rank "
+            "FROM attachment_chunks c JOIN attachments a ON a.id = c.attachment_id "
+            "LEFT JOIN records r ON r.id = a.record_id, "
+            "     CAST(nullif(replace(plainto_tsquery('english', %s)::text, '&', '|'), '') AS tsquery) q "
+            "WHERE c.tenant_id = %s AND c.search @@ q ORDER BY rank DESC LIMIT %s",
+            (query, tenant_id, limit))
+
     # --- morning brief -----------------------------------------------------------
 
     def set_brief(self, tenant_id: uuid.UUID, at: dt.time | None, *,

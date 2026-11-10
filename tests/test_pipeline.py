@@ -22,6 +22,7 @@ class FakeTelegram:
         self.queue: list[dict] = []
         self.sent: list[tuple[int, str, int | None]] = []
         self.documents: list[tuple[int, str, bytes]] = []
+        self.files: dict[str, bytes] = {}
         self._next = 1000
 
     def push(self, text: str, user_id: int = OWNER, chat_id: int = 555) -> None:
@@ -50,6 +51,21 @@ class FakeTelegram:
     def bot_username(self):
         return "atya_test_bot"
 
+    def download_file(self, file_id, max_bytes):
+        return self.files[file_id]
+
+    def push_document(self, data, name="doc.pdf", caption=None, user_id=OWNER, chat_id=555,
+                      mime="application/pdf"):
+        self._next += 1
+        fid = f"file{self._next}"
+        self.files[fid] = data
+        msg = {"message_id": self._next, "date": int(time.time()),
+               "from": {"id": user_id, "first_name": "Ankur"}, "chat": {"id": chat_id},
+               "document": {"file_id": fid, "file_name": name, "mime_type": mime, "file_size": len(data)}}
+        if caption:
+            msg["caption"] = caption
+        self.queue.append({"update_id": self._next, "message": msg})
+
     def push_tap(self, data, user_id=OWNER, chat_id=555):
         self._next += 1
         self.queue.append({"update_id": self._next, "callback_query": {
@@ -65,6 +81,8 @@ class FakeLLM:
         self.seen_records: list[dict] = []
         self.broader: dict[str, str] = {}
         self.found: dict[str, bool] = {}
+        self.read_calls: list[dict] = []
+        self.reading: dict | None = None
         self.broaden_calls: list[tuple] = []
         self.fail_times = 0
 
@@ -88,6 +106,12 @@ class FakeLLM:
     def broaden_search(self, *, question, tried, found):
         self.broaden_calls.append((question, tried, found))
         return self.broader.get(question, "")
+
+    def read_document(self, *, filename, caption, text=None, pdf=None):
+        self.read_calls.append({"filename": filename, "caption": caption, "text": text, "pdf": pdf is not None})
+        return dict(self.reading or {"title": "Services agreement", "kind": "contract", "date": "2026-11-01",
+                                     "from": "VVPM", "summary": "A services agreement with VVPM.",
+                                     "key_points": ["Payment due 30 Nov"], "actions": [], "text": ""})
 
     def answer(self, *, schema, question, records, now):
         self.seen_records = records

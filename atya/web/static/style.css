@@ -325,3 +325,14 @@ main.chat { padding-bottom: 0; }
   .jump-latest { bottom: 86px; right: 18px; }
 }
 .thread-end { scroll-margin-bottom: 110px; }
+
+/* attachments */
+.attachbtn { position: relative; width: 46px; height: 46px; flex: none; border-radius: 23px; border: 1px solid var(--line-2); background: #fff; color: var(--text-3); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.attachbtn:hover { color: var(--text); border-color: #c9cdd3; }
+.attachbtn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
+.attachbtn:focus-within { outline: 2px solid var(--blue); outline-offset: 2px; }
+.composer-file { flex-basis: 100%; margin: 0; font-size: 13px; color: var(--text-2); display: flex; gap: 10px; align-items: center; }
+.composer-file[hidden] { display: none; }
+.composer-file span::before { content: "📎 "; }
+.reflink.file { background: #fff; }
+.me .meta .reflink.file { border-color: #c8daf3; }

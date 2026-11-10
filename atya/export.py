@@ -6,6 +6,7 @@ Contents:
   records/<type>.csv  one CSV per record type (fields as columns, links as refs)
   markdown/<Type>/... one Markdown file per record, links as [[REF Title]]
   audit_log.jsonl     every change the system made, oldest first
+  files/              the PDFs you sent, plus the text read from each (.txt)
   schema.yaml         what each type and field means
 Embeddings are not included: they are derived and can be recomputed.
 """
@@ -31,6 +32,8 @@ records/*.csv       One spreadsheet per record type (tasks, people, journal, ...
 markdown/           One Markdown file per record. Opens in Obsidian or any editor;
                     links between records are written as [[REF Title]].
 audit_log.jsonl     Every change the system made to your data, oldest first.
+files/              The PDFs you sent (named after the message they came with),
+                    each with a .txt of the text that was read from it.
 schema.yaml         What each record type and field means.
 
 IDs like TSK-12 are the same IDs the bot uses in its answers.
@@ -112,6 +115,17 @@ def build_export(tx: Tx, schema: Schema, tenant: dict) -> tuple[str, bytes]:
                         "FROM audit_log WHERE tenant_id = %s ORDER BY at, id", (tid,))
         z.writestr("audit_log.jsonl", "".join(
             json.dumps(a, default=_json_default, ensure_ascii=False) + "\n" for a in audit))
+
+        # Files, one at a time (each can be up to 20 MB).
+        for a in tx._all("SELECT a.id, a.filename, i.seq FROM attachments a "
+                         "LEFT JOIN inbox i ON i.id = a.inbox_id WHERE a.tenant_id = %s "
+                         "ORDER BY a.created_at", (tid,)):
+            row = tx._one("SELECT data, text FROM attachments WHERE id = %s", (a["id"],))
+            stem = f"INB-{a['seq']} {_safe(a['filename'] or 'file.pdf')}"
+            if row and row["data"] is not None:
+                z.writestr(f"files/{stem}", bytes(row["data"]))
+            if row and row["text"]:
+                z.writestr(f"files/{stem}.txt", row["text"])
 
         z.writestr("schema.yaml", (SCHEMA_DIR / f"{tenant['schema_name']}.yaml").read_text())
 

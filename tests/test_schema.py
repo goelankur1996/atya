@@ -13,7 +13,7 @@ def test_all_notion_databases_present():
     labels = {t.label for t in S.types.values()}
     assert {"Tasks", "Projects", "Thoughts", "Decisions", "People", "Library", "Journal",
             "Fitness — Training Log", "Robotics Learning — Milestones", "Meals Log",
-            "VLA Milestones"} == labels
+            "VLA Milestones", "Documents"} == labels
 
 
 def test_vocabularies_match_system_schema_page():

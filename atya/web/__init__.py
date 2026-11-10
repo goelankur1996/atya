@@ -27,6 +27,7 @@ from typing import Any
 from flask import Flask, Response, abort, g, redirect, render_template, request, url_for
 
 from ..config import Settings
+from .. import documents
 from ..export import build_export
 from ..schema import CLOSED_STATUSES, FieldDef, TypeDef, load_schema
 from ..store import Store
@@ -52,9 +53,17 @@ RAW_TABLES = {
     "seq_counters": ("tenant_id", "scope", "Counters behind IDs like TSK-12."),
     "sessions": ("tenant_id", "created_at DESC", "Web sign-ins (only a hash of each is stored)."),
     "login_tokens": ("tenant_id", "expires_at DESC", "Sign-in links sent by /web (hashes only)."),
-    "attachments": ("tenant_id", "created_at DESC", "Files you sent (not stored yet)."),
+    "attachments": ("tenant_id", "created_at DESC", "Files you sent (PDFs), with the text read from them."),
+    "attachment_chunks": ("tenant_id", "attachment_id, seq", "Your files' text in searchable passages."),
 }
 RAW_CELL_CHARS = 600
+# Columns to show instead of SELECT * (never load file bytes or vectors in bulk).
+RAW_SELECT = {
+    "attachments": ("id, tenant_id, inbox_id, record_id, filename, mime_type, bytes, pages, extraction, "
+                    "sha256, left(text, 700) AS text, created_at"),
+    "records": "id, tenant_id, type, seq, title, body, fields, user_edited_fields, source_inbox_id, "
+               "external_id, created_at, updated_at, embedded_at, (embedding IS NOT NULL) AS has_embedding",
+}
 LIST_COLUMNS = ("Status", "Due Date", "Date", "Priority", "Area", "Relationship", "Type", "Mood")
 
 
@@ -64,7 +73,7 @@ def _hash(token: str) -> str:
 
 def create_app(store: Store, settings: Settings) -> Flask:
     app = Flask(__name__)
-    app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
+    app.config["MAX_CONTENT_LENGTH"] = documents.MAX_BYTES + 1024 * 1024   # a PDF plus the form
     secure_cookie = bool(settings.web_base_url and settings.web_base_url.startswith("https://"))
 
     # --- session handling --------------------------------------------------
@@ -339,6 +348,9 @@ def create_app(store: Store, settings: Settings) -> Flask:
             filed: dict = {}
             for r in t.records_for(ids):
                 filed.setdefault(r["source_inbox_id"], []).append(r)
+            files: dict = {}
+            for a in t.attachments_for(ids):
+                files.setdefault(a["inbox_id"], []).append(a)
             # Bot messages with no message of yours behind them (e.g. imported
             # from v1), placed in time order on the unfiltered view.
             extra: list[dict] = []
@@ -346,7 +358,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
                 newest = prev_row["captured_at"] if prev_row else None
                 oldest = rows[-1]["captured_at"] if rows and more else None
                 extra = t.unlinked_outbox(tid, after=oldest, before=newest)
-        items = [{"kind": "in", "at": r["captured_at"], "row": r,
+        items = [{"kind": "in", "at": r["captured_at"], "row": r, "files": files.get(r["id"], []),
                   "replies": replies.get(r["id"], []), "filed": filed.get(r["id"], [])} for r in rows]
         items += [{"kind": "out", "at": o["created_at"], "row": o} for o in extra]
         # Read like a chat: oldest at the top of the page, newest at the bottom.
@@ -361,7 +373,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
                        if it["kind"] == "in" and it["row"]["status"] in ("pending", "processing")]
         return render_template("messages.html", items=items, kind=kind, kinds=MESSAGE_KINDS, q=q,
                                page=page, more=more, pending_ids=pending_ids,
-                               note=request.args.get("note", ""))
+                               note=request.args.get("note", ""), why=request.args.get("why", "")[:200])
 
     @app.post("/messages/send")
     def message_send():
@@ -369,14 +381,43 @@ def create_app(store: Store, settings: Settings) -> Flask:
         need_login()
         check_csrf()
         text = request.form.get("text", "").replace("\r\n", "\n").replace("\x00", "").strip()[:8000]
-        if not text:
+        upload = request.files.get("file")
+        data = upload.read(documents.MAX_BYTES + 1) if upload and upload.filename else b""
+        name = clean_text(upload.filename)[:200] if data else ""
+        if data:
+            try:
+                documents.check(data, name, upload.mimetype or "")
+            except documents.DocumentError as e:
+                return redirect(url_for("messages", note="file", why=str(e)) + "#latest")
+        if not text and not data:
             return redirect(url_for("messages") + "#latest")
-        if text.startswith("/"):
+        if text.startswith("/") and not data:
             return redirect(url_for("messages", note="commands") + "#latest")
         with tx() as t:
-            t.add_inbox(g.tenant["id"], source="web", raw_content=text,
-                        source_message_id=f"web:{uuid.uuid4()}", sender="web", actor="web")
+            iid = t.add_inbox(g.tenant["id"], source="web", raw_content=text or f"[PDF] {name}",
+                              source_message_id=f"web:{uuid.uuid4()}", sender="web", actor="web")
+            if data:
+                t.add_attachment(g.tenant["id"], inbox_id=iid, filename=name or "file.pdf",
+                                 mime_type="application/pdf", data=data, sha256=documents.sha256(data),
+                                 actor="web")
         return redirect(url_for("messages") + "#latest")
+
+    @app.get("/files/<attachment_id>")
+    def file_download(attachment_id: str):
+        """Download one of the user's files (their own only: row-level security)."""
+        need_login()
+        try:
+            aid = uuid.UUID(attachment_id)
+        except ValueError:
+            abort(404)
+        with tx() as t:
+            a = t.attachment(g.tenant["id"], aid, with_data=True)
+        if a is None or a["data"] is None:
+            abort(404)
+        safe = re.sub(r'[^A-Za-z0-9._ -]', "_", a["filename"] or "file.pdf")[:120]
+        resp = Response(bytes(a["data"]), mimetype=a["mime_type"] or "application/pdf")
+        resp.headers["Content-Disposition"] = f'attachment; filename="{safe}"'
+        return resp
 
     @app.get("/messages/pending")
     def messages_pending():
@@ -437,8 +478,9 @@ def create_app(store: Store, settings: Settings) -> Flask:
         col, order, desc = RAW_TABLES[name]
         page = min(MAX_PAGE, max(1, request.args.get("page", 1, type=int)))
         with tx() as t:
+            select = RAW_SELECT.get(name, "*")
             cur = t.conn.execute(
-                f"SELECT * FROM {name} WHERE {col} = %s ORDER BY {order} LIMIT %s OFFSET %s",  # noqa: S608
+                f"SELECT {select} FROM {name} WHERE {col} = %s ORDER BY {order} LIMIT %s OFFSET %s",  # noqa: S608
                 (g.tenant["id"], PAGE_SIZE + 1, (page - 1) * PAGE_SIZE))
             rows = cur.fetchall()
             columns = [d.name for d in cur.description or []]
@@ -470,6 +512,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
             pickers = {name: t.titles_of_type(g.tenant["id"], f.to)
                        for name, f in tdef.relation_fields.items() if f.to}
             backlinks = t.links_to(rec["id"])
+            files = t.attachments_of_record(rec["id"])
             source = t.inbox_row(rec["source_inbox_id"]) if rec["source_inbox_id"] else None
             history = t.audit_for(g.tenant["id"], rec["id"])
         fields = [(f, form_value(f, rec["fields"].get(f.name), links.get(f.name, set())))
@@ -480,7 +523,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
                 **{f.name: sorted(v) if isinstance(v, set) else v for f, v in fields}}
         return render_template("record.html", tdef=tdef, rec=rec, fields=fields, pickers=pickers,
                                orig_json=json.dumps(orig, ensure_ascii=False),
-                               backlinks=backlinks, source=source, history=history,
+                               backlinks=backlinks, source=source, history=history, files=files,
                                problems=problems or [], saved=request.args.get("saved") == "1"), status
 
     @app.get("/r/<ref_str>")
@@ -662,8 +705,10 @@ def raw_cell(column: str, value: Any) -> dict:
         return {"text": "null", "null": True}
     if column == "embedding":
         return {"text": "[vector, 1024 numbers]"}
-    if column == "search_text":
+    if column in ("search_text", "search"):
         return {"text": "[search index]"}
+    if column == "data" and isinstance(value, (bytes, memoryview)):
+        return {"text": f"[file, {len(value) // 1024} KB]"}
     if column.endswith("_hash"):
         return {"text": str(value)[:10] + "…"}
     if isinstance(value, (dict, list)):

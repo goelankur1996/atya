@@ -62,7 +62,8 @@ document.addEventListener("DOMContentLoaded", function () {
   box.addEventListener("keydown", function (e) {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
-      if (box.value.trim()) form.requestSubmit();
+      var file = document.getElementById("file");
+      if (box.value.trim() || (file && file.files && file.files.length)) form.requestSubmit();
     }
   });
   form.addEventListener("submit", function () { btn.disabled = true; });
@@ -81,4 +82,19 @@ document.addEventListener("DOMContentLoaded", function () {
         if (d && d.pending.length < ids.split(",").length) { clearInterval(timer); location.reload(); }
       }).catch(function () {});
   }, 2000);
+});
+// Attachment chip in the composer.
+document.addEventListener("DOMContentLoaded", function () {
+  var input = document.getElementById("file");
+  if (!input) return;
+  var chip = document.getElementById("file-chip"), name = document.getElementById("file-name");
+  input.addEventListener("change", function () {
+    var f = input.files && input.files[0];
+    if (f && f.size > 20 * 1024 * 1024) { alert("That file is over 20 MB."); input.value = ""; f = null; }
+    chip.hidden = !f;
+    name.textContent = f ? f.name : "";
+  });
+  document.getElementById("file-clear").addEventListener("click", function () {
+    input.value = ""; chip.hidden = true; name.textContent = "";
+  });
 });

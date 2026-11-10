@@ -366,7 +366,7 @@ def test_raw_database_view(app, store, settings, tenant):
         inbox = client.get("/db/inbox").get_data(as_text=True)
         assert "my raw message" in inbox and "other user" not in inbox and "chars)" in inbox
         recs = client.get("/db/records").get_data(as_text=True)
-        assert "Raw task" in recs and "[search index]" in recs and "&#34;Status&#34;" in recs
+        assert "Raw task" in recs and "has_embedding" in recs and "&#34;Status&#34;" in recs
         sess = client.get("/db/sessions").get_data(as_text=True)
         assert "…" in sess
         for name in ("tenants", "outbox", "record_links", "audit_log", "invites", "seq_counters",
@@ -601,3 +601,55 @@ def test_chat_send_edge_cases(app, store, settings, tenant):
         rows = tx._all("SELECT raw_content FROM inbox WHERE tenant_id = %s", (tenant["id"],))
     assert [r["raw_content"] for r in rows] == ["line one\nline two"]
     assert client.get("/messages/pending?ids=nope,").get_json() == {"pending": []}
+
+
+def test_pdf_upload_download_record_and_export(app, store, settings, tenant):
+    from atya import processor
+    from tests.pdfs import text_pdf
+    from tests.test_pipeline import FakeLLM
+    pdf = text_pdf(["Invoice 2213 from AWS for October usage, total 312.40 USD, due 15 November 2026."])
+    client, _ = sign_in(app, store, settings, tenant)
+    token = csrf(client, "/messages")
+    assert 'enctype="multipart/form-data"' in client.get("/messages").get_data(as_text=True)
+    r = client.post("/messages/send", data={"csrf": token, "text": "",
+                                            "file": (io.BytesIO(pdf), "aws-oct.pdf", "application/pdf")},
+                    content_type="multipart/form-data")
+    assert r.status_code == 302
+    bad = client.post("/messages/send", data={"csrf": token, "text": "",
+                                              "file": (io.BytesIO(b"not a pdf"), "x.txt", "text/plain")},
+                      content_type="multipart/form-data")
+    assert "note=file" in bad.headers["Location"]
+    llm = FakeLLM()
+    llm.plan_fanout = lambda **kw: {"writes": [{"type": "document", "title": "AWS invoice October"}]}
+    while processor.process_once(store, llm, settings):
+        pass
+    with store.tx(system=True) as tx:
+        att = tx._one("SELECT id, record_id FROM attachments WHERE tenant_id = %s", (tenant["id"],))
+        doc = tx.record(tenant["id"], att["record_id"])
+        reply = tx._one("SELECT body, channel FROM outbox WHERE tenant_id = %s ORDER BY created_at DESC LIMIT 1",
+                        (tenant["id"],))
+    assert reply["channel"] == "web" and reply["body"].startswith("Saved DOC-1")
+    msgs = client.get("/messages").get_data(as_text=True)
+    assert "aws-oct.pdf" in msgs and f"/files/{att['id']}" in msgs and "[PDF] aws-oct.pdf" in msgs
+    page = client.get("/r/DOC-1").get_data(as_text=True)
+    assert "aws-oct.pdf" in page and "1 page" in page and "Download" in page
+    dl = client.get(f"/files/{att['id']}")
+    assert dl.status_code == 200 and dl.data == pdf and "attachment" in dl.headers["Content-Disposition"]
+    assert client.get("/files/not-a-uuid").status_code == 404
+    raw = client.get("/db/attachments").get_data(as_text=True)
+    assert "aws-oct.pdf" in raw and "312.40" in raw
+    assert client.get("/db/attachment_chunks").status_code == 200
+    z = zipfile.ZipFile(io.BytesIO(client.post("/export", data={"csrf": token}).data))
+    names = z.namelist()
+    assert any(n.startswith("files/INB-") and n.endswith("aws-oct.pdf") for n in names)
+    assert any(n.endswith("aws-oct.pdf.txt") for n in names)
+
+    # Someone else can't download it.
+    with store.tx(system=True) as tx:
+        other = tx.create_tenant(telegram_user_id=999_444_555, telegram_chat_id=9, display_name="other")
+    try:
+        other_client, _ = sign_in(app, store, settings, other)
+        assert other_client.get(f"/files/{att['id']}").status_code == 404
+    finally:
+        with store.tx(system=True) as tx:
+            tx.delete_tenant(other["id"])

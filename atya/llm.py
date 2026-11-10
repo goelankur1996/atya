@@ -6,6 +6,7 @@ replaced. The `LLM` protocol lets tests swap in a fake.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from typing import Any, Protocol
@@ -32,6 +33,8 @@ class LLM(Protocol):
     def plan_query(self, *, schema: Schema, question: str, now: str) -> dict: ...
     def broaden_search(self, *, question: str, tried: str, found: list[str]) -> str: ...
     def answer(self, *, schema: Schema, question: str, records: list[dict], now: str) -> dict: ...
+    def read_document(self, *, filename: str, caption: str, text: str | None = None,
+                      pdf: bytes | None = None) -> dict: ...
 
 
 # --- prompts -------------------------------------------------------------------
@@ -167,6 +170,25 @@ Do not repeat words already tried. If there is nothing sensible to add, return a
 Output exactly one JSON object, no prose, no markdown fences:
 {"search": "<0 to 10 words, space-separated>"}"""
 
+READ_DOCUMENT_SYSTEM = """You read a document (a PDF) that the owner of a personal memory system just saved, so it can be filed and found later.
+
+Write for the owner: plain, factual, no filler. Use only what the document says; if something isn't stated (a date, an author), leave it empty rather than guessing.
+
+Output exactly one JSON object, no prose, no markdown fences:
+{
+  "title": "<what the document is, e.g. 'VVPM services agreement' or 'Invoice 2213 from AWS'; not the file name unless nothing better>",
+  "kind": "<one of: contract, invoice, receipt, report, paper, statement, letter, presentation, form, other>",
+  "date": "<the document's own date as YYYY-MM-DD, or empty>",
+  "from": "<who issued, sent or wrote it, or empty>",
+  "summary": "<2-3 sentences: what it is and what matters in it>",
+  "key_points": ["<up to 8 short lines: amounts, parties, terms, deadlines, findings>"],
+  "actions": ["<things the document asks of the owner, with dates: 'Pay $1,240 by 2026-11-30'; empty if none>"]
+}"""
+
+READ_SCAN_EXTRA = """
+
+This PDF is a scan (no text layer). After the JSON object, write a line containing only ===== and then the document's readable text, page by page, each page starting with [page N]. Transcribe faithfully; skip decorative elements; use [illegible] where needed."""
+
 ANSWER_SYSTEM = """You answer questions from the owner of a personal memory system.
 
 You may ONLY use the records provided in the user message. Do not guess, do not invent figures, do not refer to data you weren't shown.
@@ -189,6 +211,7 @@ You may ONLY use the records provided in the user message. Do not guess, do not 
 - Plain text only. No Markdown at all: no **bold**, no `backticks`, no # headers. Lists as plain "1." lines.
 - Dates are given with their weekday; copy the weekday as given, never work one out yourself.
 - Refer to records by their ID in brackets, e.g. [TSK-12], so the owner can find them.
+- Some items are excerpts from the owner's own files (PDFs), marked "document_excerpt". Use them for facts in those documents and cite the document and page, e.g. "[DOC-3] p.4". Only use an excerpt if it actually answers the question.
 - Now is {now}. Use it for anything relative ("last week", "overdue", "this Friday").
 - If the records are empty or insufficient, say so plainly and say what would need to be captured.
 
@@ -272,6 +295,47 @@ class ClaudeLLM:
         user = f"Question:\n{question}\n\nRecords:\n{data if records else '(none found)'}"
         raw = self._call(model=MODEL, system=system, user=user, max_tokens=2048)
         return parse_answer(raw, had_records=bool(records))
+
+    def read_document(self, *, filename: str, caption: str, text: str | None = None,
+                      pdf: bytes | None = None) -> dict:
+        """Summarise a PDF. With text: read the extracted text (cheap). With pdf
+        bytes (a scan): the model reads the pages and also transcribes them."""
+        intro = f"File name: {filename}\nThe owner's message with it: {caption or '(none)'}\n"
+        if text is not None:
+            content: Any = intro + "\nDocument text:\n" + text[:120_000]
+            system, max_tokens = READ_DOCUMENT_SYSTEM, 1500
+        else:
+            assert pdf is not None
+            content = [
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                                "data": base64.b64encode(pdf).decode()}},
+                {"type": "text", "text": intro},
+            ]
+            system, max_tokens = READ_DOCUMENT_SYSTEM + READ_SCAN_EXTRA, 16000
+        resp = self.client.messages.create(
+            model=CLASSIFIER_MODEL, max_tokens=max_tokens, system=system,
+            messages=[{"role": "user", "content": content}])
+        raw = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+        return parse_reading(raw)
+
+
+def parse_reading(raw: str) -> dict:
+    """The read_document JSON, plus the transcription after '=====' for scans."""
+    head, _, tail = (raw or "").partition("\n=====")
+    obj = parse_json(head)
+    out = {
+        "title": str(obj.get("title") or "").strip()[:200],
+        "kind": str(obj.get("kind") or "").strip().lower(),
+        "date": str(obj.get("date") or "").strip()[:10],
+        "from": str(obj.get("from") or "").strip()[:200],
+        "summary": str(obj.get("summary") or "").strip()[:1500],
+        "key_points": [str(k).strip() for k in (obj.get("key_points") or []) if str(k).strip()][:8],
+        "actions": [str(a).strip() for a in (obj.get("actions") or []) if str(a).strip()][:8],
+        "text": tail.strip(" \n=") if tail else "",
+    }
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", out["date"]):
+        out["date"] = ""
+    return out
 
 
 def parse_answer(raw: str, *, had_records: bool) -> dict:

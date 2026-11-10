@@ -44,6 +44,22 @@
 </div>
 </form>
 
+{% if files %}
+<section>
+  <h2>File</h2>
+  <div class="box">
+  {% for f in files %}
+    <a class="row" href="{{ url_for('file_download', attachment_id=f.id) }}">
+      <span class="badge"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z"></path><path d="M14 3v5h5"></path></svg></span>
+      <span class="grow">{{ f.filename }}</span>
+      <span class="side">{% if f.pages %}{{ f.pages }} page{{ "" if f.pages == 1 else "s" }} · {% endif %}{{ (f.bytes // 1024)|int }} KB{% if f.extraction == "vision" %} · read from a scan{% elif f.extraction == "none" %} · not read{% endif %}</span>
+      <span class="pill blue">Download</span>
+    </a>
+  {% endfor %}
+  </div>
+</section>
+{% endif %}
+
 {% if rec.body and tdef.verbatim_body %}
 <section>
   <h2>Your words</h2>

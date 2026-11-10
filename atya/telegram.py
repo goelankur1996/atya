@@ -24,11 +24,13 @@ class TelegramAPI(Protocol):
     def send_document(self, chat_id: int, filename: str, data: bytes, caption: str = "") -> dict: ...
     def answer_callback(self, callback_id: str, text: str = "") -> None: ...
     def bot_username(self) -> str: ...
+    def download_file(self, file_id: str, max_bytes: int) -> bytes: ...
 
 
 class Telegram:
     def __init__(self, token: str) -> None:
         self.base = f"https://api.telegram.org/bot{token}"
+        self.files_base = f"https://api.telegram.org/file/bot{token}"
         self.http = requests.Session()
 
     def _call(self, method: str, payload: dict, timeout: int) -> dict | list:
@@ -84,6 +86,24 @@ class Telegram:
         if not body.get("ok"):
             raise TelegramError(f"sendDocument: {body.get('error_code')} {body.get('description')}")
         return body["result"]
+
+    def download_file(self, file_id: str, max_bytes: int) -> bytes:
+        """Fetch a file a user sent (getFile, then download). Bots can fetch up to 20 MB."""
+        info = self._call("getFile", {"file_id": file_id}, timeout=30)
+        assert isinstance(info, dict)
+        if not info.get("file_path"):
+            raise TelegramError("getFile: no file_path (file too big for bots?)")
+        try:
+            r = self.http.get(f"{self.files_base}/{info['file_path']}", timeout=120, stream=True)
+            r.raise_for_status()
+            data = bytearray()
+            for part in r.iter_content(64 * 1024):
+                data += part
+                if len(data) > max_bytes:
+                    raise TelegramError("file larger than the limit")
+            return bytes(data)
+        except requests.RequestException as e:
+            raise TelegramError(f"download: {e}") from e
 
     def answer_callback(self, callback_id: str, text: str = "") -> None:
         self._call("answerCallbackQuery", {"callback_query_id": callback_id, "text": text}, timeout=15)

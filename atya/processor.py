@@ -17,6 +17,7 @@ import uuid
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from . import documents
 from .config import Settings
 from .embeddings import Embedder, EmbeddingError
 from .llm import LLM
@@ -362,6 +363,122 @@ def broaden_if_thin(store: Store, llm: LLM, schema: Schema, tenant_id: uuid.UUID
     return {**plan, "broader": broader} if broader else plan
 
 
+# --- files (PDFs) ----------------------------------------------------------------
+
+MAX_EXCERPTS = 6
+
+
+def document_excerpts(tx: Tx, schema: Schema, tenant_id: uuid.UUID, plan: dict, question: str) -> list[dict]:
+    """Passages from the user's PDFs that match the question's words."""
+    words = " ".join(w for w in (plan.get("search"), plan.get("broader")) if w) or question
+    out = []
+    for c in tx.search_chunks(tenant_id, words, limit=MAX_EXCERPTS):
+        tdef = schema.types.get(c["type"] or "")
+        ref = f"{tdef.prefix}-{c['seq']}" if tdef and c["seq"] else None
+        out.append({"document_excerpt": True, "document": f"[{ref}] {c['title']}" if ref else c["filename"],
+                    "file": c["filename"], "page": c["page"], "text": c["content"]})
+    return out
+
+
+def _digest_text(reading: dict, filename: str, pages: int) -> str:
+    lines = [f"[Attached file: {filename}, {pages} page{'s' if pages != 1 else ''}]"]
+    for label, key in (("Title", "title"), ("Kind", "kind"), ("Date", "date"), ("From", "from"),
+                       ("Summary", "summary")):
+        if reading.get(key):
+            lines.append(f"{label}: {reading[key]}")
+    if reading.get("key_points"):
+        lines.append("Key points:\n" + "\n".join(f"- {k}" for k in reading["key_points"]))
+    if reading.get("actions"):
+        lines.append("Asks of the owner:\n" + "\n".join(f"- {a}" for a in reading["actions"]))
+    return "\n".join(lines)
+
+
+def read_file(store: Store, llm: LLM, row: dict, att: dict) -> tuple[dict | None, int, str]:
+    """Extract and read one PDF. Returns (reading or None, pages, problem message)."""
+    tid = row["tenant_id"]
+    with store.tx(tid) as tx:
+        data = tx.attachment(tid, att["id"], with_data=True)["data"]
+    data = bytes(data)
+    caption = "" if row["raw_content"].startswith("[PDF] ") else row["raw_content"]
+    try:
+        pages = documents.extract(data)
+    except documents.DocumentError as e:
+        with store.tx(tid) as tx:
+            tx.save_extraction(tid, att["id"], pages=0, extraction="none", text="", chunks=[])
+        return None, 0, str(e)
+    if not documents.looks_scanned(pages):
+        text = documents.joined(pages)
+        reading = llm.read_document(filename=att["filename"], caption=caption, text=text)
+        with store.tx(tid) as tx:
+            tx.save_extraction(tid, att["id"], pages=len(pages), extraction="text", text=text,
+                               chunks=documents.chunk(pages))
+        return reading, len(pages), ""
+    if len(pages) > documents.MAX_SCAN_PAGES:
+        with store.tx(tid) as tx:
+            tx.save_extraction(tid, att["id"], pages=len(pages), extraction="none", text="", chunks=[])
+        return None, len(pages), (f"It's a scan of {len(pages)} pages; I read scans up to "
+                                  f"{documents.MAX_SCAN_PAGES} pages, so I kept the file but didn't read it.")
+    reading = llm.read_document(filename=att["filename"], caption=caption, pdf=data)
+    text = reading.get("text") or "\n".join([reading.get("summary", ""), *reading.get("key_points", [])])
+    with store.tx(tid) as tx:
+        tx.save_extraction(tid, att["id"], pages=len(pages), extraction="vision", text=text[:documents.MAX_TEXT_CHARS],
+                           chunks=documents.text_chunks(text))
+    return reading, len(pages), ""
+
+
+def process_files(store: Store, llm: LLM, row: dict, tenant: dict, schema: Schema, tz, files: list[dict]) -> str:
+    """A message with PDFs: read each, file one document record per file (plus any
+    tasks it calls for), link the file to its record, and reply with a summary."""
+    tid = tenant["id"]
+    att = files[0]                                     # one file per message (Telegram sends one)
+    reading, pages, problem = read_file(store, llm, row, att)
+    replies: list[str] = []
+    with store.tx(tid) as tx:
+        context = fanout_context(tx, tid)
+    if reading is not None and "document" in schema.types:
+        planner_text = f"{row['raw_content']}\n\n{_digest_text(reading, att['filename'], pages)}"
+        plan = llm.plan_fanout(
+            schema=schema, raw_content=planner_text, captured_local=local_label(row["captured_at"], tz),
+            context=context,
+            hint="This message carries a PDF (summarised above). File exactly one document record for the "
+                 "file, plus tasks only for actions the message or document clearly asks of me.")
+    else:
+        plan = {"writes": [], "updates": [], "processor_notes": problem or "file kept, not read"}
+    with store.tx(tid) as tx:
+        notes = FanoutExecutor(tx, schema, tenant, row).run(plan)
+        made = tx.records_from_inbox(tid, row["id"])
+        docs = [r for r in made if r["type"] == "document"]
+        if not docs and "document" in schema.types:    # the planner skipped it: file it anyway
+            r = reading or {}
+            fields = {k: v for k, v in (("Kind", r.get("kind")), ("Date", r.get("date")),
+                                        ("From", r.get("from")), ("Summary", r.get("summary"))) if v}
+            doc, _ = tx.create_record(tid, schema, "document", title=r.get("title") or att["filename"],
+                                      fields=fields, body="\n".join(f"- {k}" for k in r.get("key_points", [])) or None,
+                                      source_inbox_id=row["id"])
+            docs = [doc]
+            made.append(doc)
+        if docs:
+            tx.link_attachment(att["id"], docs[0]["id"])
+        prefix = schema.types["document"].prefix if "document" in schema.types else "DOC"
+        if docs:
+            d = docs[0]
+            replies.append(f"Saved {prefix}-{d['seq']} \u201c{d['title']}\u201d"
+                           + (f" ({pages} page{'s' if pages != 1 else ''})." if pages else "."))
+        if problem:
+            replies.append(problem)
+        elif reading and reading.get("summary"):
+            replies.append(reading["summary"])
+        others = [r for r in made if r["type"] != "document"]
+        if others:
+            replies.append("Also added:\n" + "\n".join(
+                f"- {schema.types[r['type']].prefix}-{r['seq']} {r['title']}" for r in others if r["type"] in schema.types))
+        tx.add_outbox(tid, chat_id=tenant["telegram_chat_id"], body="\n\n".join(replies),
+                      inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]))
+        extra = f"read {pages} page(s) ({att['filename']})" if reading else (problem or "file not read")
+        tx.finish_inbox(row["id"], status="processed", intent="log", notes=f"{notes}\n{extra}".strip())
+    return "processed"
+
+
 # --- per-row orchestration -----------------------------------------------------
 
 def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
@@ -380,6 +497,11 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
             with store.tx(row["tenant_id"]) as tx:
                 tx.finish_inbox(row["id"], status="failed", notes="empty content")
             return "failed"
+
+        with store.tx(row["tenant_id"]) as tx:
+            files = tx.attachments_for([row["id"]])
+        if files:                                     # a PDF is always a capture
+            return process_files(store, llm, row, tenant, schema, tz, files)
 
         if row.get("forced_intent") == "log":       # the user tapped "Save as task"
             cls = {"intent": "log", "reply": ""}
@@ -416,6 +538,7 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
             plan = broaden_if_thin(store, llm, schema, tenant["id"], raw, plan)
         with store.tx(row["tenant_id"]) as tx:
             records = gather_records(tx, schema, tenant["id"], plan, query_vector)
+            records += document_excerpts(tx, schema, tenant["id"], plan, raw)
         answer = llm.answer(schema=schema, question=raw, records=records, now=now)
         # Nothing relevant found: maybe it was a to-do, not a question. Offer to save it.
         buttons = None if answer["found"] else [[("Save as task", f"save:{row['id']}")]]

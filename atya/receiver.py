@@ -11,7 +11,7 @@ import logging
 import time
 import uuid
 
-from . import commands
+from . import commands, documents
 from .config import Settings
 from .store import Store
 from .telegram import TelegramAPI, TelegramError
@@ -91,8 +91,29 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
         return "prompted:timezone"
     if tenant["status"] != "active":
         return "dropped:inactive-tenant"
+    doc = msg.get("document")
+    file_data: bytes | None = None
+    if doc:
+        name = doc.get("file_name") or "file.pdf"
+        if not (doc.get("mime_type") == "application/pdf" or name.lower().endswith(".pdf")):
+            ctx.reply("I can only save PDF files for now. Other files and photos are coming later.")
+            return "skipped:not-pdf"
+        if (doc.get("file_size") or 0) > documents.MAX_BYTES:
+            ctx.reply("That file is over 20 MB, the most a bot can receive. Send a smaller copy.")
+            return "skipped:too-big"
+        try:
+            file_data = tg.download_file(doc["file_id"], documents.MAX_BYTES)
+            documents.check(file_data, name, doc.get("mime_type") or "")
+        except documents.DocumentError as e:
+            ctx.reply(str(e))
+            return "skipped:bad-file"
+        # A download failure (TelegramError) propagates: the update is retried.
+        if not text.strip():
+            text = f"[PDF] {name}"          # the message is the file itself
+    elif msg.get("photo") or msg.get("voice") or msg.get("video") or msg.get("audio"):
+        ctx.reply("I can only save text and PDF files for now. Photos and voice notes are coming later.")
+        return "skipped:media"
     if not text.strip():
-        # Photos/voice/files without text: stored as attachments in a later milestone.
         return "skipped:no-text"
 
     captured_at = dt.datetime.fromtimestamp(msg.get("date") or time.time(), tz=dt.timezone.utc)
@@ -103,6 +124,10 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
             sender=sender.get("username") or str(user_id))
         if inbox_id is None:
             return "dedup"
+        if doc and file_data is not None:
+            tx.add_attachment(tenant["id"], inbox_id=inbox_id, filename=doc.get("file_name") or "file.pdf",
+                              mime_type="application/pdf", data=file_data,
+                              sha256=documents.sha256(file_data))
         if tenant["telegram_chat_id"] != chat_id:
             tx.conn.execute("UPDATE tenants SET telegram_chat_id = %s WHERE id = %s",
                             (chat_id, tenant["id"]))
