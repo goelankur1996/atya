@@ -1,27 +1,43 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon %}
 {% block title %}Search · ATYA{% endblock %}
 {% block body %}
 <section>
   <h1>Search</h1>
-  <form class="searchbox compact" action="{{ url_for('search') }}" method="get" role="search">
-    <label class="sr-only" for="sq">Search everything</label>
-    <input id="sq" type="search" name="q" value="{{ q }}" placeholder="Search everything you've told ATYA" autofocus>
+  <form class="search-form" action="{{ url_for('search') }}" method="get" role="search">
+    <div class="searchbox">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+      <label class="sr-only" for="sq">Search everything</label>
+      <input id="sq" type="search" name="q" value="{{ q }}" placeholder="Words, names, part of a word…">
+    </div>
+    <div class="filters">
+      <label for="stype" class="small muted">In</label>
+      <select id="stype" name="type" data-autosubmit>
+        <option value="">all records</option>
+        {% for td in schema.types.values() %}<option value="{{ td.key }}"{% if td.key == type_key %} selected{% endif %}>{{ td.label }}</option>{% endfor %}
+      </select>
+      <label class="toggle small"><input type="checkbox" name="open" value="1"{% if open_only %} checked{% endif %}><span>Open only</span></label>
+      <button class="btn small" type="submit">Search</button>
+    </div>
   </form>
-  {% if q %}<p class="muted small flush">Matches whole words; any one word is enough. To ask a question, message the bot.</p>{% endif %}
 </section>
 {% if q %}
   {% if rows %}
+  <p class="muted small flush">{{ rows|length }}{% if rows|length == 50 %}+{% endif %} record{{ "" if rows|length == 1 else "s" }}{% if msg_count %} · <a href="{{ url_for('messages', q=q) }}">{{ msg_count }}{% if msg_count == 100 %}+{% endif %} message{{ "" if msg_count == 1 else "s" }} mention “{{ q }}”</a>{% endif %}</p>
   <div class="box">
     {% for r in rows %}
     <a class="row" href="{{ url_for('record_view', ref_str=ref(r)) }}">
-      <span class="ref">{{ ref(r) }}</span>
-      <span class="grow">{{ r.title }}</span>
+      <span class="badge">{{ icon(r.type, 16) }}</span>
+      <span class="grow"><span class="ref">{{ ref(r) }}</span> {{ r.title }}</span>
+      {% if r.fields.get("Status") %}<span class="pill">{{ r.fields.get("Status")|replace("_", " ") }}</span>{% endif %}
       <span class="side">{{ schema.types[r.type].label if r.type in schema.types else r.type }}</span>
     </a>
     {% endfor %}
   </div>
   {% else %}
-  <p>Nothing matches “{{ q }}”. Try other words.</p>
+  <p class="empty">No records match “{{ q }}”.{% if msg_count %} <a href="{{ url_for('messages', q=q) }}">{{ msg_count }} of your messages do.</a>{% endif %} Try another word or part of one.</p>
   {% endif %}
+{% else %}
+<p class="empty">Search titles, notes and every field. Part of a word is enough: “calib” finds “recalibrate”.</p>
 {% endif %}
 {% endblock %}

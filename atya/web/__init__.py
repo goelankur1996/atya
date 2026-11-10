@@ -92,7 +92,8 @@ def create_app(store: Store, settings: Settings) -> Flask:
     @app.after_request
     def headers(resp: Response) -> Response:
         resp.headers["Content-Security-Policy"] = (
-            "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; form-action 'self'; "
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; "
+            "form-action 'self'; connect-src 'none'; "
             "frame-ancestors 'none'; base-uri 'none'")
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["Referrer-Policy"] = "no-referrer"
@@ -114,6 +115,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
     @app.context_processor
     def helpers() -> dict:
         return {"ref": ref, "fmt_time": fmt_time, "fmt_clock": fmt_clock, "fmt_day": fmt_day,
+                "fmt_cell": fmt_cell,
                 "fmt_value": fmt_value, "status_label": status_label,
                 "csrf": g.get("csrf", ""),
                 "tenant": g.get("tenant"), "schema": g.get("schema")}
@@ -143,6 +145,12 @@ def create_app(store: Store, settings: Settings) -> Flask:
         if local.year == today.year:
             return local.strftime("%a %-d %b, %H:%M")
         return local.strftime("%-d %b %Y, %H:%M")
+
+    def fmt_cell(f: FieldDef, value: Any) -> str:
+        """List-page rendering: dates as 'Fri' / '13 Nov', the rest via fmt_value."""
+        if f.type == "date" and isinstance(value, str) and len(value) >= 10:
+            return day_label(value[:10], local_now().date())
+        return fmt_value(f, value).replace("_", " ")
 
     def fmt_clock(ts: dt.datetime | None) -> str:
         return ts.astimezone(user_tz()).strftime("%H:%M") if ts else ""
@@ -181,7 +189,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
         main_types = [(td, counts.get(td.key, 0)) for td in g.schema.types.values() if not td.child]
         trackers = [(td, counts.get(td.key, 0)) for td in g.schema.types.values() if td.child]
         return render_template("home.html", main_types=main_types, trackers=trackers, due=due,
-                               recent=recent, filed=filed, greeting=greeting(now),
+                               recent=recent, filed=filed, greeting=greeting(now), closed=CLOSED_STATUSES,
                                today_label=now.strftime("%A, %-d %B"))
 
     @app.get("/login/<token>")
@@ -235,22 +243,75 @@ def create_app(store: Store, settings: Settings) -> Flask:
         need_login()
         tdef = g.schema.types.get(type_key) or abort(404)
         page = min(MAX_PAGE, max(1, request.args.get("page", 1, type=int)))
+        status_field = tdef.fields.get("Status")
+        statuses = list(status_field.options) if status_field and status_field.type == "select" else []
+        show = request.args.get("show", "")
+        if show not in ("", "open", *statuses):
+            show = ""
+        q = clean_text(request.args.get("q", ""))[:200]
         with tx() as t:
-            rows = t.list_records(g.tenant["id"], type_key, limit=PAGE_SIZE + 1,
-                                  offset=(page - 1) * PAGE_SIZE)
-        cols = [c for c in LIST_COLUMNS if c in tdef.fields][:3]
+            rows = t.search_records(g.tenant["id"], q, type_key=type_key,
+                                    status=show if show in statuses else None,
+                                    open_only=show == "open", closed=CLOSED_STATUSES,
+                                    limit=PAGE_SIZE + 1, offset=(page - 1) * PAGE_SIZE,
+                                    order="recent")
+        cols = [c for c in LIST_COLUMNS if c in tdef.fields and c != "Status"][:2]
         return render_template("list.html", tdef=tdef, rows=rows[:PAGE_SIZE], cols=cols, page=page,
-                               more=len(rows) > PAGE_SIZE)
+                               more=len(rows) > PAGE_SIZE, statuses=statuses, show=show, q=q,
+                               deleted=request.args.get("deleted", "")[:20],
+                               closed=CLOSED_STATUSES)
+
+    @app.route("/t/<type_key>/new", methods=["GET", "POST"])
+    def record_new(type_key: str):
+        need_login()
+        tdef = g.schema.types.get(type_key) or abort(404)
+        problems: list[str] = []
+        values: dict[str, Any] = {}
+        if request.method == "POST":
+            check_csrf()
+            title = clean_text(request.form.get("title", ""))[:500]
+            values = new_form_values(tdef, request.form)
+            body = clean_text(request.form.get("body", "")) if not tdef.verbatim_body else ""
+            if not title:
+                problems = [f"{tdef.title_field} is required."]
+            else:
+                with tx() as t:
+                    rec, dropped = t.create_record(g.tenant["id"], g.schema, type_key, title=title,
+                                                   fields=values, body=body or None, actor="web",
+                                                   by_user=True, allow_deprecated=False)
+                ref_str = f"{tdef.prefix}-{rec['seq']}"
+                if dropped:
+                    with tx() as t:
+                        rec = t.record(g.tenant["id"], rec["id"])
+                    return record_page(tdef, rec, problems=dropped, status=400)
+                return redirect(url_for("record_view", ref_str=ref_str, saved=1))
+        with tx() as t:
+            pickers = {name: t.titles_of_type(g.tenant["id"], f.to)
+                       for name, f in tdef.relation_fields.items() if f.to}
+        fields = [(f, form_value(f, values.get(f.name, f.default if f.type != "relation" else None),
+                                 set(values.get(f.name) or []) if f.type == "relation" else set()))
+                  for f in tdef.fields.values()]
+        return render_template("record_new.html", tdef=tdef, fields=fields, pickers=pickers,
+                               problems=problems, title=request.form.get("title", "")), \
+            (400 if problems else 200)
 
     @app.get("/search")
     def search():
         need_login()
         q = clean_text(request.args.get("q", ""))[:500]
+        type_key = request.args.get("type", "")
+        if type_key not in g.schema.types:
+            type_key = ""
+        open_only = request.args.get("open") == "1"
         rows: list[dict] = []
+        msg_count = 0
         if q:
             with tx() as t:
-                rows = t.search_text(g.tenant["id"], q, limit=PAGE_SIZE)
-        return render_template("search.html", q=q, rows=rows)
+                rows = t.search_records(g.tenant["id"], q, type_key=type_key or None,
+                                        open_only=open_only, closed=CLOSED_STATUSES, limit=PAGE_SIZE)
+                msg_count = len(t.messages_page(g.tenant["id"], query=q, limit=100))
+        return render_template("search.html", q=q, rows=rows, type_key=type_key, open_only=open_only,
+                               msg_count=msg_count, top_q=q)
 
     # --- conversation ----------------------------------------------------------
 
@@ -369,7 +430,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
                   for f in tdef.fields.values()]
         # What the form showed, so a save only applies what the user changed
         # (not stale values over changes the bot made after the page loaded).
-        orig = {"title": rec["title"],
+        orig = {"title": rec["title"], "body": rec["body"] or "",
                 **{f.name: sorted(v) if isinstance(v, set) else v for f, v in fields}}
         return render_template("record.html", tdef=tdef, rec=rec, fields=fields, pickers=pickers,
                                orig_json=json.dumps(orig, ensure_ascii=False),
@@ -393,15 +454,61 @@ def create_app(store: Store, settings: Settings) -> Flask:
         except (ValueError, AssertionError):
             abort(400, "This form has expired. Go back, reload the page and try again.")
         changes, clear = diff_form(tdef, orig, request.form)
+        new_body = None
+        if not tdef.verbatim_body and "body" in request.form:
+            candidate = clean_text(request.form.get("body", ""))
+            if candidate != str(orig.get("body", "")).strip():
+                new_body = candidate
         with tx() as t:
             problems: list[str] = []
             if changes or clear:
                 problems = t.update_record(g.tenant["id"], g.schema, rec["id"], changes,
                                            actor="web", by_user=True, clear=clear)
+            if new_body is not None:
+                t.update_body(g.tenant["id"], g.schema, rec["id"], new_body)
         if problems:
             _, rec = load_record(ref_str)
             return record_page(tdef, rec, problems=problems, status=400)
         return redirect(url_for("record_view", ref_str=ref_str, saved=1))
+
+    @app.post("/r/<ref_str>/quick")
+    def record_quick(ref_str: str):
+        """One-field change from a list (mark done, change status)."""
+        need_login()
+        check_csrf()
+        tdef, rec = load_record(ref_str)
+        field = request.form.get("field", "")
+        value = clean_text(request.form.get("value", ""))
+        fdef = tdef.fields.get(field)
+        if fdef is None or fdef.type in ("relation", "multi_select"):
+            abort(400, "That field can't be changed from here.")
+        changes: dict[str, Any] = {}
+        clear: list[str] = []
+        if value:
+            changes[field] = value
+        else:
+            clear.append(field)
+        today = local_now().date().isoformat()
+        if field == "Status" and value in CLOSED_STATUSES[:2] and "Completed At" in tdef.fields \
+                and not rec["fields"].get("Completed At"):
+            changes["Completed At"] = today
+        with tx() as t:
+            problems = t.update_record(g.tenant["id"], g.schema, rec["id"], changes,
+                                       actor="web", by_user=True, clear=clear)
+        if problems:
+            abort(400, "; ".join(problems))
+        return redirect(safe_back(request.form.get("back")) or url_for("record_view", ref_str=ref_str))
+
+    @app.route("/r/<ref_str>/delete", methods=["GET", "POST"])
+    def record_delete(ref_str: str):
+        need_login()
+        tdef, rec = load_record(ref_str)
+        if request.method == "GET":
+            return render_template("confirm_delete.html", tdef=tdef, rec=rec)
+        check_csrf()
+        with tx() as t:
+            gone = t.delete_record(g.tenant["id"], g.schema, rec["id"])
+        return redirect(url_for("type_list", type_key=tdef.key, deleted=gone))
 
     # --- export ------------------------------------------------------------
 
@@ -435,6 +542,32 @@ def create_app(store: Store, settings: Settings) -> Flask:
 
 
 # --- form <-> field values ----------------------------------------------------
+
+def safe_back(target: str | None) -> str | None:
+    """Only same-site relative paths, so a form can't redirect elsewhere."""
+    if target and target.startswith("/") and not target.startswith("//") and "\\" not in target:
+        return target
+    return None
+
+
+def new_form_values(tdef: TypeDef, form) -> dict[str, Any]:
+    """Field values from the New record form (empty fields left out)."""
+    values: dict[str, Any] = {}
+    for f in tdef.fields.values():
+        key = f"f:{f.name}"
+        if f.type == "checkbox":
+            if key in form:
+                values[f.name] = True
+        elif f.type in ("multi_select", "relation"):
+            picked = [clean_text(v) for v in form.getlist(key) if clean_text(v)]
+            if picked:
+                values[f.name] = picked
+        else:
+            v = clean_text(form.get(key, ""))
+            if v:
+                values[f.name] = v
+    return values
+
 
 def clean_text(v: str) -> str:
     """Normalise submitted text: browser newlines, NUL bytes (Postgres rejects them)."""

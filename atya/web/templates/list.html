@@ -1,31 +1,61 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon, done_button %}
 {% block title %}{{ tdef.label }} · ATYA{% endblock %}
 {% block body %}
-<div class="record-head">
-  <p class="crumbs"><a href="{{ url_for('home') }}">Home</a></p>
-  <h1>{{ tdef.label }}</h1>
+<div class="page-head">
+  <div class="record-head">
+    <p class="crumbs"><a href="{{ url_for('home') }}">Home</a></p>
+    <h1 class="with-icon"><span class="badge big">{{ icon(tdef.key, 22) }}</span>{{ tdef.label }}</h1>
+  </div>
+  <a class="btn primary" href="{{ url_for('record_new', type_key=tdef.key) }}">Add to {{ tdef.label }}</a>
 </div>
+
+{% if deleted %}<p class="notice flush">{{ deleted }} was deleted. A copy stays in the change log.</p>{% endif %}
+
+<div class="toolbar">
+  {% if statuses %}
+  <nav class="seg" aria-label="Filter by status">
+    <a href="{{ url_for('type_list', type_key=tdef.key, q=q or None) }}"{% if not show %} class="on" aria-current="page"{% endif %}>All</a>
+    <a href="{{ url_for('type_list', type_key=tdef.key, show='open', q=q or None) }}"{% if show == "open" %} class="on" aria-current="page"{% endif %}>Open</a>
+    {% for st in statuses %}<a href="{{ url_for('type_list', type_key=tdef.key, show=st, q=q or None) }}"{% if show == st %} class="on" aria-current="page"{% endif %}>{{ st|replace("_", " ") }}</a>{% endfor %}
+  </nav>
+  {% endif %}
+  <form class="searchbox compact inline" action="{{ url_for('type_list', type_key=tdef.key) }}" method="get" role="search">
+    {% if show %}<input type="hidden" name="show" value="{{ show }}">{% endif %}
+    <label class="sr-only" for="lq">Search {{ tdef.label|lower }}</label>
+    <input id="lq" type="search" name="q" value="{{ q }}" placeholder="Search {{ tdef.label|lower }}">
+  </form>
+</div>
+
 {% if rows %}
-<div class="table-wrap">
-<table>
-  <thead><tr><th>ID</th><th>{{ tdef.title_field }}</th>{% for c in cols %}<th>{{ c }}</th>{% endfor %}<th>Updated</th></tr></thead>
-  <tbody>
+<div class="box">
   {% for r in rows %}
-    <tr>
-      <td class="ref"><a href="{{ url_for('record_view', ref_str=ref(r)) }}">{{ ref(r) }}</a></td>
-      <td class="title"><a href="{{ url_for('record_view', ref_str=ref(r)) }}">{{ r.title }}</a></td>
-      {% for c in cols %}<td>{% set v = fmt_value(tdef.fields[c], r.fields.get(c)) %}{% if v %}<span class="pill">{{ v }}</span>{% endif %}</td>{% endfor %}
-      <td class="muted small nowrap">{{ fmt_time(r.updated_at) }}</td>
-    </tr>
+  <div class="row">
+    {% if statuses and ("done" in statuses) %}{{ done_button(r, ref(r), request.full_path, csrf, closed) }}{% endif %}
+    <a class="grow rowlink" href="{{ url_for('record_view', ref_str=ref(r)) }}"><span class="ref">{{ ref(r) }}</span> {{ r.title }}</a>
+    {% for c in cols %}{% set v = fmt_cell(tdef.fields[c], r.fields.get(c)) %}{% if v %}<span class="side">{{ v }}</span>{% endif %}{% endfor %}
+    {% if statuses %}
+    <form class="status-form" action="{{ url_for('record_quick', ref_str=ref(r)) }}" method="post">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="field" value="Status">
+      <input type="hidden" name="back" value="{{ request.full_path }}">
+      <label class="sr-only" for="st-{{ r.seq }}">Status of {{ r.title }}</label>
+      <select id="st-{{ r.seq }}" name="value" data-autosubmit class="status-select">
+        <option value="">no status</option>
+        {% for st in statuses %}<option value="{{ st }}"{% if r.fields.get("Status") == st %} selected{% endif %}>{{ st|replace("_", " ") }}</option>{% endfor %}
+        {% set cur = r.fields.get("Status") %}{% if cur and cur not in statuses %}<option value="{{ cur }}" selected>{{ cur }}</option>{% endif %}
+      </select>
+      <button class="btn small nojs" type="submit">Set</button>
+    </form>
+    {% endif %}
+  </div>
   {% endfor %}
-  </tbody>
-</table>
 </div>
 <p class="pager">
-  {% if page > 1 %}<a href="{{ url_for('type_list', type_key=tdef.key, page=page-1) }}">Newer</a>{% endif %}
-  {% if more %}<a href="{{ url_for('type_list', type_key=tdef.key, page=page+1) }}">Older</a>{% endif %}
+  {% if page > 1 %}<a href="{{ url_for('type_list', type_key=tdef.key, page=page-1, show=show or None, q=q or None) }}">Newer</a>{% endif %}
+  {% if more %}<a href="{{ url_for('type_list', type_key=tdef.key, page=page+1, show=show or None, q=q or None) }}">Older</a>{% endif %}
 </p>
 {% else %}
-<p class="muted">Nothing here yet.</p>
+<p class="empty">{% if q or show %}Nothing matches. <a href="{{ url_for('type_list', type_key=tdef.key) }}">Show all {{ tdef.label|lower }}</a>{% else %}No {{ tdef.label|lower }} yet. Send one to the bot, or <a href="{{ url_for('record_new', type_key=tdef.key) }}">add one here</a>.{% endif %}</p>
 {% endif %}
 {% endblock %}

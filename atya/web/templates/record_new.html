@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% from "_macros.html" import field_input, icon %}
+{% block title %}New · {{ tdef.label }} · ATYA{% endblock %}
+{% block body %}
+<form method="post" class="stack-form">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="record-head">
+  <p class="crumbs"><a href="{{ url_for('type_list', type_key=tdef.key) }}">{{ tdef.label }}</a> <span aria-hidden="true">/</span> new</p>
+  <label class="sr-only" for="title">{{ tdef.title_field }}</label>
+  <input id="title" class="title-input" type="text" name="title" value="{{ title }}" placeholder="{{ tdef.title_field }}" required autofocus>
+  <p class="muted small flush">Everything you set here counts as yours: the bot won't overwrite it.</p>
+</div>
+{% if problems %}
+<div class="problem">
+  Please fix:
+  <ul>{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+<div class="props">
+  {% for f, v in fields %}
+  {% set fid = "f-" ~ loop.index %}
+  <div class="prop">
+    <span class="k">{% if f.type in ("select", "multi_select", "checkbox") or (f.type == "relation" and f.many) %}{{ f.name }}{% else %}<label for="{{ fid }}">{{ f.name }}</label>{% endif %}</span>
+    <div class="v">{{ field_input(f, v, fid, pickers, schema, new=True) }}</div>
+  </div>
+  {% endfor %}
+  {% if not tdef.verbatim_body %}
+  <div class="prop top">
+    <span class="k"><label for="body">{{ "Details" if "Notes" in tdef.fields else "Notes" }}</label></span>
+    <div class="v"><textarea id="body" name="body" rows="3" placeholder="Anything else worth keeping"></textarea></div>
+  </div>
+  {% endif %}
+  <div class="form-actions">
+    <span class="spacer"></span>
+    <a class="btn" href="{{ url_for('type_list', type_key=tdef.key) }}">Cancel</a>
+    <button class="btn primary" type="submit">Create</button>
+  </div>
+</div>
+</form>
+{% endblock %}

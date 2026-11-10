@@ -210,8 +210,13 @@ class Tx:
                       source_inbox_id: uuid.UUID | None = None, actor: str = "processor",
                       allow_deprecated: bool = False, seq: int | None = None,
                       external_id: str | None = None,
-                      enforce_verbatim: bool = True) -> tuple[dict, list[str]]:
-        """Validate and insert one record with its links. Returns (record, dropped)."""
+                      enforce_verbatim: bool = True,
+                      by_user: bool = False) -> tuple[dict, list[str]]:
+        """Validate and insert one record with its links. Returns (record, dropped).
+
+        by_user: created by hand (web view). Every field given is marked
+        user-owned, so the bot never overwrites it.
+        """
         tdef = schema.types.get(type_key)
         if tdef is None:
             raise StoreError(f"unknown record type {type_key!r}")
@@ -246,6 +251,11 @@ class Tx:
         dropped = list(result.dropped)
         for fname, ids in result.links.items():
             dropped += self._set_links(tenant_id, schema, rec["id"], type_key, fname, ids)
+        if by_user:
+            owned = sorted({tdef.title_field, *result.fields, *result.links})
+            rec = self._one("UPDATE records SET user_edited_fields = %s WHERE id = %s RETURNING *",
+                            (owned, rec["id"]))
+            assert rec is not None
         self.audit(tenant_id, actor=actor, action="create", target_table="records",
                    target_id=rec["id"], summary=f"{tdef.prefix}-{seq} {title[:120]}",
                    source_data={"type": type_key, "fields": values, "links": result.links,
@@ -336,6 +346,74 @@ class Tx:
     def links_from(self, record_id: uuid.UUID) -> list[dict]:
         return self._all("SELECT field, to_id FROM record_links WHERE from_id = %s ORDER BY field",
                          (record_id,))
+
+    def update_body(self, tenant_id: uuid.UUID, schema: Schema, record_id: uuid.UUID, body: str,
+                    *, actor: str = "web") -> None:
+        """Replace the free-text body of a record. Verbatim bodies (journal,
+        thoughts: copies of the user's own message) can never be edited."""
+        rec = self.record(tenant_id, record_id)
+        if rec is None:
+            raise StoreError(f"record {record_id} not found")
+        tdef = schema.types[rec["type"]]
+        if tdef.verbatim_body:
+            raise StoreError(f"{tdef.label}: the text is your original message and can't be edited")
+        self.conn.execute("UPDATE records SET body = %s WHERE id = %s", (body or None, record_id))
+        self.audit(tenant_id, actor=actor, action="update", target_table="records", target_id=record_id,
+                   summary=f"{tdef.prefix}-{rec['seq']} notes edited",
+                   source_data={"before": (rec["body"] or "")[:2000]})
+
+    def delete_record(self, tenant_id: uuid.UUID, schema: Schema, record_id: uuid.UUID,
+                      *, actor: str = "web") -> str:
+        """Delete a record and its links. The audit log keeps a full copy."""
+        rec = self.record(tenant_id, record_id)
+        if rec is None:
+            raise StoreError(f"record {record_id} not found")
+        tdef = schema.types.get(rec["type"])
+        ref = f"{tdef.prefix if tdef else rec['type']}-{rec['seq']}"
+        links = self._all("SELECT field, from_id, to_id FROM record_links WHERE from_id = %s OR to_id = %s",
+                          (record_id, record_id))
+        self.conn.execute("DELETE FROM records WHERE id = %s AND tenant_id = %s", (record_id, tenant_id))
+        self.audit(tenant_id, actor=actor, action="delete", target_table="records", target_id=record_id,
+                   summary=f"{ref} {rec['title'][:120]} deleted",
+                   source_data={"type": rec["type"], "seq": rec["seq"], "title": rec["title"],
+                                "body": rec["body"], "fields": rec["fields"],
+                                "links": [{k: str(v) for k, v in l.items()} for l in links]})
+        return ref
+
+    def search_records(self, tenant_id: uuid.UUID, query: str, *, type_key: str | None = None,
+                       status: str | None = None, open_only: bool = False,
+                       closed: tuple[str, ...] = (), limit: int = 50, offset: int = 0,
+                       order: str = "rank") -> list[dict]:
+        """Web search: full-text words (stemmed, any word) OR a plain substring
+        anywhere in the title, text or field values, so partial words match.
+        Optional filters by type and Status."""
+        q = query.strip()
+        like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where = ["r.tenant_id = %s"]
+        params: list[Any] = [tenant_id]
+        if q:
+            where.append("(r.search_text @@ tq OR r.title ILIKE %s OR coalesce(r.body, '') ILIKE %s "
+                         "OR r.fields::text ILIKE %s)")
+            params += [like, like, like]
+        if type_key:
+            where.append("r.type = %s")
+            params.append(type_key)
+        if status:
+            where.append("r.fields->>'Status' = %s")
+            params.append(status)
+        elif open_only:
+            where.append("NOT (coalesce(r.fields->>'Status', '') = ANY(%s))")
+            params.append(list(closed))
+        return self._all(
+            "SELECT r.*, CASE WHEN tq IS NULL THEN 0 ELSE ts_rank(r.search_text, tq) END "
+            "  + CASE WHEN r.title ILIKE %s THEN 1 ELSE 0 END AS rank "
+            "FROM records r, "
+            "     CAST(nullif(replace(plainto_tsquery('english', %s)::text, '&', '|'), '') AS tsquery) tq "
+            f"WHERE {' AND '.join(where)} "  # noqa: S608 (fixed fragments)
+            + ("ORDER BY r.updated_at DESC, r.seq DESC " if order == "recent" and not q
+               else "ORDER BY rank DESC, r.updated_at DESC ")
+            + "LIMIT %s OFFSET %s",
+            (like, q, *params, limit, offset))
 
     def linked_titles(self, record_id: uuid.UUID) -> list[dict]:
         """Records this one links to, with titles (for compact display)."""

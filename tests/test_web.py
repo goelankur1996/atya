@@ -432,3 +432,106 @@ def test_pages_use_no_inline_styles_and_fonts_are_self_hosted(app, store, settin
         assert 'style="' not in r.get_data(as_text=True), path       # CSP blocks inline styles
         assert "font-src 'self'" in r.headers["Content-Security-Policy"]
     assert client.get("/static/fonts/inter-latin-wght.woff2").status_code == 200
+
+
+def test_quick_mark_done_and_status_from_list(app, store, settings, tenant):
+    with store.tx(system=True) as tx:
+        task, _ = tx.create_record(tenant["id"], S, "task", title="Ship it", fields={"Status": "next"})
+    client, _ = sign_in(app, store, settings, tenant)
+    lst = client.get("/t/task").get_data(as_text=True)
+    assert "Mark done: Ship it" in lst and "data-autosubmit" in lst
+    token = csrf(client, "/t/task")
+    r = client.post("/r/TSK-1/quick", data={"csrf": token, "field": "Status", "value": "done", "back": "/t/task?show=open"})
+    assert r.status_code == 302 and r.headers["Location"].endswith("/t/task?show=open")
+    with store.tx(system=True) as tx:
+        rec = tx.record(tenant["id"], task["id"])
+    assert rec["fields"]["Status"] == "done" and rec["fields"]["Completed At"]
+    assert set(rec["user_edited_fields"]) == {"Status", "Completed At"}
+    assert "Ship it" not in client.get("/t/task?show=open").get_data(as_text=True)
+    assert "Ship it" in client.get("/t/task?show=done").get_data(as_text=True)
+    # Off-site redirects are ignored; bad values and relation fields are refused.
+    r = client.post("/r/TSK-1/quick", data={"csrf": token, "field": "Status", "value": "next", "back": "//evil.example"})
+    assert r.headers["Location"].endswith("/r/TSK-1")
+    assert client.post("/r/TSK-1/quick", data={"csrf": token, "field": "Status", "value": "bogus"}).status_code == 400
+    assert client.post("/r/TSK-1/quick", data={"csrf": token, "field": "Project", "value": "x"}).status_code == 400
+    assert client.post("/r/TSK-1/quick", data={"field": "Status", "value": "done"}).status_code == 400
+
+
+def test_create_record_from_web(app, store, settings, tenant):
+    with store.tx(system=True) as tx:
+        prj, _ = tx.create_record(tenant["id"], S, "project", title="VLA rig")
+    client, _ = sign_in(app, store, settings, tenant)
+    page = client.get("/t/task/new").get_data(as_text=True)
+    assert "Create" in page
+    token = csrf(client, "/t/task/new")
+    r = client.post("/t/task/new", data={"csrf": token, "title": "Order spare servos", "f:Status": "next",
+                                         "f:Priority": "P1", "f:Due Date": "2026-12-01",
+                                         "f:Project": str(prj["id"]), "body": "Two of them"})
+    assert r.status_code == 302 and "/r/TSK-1" in r.headers["Location"]
+    with store.tx(system=True) as tx:
+        rec = tx.record_by_ref(tenant["id"], "task", 1)
+        links = tx.links_from(rec["id"])
+    assert rec["title"] == "Order spare servos" and rec["fields"]["Priority"] == "P1" and rec["body"] == "Two of them"
+    assert {"Status", "Priority", "Due Date", "Project", "Task"} <= set(rec["user_edited_fields"]) | {"Task"}
+    assert [l["to_id"] for l in links] == [prj["id"]]
+    assert client.post("/t/task/new", data={"csrf": token, "title": ""}).status_code == 400
+    assert client.get("/t/nonsense/new").status_code == 404
+
+
+def test_delete_record_keeps_copy_in_audit(app, store, settings, tenant):
+    with store.tx(system=True) as tx:
+        prj, _ = tx.create_record(tenant["id"], S, "project", title="Old project")
+        task, _ = tx.create_record(tenant["id"], S, "task", title="Doomed", fields={"Project": [str(prj["id"])]})
+    client, _ = sign_in(app, store, settings, tenant)
+    assert "Delete TSK-1?" in client.get("/r/TSK-1/delete").get_data(as_text=True)
+    token = csrf(client, "/r/TSK-1/delete")
+    r = client.post("/r/TSK-1/delete", data={"csrf": token})
+    assert r.status_code == 302 and "deleted=TSK-1" in r.headers["Location"]
+    assert "TSK-1 was deleted" in client.get(r.headers["Location"]).get_data(as_text=True)
+    assert client.get("/r/TSK-1").status_code == 404
+    with store.tx(system=True) as tx:
+        audit = tx._one("SELECT * FROM audit_log WHERE target_id = %s AND action = 'delete'", (task["id"],))
+        assert audit["source_data"]["title"] == "Doomed" and audit["source_data"]["links"]
+        assert tx.links_to(prj["id"]) == []
+    assert client.post("/r/PRJ-1/delete", data={}).status_code == 400   # csrf
+
+
+def test_notes_editable_but_verbatim_text_is_not(app, store, settings, tenant):
+    with store.tx(system=True) as tx:
+        tx.create_record(tenant["id"], S, "task", title="T", body="old details")
+        msg = tx.add_inbox(tenant["id"], source="telegram", raw_content="My exact words.")
+        th, _ = tx.create_record(tenant["id"], S, "thought", title="On words", source_inbox_id=msg)
+    client, _ = sign_in(app, store, settings, tenant)
+    r = client.post("/r/TSK-1", data={**page_form(client, "/r/TSK-1"), "title": "T", "body": "new details"})
+    assert r.status_code == 302
+    ref = f"{S.types['thought'].prefix}-1"
+    page = client.get(f"/r/{ref}").get_data(as_text=True)
+    assert 'name="body"' not in page and "My exact words." in page
+    client.post(f"/r/{ref}", data={**page_form(client, f"/r/{ref}"), "title": "On words", "body": "changed!"})
+    with store.tx(system=True) as tx:
+        assert tx.record_by_ref(tenant["id"], "task", 1)["body"] == "new details"
+        assert tx.record(tenant["id"], th["id"])["body"] == "My exact words."
+        import pytest as _p
+        from atya.store import StoreError
+        with _p.raises(StoreError):
+            tx.update_body(tenant["id"], S, th["id"], "nope")
+
+
+def test_search_partial_words_fields_and_filters(app, store, settings, tenant):
+    with store.tx(system=True) as tx:
+        tx.create_record(tenant["id"], S, "task", title="Recalibrate the wrist camera", fields={"Status": "next"})
+        tx.create_record(tenant["id"], S, "task", title="Old calibration notes", fields={"Status": "done"})
+        tx.create_record(tenant["id"], S, "person", title="Meera", fields={"Notes": "works on calibration rigs"})
+        m = tx.add_inbox(tenant["id"], source="telegram", raw_content="calibration went fine")
+    client, _ = sign_in(app, store, settings, tenant)
+    all_ = client.get("/search?q=calib").get_data(as_text=True)
+    assert "Recalibrate the wrist camera" in all_ and "Old calibration notes" in all_ and "Meera" in all_
+    assert "1 message mention" in all_
+    tasks = client.get("/search?q=calib&type=task").get_data(as_text=True)
+    assert "Meera" not in tasks and "Old calibration" in tasks
+    open_ = client.get("/search?q=calib&type=task&open=1").get_data(as_text=True)
+    assert "Recalibrate" in open_ and "Old calibration" not in open_
+    assert client.get("/search?q=%25_%5C").status_code == 200
+    assert 'id="topq"' in client.get("/").get_data(as_text=True)          # search on every page
+    lst = client.get("/t/task?q=wrist").get_data(as_text=True)
+    assert "Recalibrate" in lst and "Old calibration" not in lst

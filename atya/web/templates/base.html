@@ -7,6 +7,7 @@
 <title>{% block title %}ATYA{% endblock %}</title>
 <link rel="preload" href="{{ url_for('static', filename='fonts/inter-latin-wght.woff2') }}" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </head>
 <body>
 <header class="top">
@@ -17,7 +18,12 @@
     <a href="{{ url_for('messages') }}"{% if active == "messages" %} class="on" aria-current="page"{% endif %}>Messages</a>
     <a href="{{ url_for('db_tables') }}"{% if active == "db" %} class="on" aria-current="page"{% endif %}>Database</a>
   </nav>
-  <span class="spacer"></span>
+  <form class="topsearch" action="{{ url_for('search') }}" method="get" role="search">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+    <label class="sr-only" for="topq">Search</label>
+    <input id="topq" type="search" name="q" placeholder="Search" value="{{ top_q|default('') }}">
+    <kbd aria-hidden="true">/</kbd>
+  </form>
   <form action="{{ url_for('logout') }}" method="post">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button class="linkbtn small" type="submit">Sign out</button>

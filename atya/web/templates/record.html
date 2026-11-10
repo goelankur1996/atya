@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import field_input %}
 {% block title %}{{ ref(rec) }} {{ rec.title }} · ATYA{% endblock %}
 {% block body %}
 <form method="post" class="stack-form">
@@ -22,73 +23,32 @@
 
 <div class="props">
   {% for f, v in fields %}
-  {% set name = "f:" ~ f.name %}
   {% set fid = "f-" ~ loop.index %}
   <div class="prop">
-    <span class="k">{% if f.type in ("select", "multi_select", "relation", "checkbox") %}{{ f.name }}{% else %}<label for="{{ fid }}">{{ f.name }}</label>{% endif %}{% if f.name in rec.user_edited_fields %}<em>edited by you</em>{% endif %}</span>
-    <div class="v">
-    {% if f.type == "select" and (f.options|length) <= 7 %}
-      <div class="pills" role="radiogroup" aria-label="{{ f.name }}">
-        {% for o in f.options %}<label><input type="radio" name="{{ name }}" value="{{ o }}"{% if o == v %} checked{% endif %}><span>{{ o }}</span></label>{% endfor %}
-        {% if v and v not in f.options %}<label><input type="radio" name="{{ name }}" value="{{ v }}" checked><span>{{ v }} (old)</span></label>{% endif %}
-        <label><input type="radio" name="{{ name }}" value=""{% if not v %} checked{% endif %}><span class="none">none</span></label>
-      </div>
-    {% elif f.type == "select" %}
-      <select id="{{ fid }}" name="{{ name }}" aria-label="{{ f.name }}">
-        <option value=""></option>
-        {% for o in f.options %}<option value="{{ o }}"{% if o == v %} selected{% endif %}>{{ o }}</option>{% endfor %}
-        {% if v and v not in f.options %}<option value="{{ v }}" selected>{{ v }} (old value)</option>{% endif %}
-      </select>
-    {% elif f.type == "multi_select" %}
-      <input type="hidden" name="present:{{ f.name }}" value="1">
-      <div class="pills" role="group" aria-label="{{ f.name }}">
-        {% for o in f.options %}<label><input type="checkbox" name="{{ name }}" value="{{ o }}"{% if o in v %} checked{% endif %}><span>{{ o }}</span></label>{% endfor %}
-        {% for o in v if o not in f.options %}<label><input type="checkbox" name="{{ name }}" value="{{ o }}" checked><span>{{ o }} (old)</span></label>{% endfor %}
-      </div>
-    {% elif f.type == "checkbox" %}
-      <input type="hidden" name="present:{{ f.name }}" value="1">
-      <input type="checkbox" name="{{ name }}" aria-label="{{ f.name }}"{% if v %} checked{% endif %}>
-    {% elif f.type == "relation" %}
-      <input type="hidden" name="present:{{ f.name }}" value="1">
-      {% for p in pickers[f.name] if p.id|string in v %}
-        <a class="reflink" href="{{ url_for('record_view', ref_str=schema.types[f.to].prefix ~ '-' ~ p.seq) }}"><span class="ref">{{ schema.types[f.to].prefix }}-{{ p.seq }}</span>{{ p.title }}</a>
-      {% endfor %}
-      <select name="{{ name }}" aria-label="{{ f.name }}"{% if f.many %} multiple size="{{ [[pickers[f.name]|length, 6]|min, 3]|max }}"{% endif %}>
-        {% if not f.many %}<option value="">none</option>{% endif %}
-        {% for p in pickers[f.name] %}
-          <option value="{{ p.id }}"{% if p.id|string in v %} selected{% endif %}>{{ schema.types[f.to].prefix }}-{{ p.seq }} {{ p.title }}</option>
-        {% endfor %}
-      </select>
-    {% elif f.type == "date" %}
-      <input id="{{ fid }}" type="{{ 'date' if (not v or v|length == 10) else 'text' }}" name="{{ name }}" value="{{ v }}">
-    {% elif f.type == "number" %}
-      <input id="{{ fid }}" type="number" step="any" name="{{ name }}" value="{{ v }}">
-    {% else %}
-      {% if v|length > 80 or "\n" in v %}
-      <textarea id="{{ fid }}" name="{{ name }}" rows="4">{{ v }}</textarea>
-      {% else %}
-      <input id="{{ fid }}" type="text" name="{{ name }}" value="{{ v }}" placeholder="Add {{ f.name|lower }}">
-      {% endif %}
-    {% endif %}
-    </div>
+    <span class="k">{% if f.type in ("select", "multi_select", "checkbox") or (f.type == "relation" and f.many) %}{{ f.name }}{% else %}<label for="{{ fid }}">{{ f.name }}</label>{% endif %}{% if f.name in rec.user_edited_fields %}<em>edited by you</em>{% endif %}</span>
+    <div class="v">{{ field_input(f, v, fid, pickers, schema) }}</div>
   </div>
   {% endfor %}
+  {% if not tdef.verbatim_body %}
+  <div class="prop top">
+    <span class="k"><label for="body">{{ "Details" if "Notes" in tdef.fields else "Notes" }}</label></span>
+    <div class="v"><textarea id="body" name="body" rows="{{ 6 if rec.body else 3 }}" placeholder="Anything else worth keeping">{{ rec.body or "" }}</textarea></div>
+  </div>
+  {% endif %}
   <div class="form-actions">
+    <a class="btn ghost danger-link" href="{{ url_for('record_delete', ref_str=ref(rec)) }}">Delete</a>
+    <span class="spacer"></span>
     <a class="btn" href="{{ url_for('record_view', ref_str=ref(rec)) }}">Discard</a>
     <button class="btn primary" type="submit">Save changes</button>
   </div>
 </div>
 </form>
 
-{% if rec.body %}
+{% if rec.body and tdef.verbatim_body %}
 <section>
-  <h2>{{ "Your words" if tdef.verbatim_body else "Notes" }}</h2>
-  {% if tdef.verbatim_body %}
+  <h2>Your words</h2>
   <blockquote class="quote">{{ rec.body }}</blockquote>
   <p class="muted small flush">Kept exactly as you wrote it, so it can't be edited.</p>
-  {% else %}
-  <p class="body-text">{{ rec.body }}</p>
-  {% endif %}
 </section>
 {% endif %}
 

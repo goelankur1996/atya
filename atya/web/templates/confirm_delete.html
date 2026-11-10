@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Delete {{ ref(rec) }} · ATYA{% endblock %}
+{% block page %}
+<div class="center">
+  <h1>Delete {{ ref(rec) }}?</h1>
+  <p>“{{ rec.title }}” and its links to other records will be removed. A full copy stays in the change log, and the message it came from is kept.</p>
+  <form action="{{ url_for('record_delete', ref_str=ref(rec)) }}" method="post" class="button-row">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <a class="btn" href="{{ url_for('record_view', ref_str=ref(rec)) }}">Keep it</a>
+    <button class="btn danger" type="submit">Delete</button>
+  </form>
+</div>
+{% endblock %}
