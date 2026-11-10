@@ -9,7 +9,7 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </head>
-<body>
+<body{% block body_class %}{% endblock %}>
 <header class="top">
   <a class="brand" href="{{ url_for('home') }}">atya</a>
   {% if tenant %}

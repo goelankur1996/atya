@@ -263,3 +263,18 @@ h1.with-icon { display: flex; align-items: center; gap: 14px; }
 @media (max-width: 640px) { .top { gap: 10px 14px; } .top nav { gap: 14px; } }
 .center-text { justify-content: center; }
 .thread-end { height: 1px; scroll-margin-bottom: 24px; }
+
+/* Messages: sticky filter + search bar, scroll affordances */
+.page-messages .top { position: static; }
+.page-messages main.narrow { padding-top: 0; }
+.msg-bar { position: sticky; top: 0; z-index: 9; display: flex; flex-direction: column; gap: 12px; padding: 20px 0 14px; background: #fff; border-bottom: 1px solid var(--line); margin: 0 -24px; padding-left: 24px; padding-right: 24px; }
+.msg-bar h1 { font-size: 30px; }
+.msg-bar .searchbox { height: 42px; }
+.scroll-hint { align-self: center; display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; margin-bottom: -30px; transform: translateY(22px); border: 1px solid var(--line-2); border-radius: 999px; background: #fff; box-shadow: 0 2px 8px rgba(17,20,24,.08); font: 500 12px var(--sans); color: var(--text-3); cursor: pointer; }
+.scroll-hint:hover { color: var(--text); border-color: #c9cdd3; }
+.scroll-hint[hidden], .jump-latest[hidden] { display: none; }
+.thread { padding-top: 28px; }
+.thread-start { align-self: center; font-size: 13px; color: var(--muted); padding: 4px 0 8px; }
+.jump-latest { position: fixed; right: max(24px, calc(50vw - 380px + 12px)); bottom: 24px; z-index: 9; display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 14px; border-radius: 999px; background: var(--text); color: #fff; font-size: 13px; font-weight: 500; box-shadow: 0 4px 14px rgba(17,20,24,.18); }
+.jump-latest:hover { color: #fff; background: #000; }
+@media (max-width: 640px) { .msg-bar { margin: 0 -18px; padding-left: 18px; padding-right: 18px; } .msg-bar h1 { font-size: 26px; } }

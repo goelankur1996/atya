@@ -25,3 +25,22 @@ document.addEventListener("DOMContentLoaded", function () {
   var end = document.getElementById("latest");
   if (end && !location.hash) end.scrollIntoView({ block: "end" });
 });
+// Messages: show "Earlier messages above" while there is more thread above the
+// view, and a "Latest" button while the newest message is out of view.
+document.addEventListener("DOMContentLoaded", function () {
+  var thread = document.getElementById("thread");
+  var end = document.getElementById("latest");
+  var hint = document.getElementById("scroll-hint");
+  var jump = document.getElementById("jump-latest");
+  if (!thread || !end || !("IntersectionObserver" in window)) return;
+  var first = thread.firstElementChild;
+  if (first && hint) {
+    new IntersectionObserver(function (es) {
+      hint.hidden = es[0].isIntersecting;
+    }, { rootMargin: "-140px 0px 0px 0px" }).observe(first);
+    hint.addEventListener("click", function () { window.scrollBy({ top: -window.innerHeight * 0.7, behavior: "smooth" }); });
+  }
+  if (jump) {
+    new IntersectionObserver(function (es) { jump.hidden = es[0].isIntersecting; }).observe(end);
+  }
+});

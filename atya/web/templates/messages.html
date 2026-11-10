@@ -2,27 +2,36 @@
 {% set active = "messages" %}
 {% block title %}Messages · ATYA{% endblock %}
 {% block main_class %} class="narrow"{% endblock %}
+{% block body_class %} class="page-messages"{% endblock %}
 {% block body %}
-<div class="msg-tools">
-  <h1>Messages</h1>
-  <nav class="seg" aria-label="Show">
-    {% for k, label in kinds.items() %}
-      <a href="{{ url_for('messages', kind=k if k != 'all' else None, q=q or None) }}"{% if k == kind %} class="on" aria-current="page"{% endif %}>{{ label }}</a>
-    {% endfor %}
-  </nav>
+<div class="msg-bar">
+  <div class="msg-tools">
+    <h1>Messages</h1>
+    <nav class="seg" aria-label="Show">
+      {% for k, label in kinds.items() %}
+        <a href="{{ url_for('messages', kind=k if k != 'all' else None, q=q or None) }}"{% if k == kind %} class="on" aria-current="page"{% endif %}>{{ label }}</a>
+      {% endfor %}
+    </nav>
+  </div>
+  <form class="searchbox compact" action="{{ url_for('messages') }}" method="get" role="search">
+    {% if kind != "all" %}<input type="hidden" name="kind" value="{{ kind }}">{% endif %}
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+    <label class="sr-only" for="mq">Search your messages</label>
+    <input id="mq" type="search" name="q" value="{{ q }}" placeholder="Search your messages">
+  </form>
+  <button type="button" class="scroll-hint" id="scroll-hint" hidden>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>
+    Earlier messages above
+  </button>
 </div>
-<form class="searchbox compact" action="{{ url_for('messages') }}" method="get" role="search">
-  {% if kind != "all" %}<input type="hidden" name="kind" value="{{ kind }}">{% endif %}
-  <label class="sr-only" for="mq">Search your messages</label>
-  <input id="mq" type="search" name="q" value="{{ q }}" placeholder="Search your messages">
-</form>
 
 {% if not items %}
 <p class="muted">No messages{% if q %} containing “{{ q }}”{% endif %}.</p>
 {% endif %}
 
 {% if more %}<p class="pager center-text"><a href="{{ url_for('messages', kind=kind if kind != 'all' else None, q=q or None, page=page+1) }}">Older messages</a></p>{% endif %}
-<ol class="thread">
+<ol class="thread" id="thread">
+  {% if items and not more %}<li class="thread-start">This is where your messages begin.</li>{% endif %}
 {% for it in items %}
   {% if it.day %}<li class="day">{{ it.day }}</li>{% endif %}
   <li class="turn">
@@ -67,4 +76,8 @@
 
 {% if page > 1 %}<p class="pager center-text"><a href="{{ url_for('messages', kind=kind if kind != 'all' else None, q=q or None, page=page-1) }}">Newer messages</a></p>{% endif %}
 <div id="latest" class="thread-end" aria-hidden="true"></div>
+<a class="jump-latest" id="jump-latest" href="#latest" hidden>
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12l7 7 7-7"></path></svg>
+  Latest
+</a>
 {% endblock %}
