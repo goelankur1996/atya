@@ -505,11 +505,13 @@ class Tx:
 
     def add_outbox(self, tenant_id: uuid.UUID, *, chat_id: int, body: str,
                    inbox_id: uuid.UUID | None = None, reply_to_message_id: int | None = None,
-                   priority: str = "routine", actor: str = "processor") -> uuid.UUID:
+                   priority: str = "routine", actor: str = "processor",
+                   buttons: list[list[tuple[str, str]]] | None = None) -> uuid.UUID:
         row = self._one(
-            "INSERT INTO outbox (tenant_id, inbox_id, chat_id, reply_to_message_id, body, priority) "
-            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-            (tenant_id, inbox_id, chat_id, reply_to_message_id, body, priority))
+            "INSERT INTO outbox (tenant_id, inbox_id, chat_id, reply_to_message_id, body, priority, buttons) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (tenant_id, inbox_id, chat_id, reply_to_message_id, body, priority,
+             Jsonb([[list(b) for b in r] for r in buttons]) if buttons else None))
         assert row is not None
         self.audit(tenant_id, actor=actor, action="create", target_table="outbox",
                    target_id=row["id"], summary="reply queued",
@@ -549,6 +551,20 @@ class Tx:
         return self._all(
             f"SELECT * FROM inbox WHERE {' AND '.join(where)} "  # noqa: S608 (fixed fragments)
             "ORDER BY captured_at DESC, seq DESC LIMIT %s OFFSET %s", (*params, limit, offset))
+
+    def refile_as_capture(self, tenant_id: uuid.UUID, inbox_id: uuid.UUID) -> bool:
+        """'Save as task': send an answered question back to the processor as a
+        capture. Only once, and only for a message that was treated as a question."""
+        row = self._one("UPDATE inbox SET status = 'pending', attempts = 0, claimed_at = NULL, "
+                        "forced_intent = 'log' "
+                        "WHERE id = %s AND tenant_id = %s AND intent = 'query' AND status = 'responded' "
+                        "AND forced_intent IS NULL RETURNING seq",
+                        (inbox_id, tenant_id))
+        if row is None:
+            return False
+        self.audit(tenant_id, actor="receiver", action="update", target_table="inbox", target_id=inbox_id,
+                   summary=f"INB-{row['seq']} re-filed as a task (Save as task)")
+        return True
 
     def retry_inbox(self, tenant_id: uuid.UUID, inbox_id: uuid.UUID) -> bool:
         """Send a failed message back to the processor. False if it isn't failed."""

@@ -28,10 +28,10 @@ class LLM(Protocol):
     # timezone, e.g. "Tuesday 2026-11-03 00:12 (Asia/Kolkata)".
     def classify(self, text: str) -> dict: ...   # {"intent": log|query|chat, "reply": str}
     def plan_fanout(self, *, schema: Schema, raw_content: str, captured_local: str,
-                    context: dict[str, list[dict]]) -> dict: ...
+                    context: dict[str, list[dict]], hint: str | None = None) -> dict: ...
     def plan_query(self, *, schema: Schema, question: str, now: str) -> dict: ...
     def broaden_search(self, *, question: str, tried: str, found: list[str]) -> str: ...
-    def answer(self, *, schema: Schema, question: str, records: list[dict], now: str) -> str: ...
+    def answer(self, *, schema: Schema, question: str, records: list[dict], now: str) -> dict: ...
 
 
 # --- prompts -------------------------------------------------------------------
@@ -42,7 +42,9 @@ CLASSIFY_SYSTEM = """You classify a single message sent to a personal memory bot
 - query = a question or request for information ("what / who / when / where / why / how / can / should / is / are / show me / list / how many", or any other request to retrieve known data).
 - chat = pure small talk addressed to the bot with nothing to save and nothing to look up: greetings, thanks, "ok", "are you there?", "test".
 
-Tie-breakers: a message with any real information in it is "log", even if it starts with a greeting ("hi, met Rahul today" = log). If it is genuinely ambiguous between log and query, output "query".
+Instructions to self are captures, not questions. A message that tells the owner (or the bot) to do something later is "log", because it should become a task: "check on the Costa Rica product", "follow up with Meera", "remind me to renew the passport", "need to call the bank", "buy batteries", "book flights to Goa", "look into Voyage pricing". Only a message that asks for information already saved is "query": "what's the status of the Costa Rica product?", "did I follow up with Meera?", "check what I owe Rahul" (asks to look something up).
+
+Tie-breakers: a message with any real information in it is "log", even if it starts with a greeting ("hi, met Rahul today" = log). An imperative about a future action is "log". If it is still genuinely ambiguous between log and query, output "query".
 
 For chat only, also write a reply: one short, friendly line. If it is a greeting, mention that they can send anything to remember or ask about what they saved. No emoji.
 
@@ -153,12 +155,17 @@ Keyword rules (the search matches whole words, any one word is enough, and it do
 - Also add the other words the owner might have used when writing it down: synonyms, related terms, abbreviations and their expansions, alternative spellings ("gym workout exercise training lift" for a question about the gym; "VLA vision-language-action policy model" for VLA).
 - 4 to 15 words. No stop words, no dates."""
 
-BROADEN_SYSTEM = """A keyword search over someone's personal notes found too little to answer their question. Suggest different words to search for.
+BROADEN_SYSTEM = """A keyword search over someone's personal notes found too little to answer their question. Suggest other ways the SAME things might have been written, so the search can find notes that use different wording.
 
-The search matches whole words (any one word is enough) and does not understand meaning, so think about how the owner might have phrased the note when they wrote it: synonyms, broader and narrower terms, related activities, people or places, abbreviations, alternative spellings. Do not repeat words that were already tried.
+The search matches whole words (any one word is enough) and does not understand meaning.
+
+Allowed: synonyms and near-synonyms of the question's own words, singular/plural and other word forms, abbreviations and their expansions, alternative spellings, and a person's or place's other names ("Costa Rica" -> "CR costarica"; "gym" -> "workout exercise training"; "pricing" -> "price prices cost quote").
+Not allowed: guessing what the subject might relate to. Never add topics, products, industries, people or places the question doesn't name (for "Costa Rica product", do NOT add coffee, banana, export, supplier). A wrong guess finds unrelated notes, which is worse than finding nothing.
+
+Do not repeat words already tried. If there is nothing sensible to add, return an empty string.
 
 Output exactly one JSON object, no prose, no markdown fences:
-{"search": "<5 to 15 new words, space-separated>"}"""
+{"search": "<0 to 10 words, space-separated>"}"""
 
 ANSWER_SYSTEM = """You answer questions from the owner of a personal memory system.
 
@@ -177,12 +184,18 @@ You may ONLY use the records provided in the user message. Do not guess, do not 
 - Start directly with the answer. No preamble, and never narrate your process ("Retrieve:", "Looking at the records...").
 - Concise and declarative. Telegram-friendly short lines. Aim for under 250 words.
 - For long lists, summarise first (counts, what is next, what is blocked), then give only the items that matter for the question. Offer to list the rest.
-- If nothing relevant was found, say so in one or two sentences.
+- Relevance first: decide whether each record is actually about what was asked. Records are retrieved by loose keyword matching, plus some recent records for context, so many will be unrelated. Use only the relevant ones. Never present an unrelated record as the answer, and never answer a different question than the one asked.
+- If nothing relevant was found, say so plainly in one or two sentences, naming the subject ("I don't have anything about the Costa Rica product yet."). Do not list unrelated records instead.
 - Plain text only. No Markdown at all: no **bold**, no `backticks`, no # headers. Lists as plain "1." lines.
 - Dates are given with their weekday; copy the weekday as given, never work one out yourself.
 - Refer to records by their ID in brackets, e.g. [TSK-12], so the owner can find them.
 - Now is {now}. Use it for anything relative ("last week", "overdue", "this Friday").
-- If the records are empty or insufficient, say so plainly and say what would need to be captured."""
+- If the records are empty or insufficient, say so plainly and say what would need to be captured.
+
+# Output
+Exactly one JSON object, no prose around it, no markdown fences:
+{{"found": true or false, "answer": "<the reply text, plain text as described above>"}}
+"found" is false when none of the records is relevant to the question (so the reply is essentially "I don't have anything about X"), true otherwise."""
 
 
 # --- implementation ------------------------------------------------------------
@@ -213,13 +226,15 @@ class ClaudeLLM:
         return {"intent": intent, "reply": reply}
 
     def plan_fanout(self, *, schema: Schema, raw_content: str, captured_local: str,
-                    context: dict[str, list[dict]]) -> dict:
+                    context: dict[str, list[dict]], hint: str | None = None) -> dict:
         system = FANOUT_SYSTEM.format(
             hard_rules=schema.rules_hard, routing_rules=schema.rules_routing,
             vocabularies=schema.render_vocabularies(), types=schema.render_types(),
             children=schema.render_children())
         user = FANOUT_USER.format(captured_local=captured_local, context=render_context(context),
                                   raw_content=raw_content[:8000])
+        if hint:
+            user += f"\n\nNote from the owner: {hint}"
         plan = parse_json(self._call(model=MODEL, system=system, user=user, max_tokens=2048))
         if not isinstance(plan.get("writes", []), list):
             raise LLMError("plan.writes is not a list")
@@ -255,7 +270,21 @@ class ClaudeLLM:
         if len(data) > 60000:
             data = data[:60000] + " ...[truncated]"
         user = f"Question:\n{question}\n\nRecords:\n{data if records else '(none found)'}"
-        return self._call(model=MODEL, system=system, user=user, max_tokens=2048) or "(no answer)"
+        raw = self._call(model=MODEL, system=system, user=user, max_tokens=2048)
+        return parse_answer(raw, had_records=bool(records))
+
+
+def parse_answer(raw: str, *, had_records: bool) -> dict:
+    """{"text", "found"} from the answer model's JSON. If the model ignored the
+    format, use its text as the answer and assume something was found."""
+    try:
+        obj = parse_json(raw)
+        text = str(obj.get("answer") or "").strip()
+        if text:
+            return {"text": text, "found": bool(obj.get("found", True)) and had_records}
+    except Exception:
+        pass
+    return {"text": (raw or "").strip() or "(no answer)", "found": had_records}
 
 
 def render_context(context: dict[str, list[dict]]) -> str:

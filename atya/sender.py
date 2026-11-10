@@ -17,7 +17,9 @@ def send_once(store: Store, tg: TelegramAPI) -> int:
         rows = tx.claim_outbox(limit=20)
     for row in rows:
         try:
-            tg.send_message(row["chat_id"], row["body"], reply_to=row["reply_to_message_id"])
+            buttons = [[tuple(b) for b in r] for r in row["buttons"]] if row.get("buttons") else None
+            tg.send_message(row["chat_id"], row["body"], reply_to=row["reply_to_message_id"],
+                            buttons=buttons)
             ok, err = True, None
         except TelegramError as e:
             ok, err = False, str(e)

@@ -64,6 +64,7 @@ class FakeLLM:
         self.query_plans: dict[str, dict] = {}
         self.seen_records: list[dict] = []
         self.broader: dict[str, str] = {}
+        self.found: dict[str, bool] = {}
         self.broaden_calls: list[tuple] = []
         self.fail_times = 0
 
@@ -74,7 +75,8 @@ class FakeLLM:
         intent = self.intent.get(text, "log")
         return {"intent": intent, "reply": "Hi there." if intent == "chat" else ""}
 
-    def plan_fanout(self, *, schema, raw_content, captured_local, context):
+    def plan_fanout(self, *, schema, raw_content, captured_local, context, hint=None):
+        self.last_hint = hint
         self.last_context = context
         self.last_captured_local = captured_local
         return self.plans[raw_content]
@@ -89,7 +91,8 @@ class FakeLLM:
 
     def answer(self, *, schema, question, records, now):
         self.seen_records = records
-        return "Answer: " + ", ".join(r["id"] for r in records)
+        found = self.found.get(question, bool(records))
+        return {"text": "Answer: " + ", ".join(r["id"] for r in records), "found": found}
 
 
 @pytest.fixture
@@ -398,3 +401,82 @@ def test_failed_retry_still_answers(store, settings, clean):
     tg.push(q)
     run_all(store, tg, llm, settings)
     assert tg.sent[-1][1] == "Answer: "
+
+
+# --- relevance and "Save as task" ------------------------------------------------
+
+def test_parse_answer():
+    from atya.llm import parse_answer
+    assert parse_answer('{"found": false, "answer": "Nothing on that yet."}', had_records=True) == \
+        {"text": "Nothing on that yet.", "found": False}
+    assert parse_answer('{"found": true, "answer": "[TSK-1] Call Meera"}', had_records=True)["found"] is True
+    assert parse_answer('{"found": true, "answer": "x"}', had_records=False)["found"] is False   # no records
+    assert parse_answer("plain text answer", had_records=True) == {"text": "plain text answer", "found": True}
+    assert parse_answer("", had_records=False) == {"text": "(no answer)", "found": False}
+
+
+def test_prompts_carry_the_new_rules():
+    from atya import llm as L
+    assert "check on the Costa Rica product" in L.CLASSIFY_SYSTEM
+    assert "Never add topics" in L.BROADEN_SYSTEM
+    assert "Never present an unrelated record" in L.ANSWER_SYSTEM
+    L.ANSWER_SYSTEM.format(hard_rules="", vocabularies="", lenses="", now="now")   # braces escaped
+
+
+def test_nothing_found_offers_save_as_task_and_tap_files_it(store, settings, clean):
+    tg, llm = FakeTelegram(), FakeLLM()
+    q = "Check on costa rica product"
+    llm.intent[q] = "query"
+    llm.query_plans[q] = {"types": ["task"], "search": "costa rica product"}
+    llm.found[q] = False
+    tg.push(q)
+    run_all(store, tg, llm, settings)
+    t = owner_tenant(store)
+    with store.tx(system=True) as tx:
+        row = tx._one("SELECT * FROM inbox WHERE tenant_id = %s AND raw_content = %s", (t["id"], q))
+        out = tx._one("SELECT * FROM outbox WHERE inbox_id = %s", (row["id"],))
+    assert row["intent"] == "query" and "offered Save as task" in row["processor_notes"]
+    assert out["buttons"] == [[["Save as task", f"save:{row['id']}"]]]
+    assert tg.last_buttons == [[("Save as task", f"save:{row['id']}")]]
+
+    # Tap it: the same message is filed as a capture, without asking the classifier again.
+    llm.intent[q] = "query"                       # would still say query if asked
+    llm.plans[q] = {"writes": [{"type": "task", "title": "Check on Costa Rica product"}]}
+    tg.push_tap(f"save:{row['id']}")
+    run_all(store, tg, llm, settings)
+    assert "Save as task" in (llm.last_hint or "")
+    with store.tx(system=True) as tx:
+        row2 = tx.inbox_row(row["id"])
+        task = tx._one("SELECT * FROM records WHERE tenant_id = %s AND type = 'task'", (t["id"],))
+        bodies = [o["body"] for o in tx._all("SELECT body FROM outbox WHERE inbox_id = %s ORDER BY created_at", (row["id"],))]
+    assert row2["status"] == "processed" and row2["intent"] == "log" and row2["forced_intent"] == "log"
+    assert task["title"] == "Check on Costa Rica product" and task["source_inbox_id"] == row["id"]
+    assert "Saving it as a task…" in bodies
+
+    # A second tap does nothing.
+    tg.push_tap(f"save:{row['id']}")
+    run_all(store, tg, llm, settings)
+    with store.tx(system=True) as tx:
+        assert tx._one("SELECT count(*) AS n FROM records WHERE tenant_id = %s AND type = 'task'", (t["id"],))["n"] == 1
+
+
+def test_found_answer_has_no_button_and_strangers_cannot_tap(store, settings, clean):
+    tg, llm = FakeTelegram(), FakeLLM()
+    cap = "Met Meera about the pilot"
+    llm.plans[cap] = {"writes": [{"type": "person", "title": "Meera"}]}
+    q = "who is Meera?"
+    llm.intent[q] = "query"
+    llm.query_plans[q] = {"types": ["person"], "search": "Meera"}
+    tg.push(cap)
+    tg.push(q)
+    run_all(store, tg, llm, settings)
+    assert tg.last_buttons is None
+    t = owner_tenant(store)
+    with store.tx(system=True) as tx:
+        qrow = tx._one("SELECT id FROM inbox WHERE tenant_id = %s AND raw_content = %s", (t["id"], q))
+    # Someone else (no account) tapping a forged button changes nothing.
+    tg.push_tap(f"save:{qrow['id']}", user_id=999_000_111)
+    tg.push_tap("save:not-a-uuid")
+    run_all(store, tg, llm, settings)
+    with store.tx(system=True) as tx:
+        assert tx.inbox_row(qrow["id"])["forced_intent"] is None

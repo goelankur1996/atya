@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import time
+import uuid
 
 from . import commands
 from .config import Settings
@@ -118,6 +119,8 @@ def handle_callback(store: Store, tg: TelegramAPI, settings: Settings, cq: dict)
         tg.answer_callback(cq["id"])
     except Exception:
         log.warning("answerCallbackQuery failed", exc_info=True)
+    if data.startswith("save:"):
+        return save_as_task(store, tg, user_id, chat_id, data[5:])
     if not data.startswith("tz:"):
         return "ignored:callback"
     with store.tx(system=True) as tx:
@@ -131,6 +134,24 @@ def handle_callback(store: Store, tg: TelegramAPI, settings: Settings, cq: dict)
                        name=None, tenant=tenant)
     commands.finish_onboarding(ctx, zone)
     return "onboarded"
+
+
+def save_as_task(store: Store, tg: TelegramAPI, user_id: int, chat_id: int, inbox_id: str) -> str:
+    """'Save as task' tapped under an answer that found nothing."""
+    try:
+        iid = uuid.UUID(inbox_id)
+    except ValueError:
+        return "ignored:bad-save"
+    with store.tx(system=True) as tx:
+        tenant = tx.tenant_by_telegram(user_id)
+    if tenant is None or tenant["status"] != "active":
+        return "ignored:callback-no-tenant"
+    with store.tx(tenant["id"]) as tx:              # row-level security: only their own message
+        if not tx.refile_as_capture(tenant["id"], iid):
+            return "ignored:already-saved"
+        tx.add_outbox(tenant["id"], chat_id=chat_id, body="Saving it as a task…", inbox_id=iid,
+                      actor="receiver")
+    return "refiled"
 
 
 def poll_once(store: Store, tg: TelegramAPI, settings: Settings, *, timeout: int = 30) -> int:

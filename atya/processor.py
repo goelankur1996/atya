@@ -381,7 +381,10 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                 tx.finish_inbox(row["id"], status="failed", notes="empty content")
             return "failed"
 
-        cls = llm.classify(raw)
+        if row.get("forced_intent") == "log":       # the user tapped "Save as task"
+            cls = {"intent": "log", "reply": ""}
+        else:
+            cls = llm.classify(raw)
         intent = cls["intent"]
         if intent == "chat":
             with store.tx(row["tenant_id"]) as tx:
@@ -392,8 +395,11 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
         if intent == "log":
             with store.tx(row["tenant_id"]) as tx:
                 context = fanout_context(tx, tenant["id"])
+            hint = ("I tapped 'Save as task' on this message: file it as a task (other records "
+                    "only if the message clearly calls for them).") if row.get("forced_intent") == "log" else None
             plan = llm.plan_fanout(schema=schema, raw_content=raw,
-                                   captured_local=local_label(row["captured_at"], tz), context=context)
+                                   captured_local=local_label(row["captured_at"], tz), context=context,
+                                   hint=hint)
             with store.tx(row["tenant_id"]) as tx:
                 notes = FanoutExecutor(tx, schema, tenant, row).run(plan)
                 tx.finish_inbox(row["id"], status="processed", notes=notes, intent="log")
@@ -411,14 +417,18 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
         with store.tx(row["tenant_id"]) as tx:
             records = gather_records(tx, schema, tenant["id"], plan, query_vector)
         answer = llm.answer(schema=schema, question=raw, records=records, now=now)
+        # Nothing relevant found: maybe it was a to-do, not a question. Offer to save it.
+        buttons = None if answer["found"] else [[("Save as task", f"save:{row['id']}")]]
         with store.tx(row["tenant_id"]) as tx:
-            tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=answer,
-                          inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]))
+            tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=answer["text"],
+                          inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]),
+                          buttons=buttons)
             tx.finish_inbox(row["id"], status="responded", intent="query",
                             notes=f"searched {', '.join(plan.get('types', []))} for {plan.get('search')!r}"
                                   + (f", then all types for {plan['broader']!r}" if plan.get("broader") else "")
                                   + "; "
-                                  f"{len(records)} records")
+                                  f"{len(records)} records"
+                                  + ("" if answer["found"] else "; nothing relevant, offered Save as task"))
         return "responded"
 
     except Exception as e:
