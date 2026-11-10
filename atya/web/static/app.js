@@ -51,3 +51,34 @@ document.addEventListener("DOMContentLoaded", function () {
     new IntersectionObserver(function (es) { jump.hidden = es[0].isIntersecting; }).observe(end);
   }
 });
+// Chat composer: Enter sends, Shift+Enter adds a line; the box grows with text.
+document.addEventListener("DOMContentLoaded", function () {
+  var form = document.getElementById("composer");
+  if (!form) return;
+  var box = form.querySelector("textarea");
+  var btn = form.querySelector(".sendbtn");
+  function grow() { box.style.height = "auto"; box.style.height = Math.min(box.scrollHeight, 200) + "px"; }
+  box.addEventListener("input", grow);
+  box.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      if (box.value.trim()) form.requestSubmit();
+    }
+  });
+  form.addEventListener("submit", function () { btn.disabled = true; });
+  if (location.hash === "#latest" || !location.hash) box.focus({ preventScroll: true });
+});
+// While a message is being worked on, check every 2 s and reload when done.
+document.addEventListener("DOMContentLoaded", function () {
+  var thread = document.getElementById("thread");
+  if (!thread || !thread.dataset.pending) return;
+  var ids = thread.dataset.pending, tries = 0;
+  var timer = setInterval(function () {
+    if (++tries > 90) { clearInterval(timer); return; }       // give up after 3 minutes
+    fetch("/messages/pending?ids=" + encodeURIComponent(ids), { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (d && d.pending.length < ids.split(",").length) { clearInterval(timer); location.reload(); }
+      }).catch(function () {});
+  }, 2000);
+});

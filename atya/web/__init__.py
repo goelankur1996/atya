@@ -92,7 +92,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
     def headers(resp: Response) -> Response:
         resp.headers["Content-Security-Policy"] = (
             "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; "
-            "form-action 'self'; connect-src 'none'; "
+            "form-action 'self'; connect-src 'self'; "
             "frame-ancestors 'none'; base-uri 'none'")
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["Referrer-Policy"] = "no-referrer"
@@ -357,8 +357,53 @@ def create_app(store: Store, settings: Settings) -> Flask:
             day = fmt_day(it["at"])
             it["day"] = day if day != last_day else None
             last_day = day
+        pending_ids = [str(it["row"]["id"]) for it in items
+                       if it["kind"] == "in" and it["row"]["status"] in ("pending", "processing")]
         return render_template("messages.html", items=items, kind=kind, kinds=MESSAGE_KINDS, q=q,
-                               page=page, more=more)
+                               page=page, more=more, pending_ids=pending_ids,
+                               note=request.args.get("note", ""))
+
+    @app.post("/messages/send")
+    def message_send():
+        """Chat from the web: the message joins the same pipeline as Telegram."""
+        need_login()
+        check_csrf()
+        text = request.form.get("text", "").replace("\r\n", "\n").replace("\x00", "").strip()[:8000]
+        if not text:
+            return redirect(url_for("messages") + "#latest")
+        if text.startswith("/"):
+            return redirect(url_for("messages", note="commands") + "#latest")
+        with tx() as t:
+            t.add_inbox(g.tenant["id"], source="web", raw_content=text,
+                        source_message_id=f"web:{uuid.uuid4()}", sender="web", actor="web")
+        return redirect(url_for("messages") + "#latest")
+
+    @app.get("/messages/pending")
+    def messages_pending():
+        """Polled by the page while a message is being processed."""
+        need_login()
+        ids = []
+        for part in request.args.get("ids", "").split(",")[:50]:
+            try:
+                ids.append(uuid.UUID(part))
+            except ValueError:
+                continue
+        with tx() as t:
+            still = t.pending_inbox(g.tenant["id"], ids) if ids else []
+        return {"pending": [str(i) for i in still]}
+
+    @app.post("/messages/<inbox_id>/save")
+    def message_save_as_task(inbox_id: str):
+        """'Save as task' under a reply that found nothing (same as the Telegram button)."""
+        need_login()
+        check_csrf()
+        try:
+            iid = uuid.UUID(inbox_id)
+        except ValueError:
+            abort(404)
+        with tx() as t:
+            t.refile_as_capture(g.tenant["id"], iid)
+        return redirect(url_for("messages") + "#latest")
 
     @app.post("/messages/<inbox_id>/retry")
     def message_retry(inbox_id: str):

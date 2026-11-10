@@ -507,11 +507,21 @@ class Tx:
                    inbox_id: uuid.UUID | None = None, reply_to_message_id: int | None = None,
                    priority: str = "routine", actor: str = "processor",
                    buttons: list[list[tuple[str, str]]] | None = None) -> uuid.UUID:
+        """Queue a reply. A reply to a message sent from the web view stays in
+        the web view (channel 'web', marked sent at once; the Telegram sender
+        never sees it)."""
+        channel = "telegram"
+        if inbox_id is not None:
+            src = self._one("SELECT source FROM inbox WHERE id = %s", (inbox_id,))
+            if src and src["source"] == "web":
+                channel = "web"
         row = self._one(
-            "INSERT INTO outbox (tenant_id, inbox_id, chat_id, reply_to_message_id, body, priority, buttons) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-            (tenant_id, inbox_id, chat_id, reply_to_message_id, body, priority,
-             Jsonb([[list(b) for b in r] for r in buttons]) if buttons else None))
+            "INSERT INTO outbox (tenant_id, inbox_id, channel, chat_id, reply_to_message_id, body, priority, "
+            "buttons, status, sent_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (tenant_id, inbox_id, channel, chat_id or 0, reply_to_message_id, body, priority,
+             Jsonb([[list(b) for b in r] for r in buttons]) if buttons else None,
+             "sent" if channel == "web" else "pending",
+             dt.datetime.now(dt.timezone.utc) if channel == "web" else None))
         assert row is not None
         self.audit(tenant_id, actor=actor, action="create", target_table="outbox",
                    target_id=row["id"], summary="reply queued",
@@ -551,6 +561,12 @@ class Tx:
         return self._all(
             f"SELECT * FROM inbox WHERE {' AND '.join(where)} "  # noqa: S608 (fixed fragments)
             "ORDER BY captured_at DESC, seq DESC LIMIT %s OFFSET %s", (*params, limit, offset))
+
+    def pending_inbox(self, tenant_id: uuid.UUID, ids: list[uuid.UUID]) -> list[uuid.UUID]:
+        """Which of these messages are still waiting to be processed."""
+        rows = self._all("SELECT id FROM inbox WHERE tenant_id = %s AND id = ANY(%s) "
+                         "AND status IN ('pending', 'processing')", (tenant_id, ids))
+        return [r["id"] for r in rows]
 
     def refile_as_capture(self, tenant_id: uuid.UUID, inbox_id: uuid.UUID) -> bool:
         """'Save as task': send an answered question back to the processor as a
@@ -644,7 +660,8 @@ class Tx:
         rows = self._all(
             "UPDATE outbox SET status = 'sending', attempts = attempts + 1 "
             "WHERE id IN ("
-            "  SELECT id FROM outbox WHERE (status = 'pending' AND (scheduled_for IS NULL OR scheduled_for <= now())) "
+            "  SELECT id FROM outbox WHERE (status = 'pending' AND channel = 'telegram' "
+            "    AND (scheduled_for IS NULL OR scheduled_for <= now())) "
             "  ORDER BY created_at LIMIT %s FOR UPDATE SKIP LOCKED) RETURNING *", (limit,))
         return sorted(rows, key=lambda r: r["created_at"])
 

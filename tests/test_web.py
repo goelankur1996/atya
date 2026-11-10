@@ -538,3 +538,66 @@ def test_search_partial_words_fields_and_filters(app, store, settings, tenant):
     assert 'id="topq"' in client.get("/").get_data(as_text=True)          # search on every page
     lst = client.get("/t/task?q=wrist").get_data(as_text=True)
     assert "Recalibrate" in lst and "Old calibration" not in lst
+
+
+def test_chat_from_web_goes_through_pipeline_and_stays_on_web(app, store, settings, tenant):
+    from atya import processor, sender
+    from tests.test_pipeline import FakeLLM, FakeTelegram as FT
+    with store.tx(system=True) as tx:
+        tx.conn.execute("UPDATE tenants SET telegram_chat_id = 777 WHERE id = %s", (tenant["id"],))
+    client, _ = sign_in(app, store, settings, tenant)
+    page = client.get("/messages").get_data(as_text=True)
+    assert 'id="composer"' in page and 'name="text"' in page
+    token = csrf(client, "/messages")
+    q = "what's due this week?"
+    r = client.post("/messages/send", data={"csrf": token, "text": q})
+    assert r.status_code == 302 and r.headers["Location"].endswith("/messages#latest")
+    with store.tx(system=True) as tx:
+        row = tx._one("SELECT * FROM inbox WHERE tenant_id = %s AND raw_content = %s", (tenant["id"], q))
+    assert row["source"] == "web" and row["status"] == "pending"
+    # While waiting: a typing bubble, and the page knows what to poll for.
+    page = client.get("/messages").get_data(as_text=True)
+    assert "typing" in page and str(row["id"]) in page
+    assert client.get(f"/messages/pending?ids={row['id']}").get_json() == {"pending": [str(row["id"])]}
+
+    llm = FakeLLM()
+    llm.intent[q] = "query"
+    llm.query_plans[q] = {"types": ["task"], "search": "due"}
+    llm.found[q] = False
+    while processor.process_once(store, llm, settings):
+        pass
+    assert client.get(f"/messages/pending?ids={row['id']}").get_json() == {"pending": []}
+    with store.tx(system=True) as tx:
+        out = tx._one("SELECT * FROM outbox WHERE inbox_id = %s", (row["id"],))
+    assert out["channel"] == "web" and out["status"] == "sent"
+    tg = FT()
+    sender.send_once(store, tg)
+    assert all(chat != 777 for chat, *_ in tg.sent)        # nothing echoed to Telegram
+    page = client.get("/messages").get_data(as_text=True)
+    assert "from the web" in page and "Answer: " in page and "Save as task" in page
+
+    # Save as task from the web.
+    llm.plans[q] = {"writes": [{"type": "task", "title": "Due this week"}]}
+    r = client.post(f"/messages/{row['id']}/save", data={"csrf": token})
+    assert r.status_code == 302
+    while processor.process_once(store, llm, settings):
+        pass
+    with store.tx(system=True) as tx:
+        assert tx._one("SELECT count(*) AS n FROM records WHERE tenant_id = %s AND type = 'task'",
+                       (tenant["id"],))["n"] == 1
+
+
+def test_chat_send_edge_cases(app, store, settings, tenant):
+    client, _ = sign_in(app, store, settings, tenant)
+    token = csrf(client, "/messages")
+    assert client.post("/messages/send", data={"text": "hi"}).status_code == 400            # csrf
+    r = client.post("/messages/send", data={"csrf": token, "text": "   "})
+    assert r.status_code == 302
+    r = client.post("/messages/send", data={"csrf": token, "text": "/export"})
+    assert "note=commands" in r.headers["Location"]
+    assert "work in Telegram" in client.get("/messages?note=commands").get_data(as_text=True)
+    client.post("/messages/send", data={"csrf": token, "text": "line one\r\nline two\x00"})
+    with store.tx(system=True) as tx:
+        rows = tx._all("SELECT raw_content FROM inbox WHERE tenant_id = %s", (tenant["id"],))
+    assert [r["raw_content"] for r in rows] == ["line one\nline two"]
+    assert client.get("/messages/pending?ids=nope,").get_json() == {"pending": []}
