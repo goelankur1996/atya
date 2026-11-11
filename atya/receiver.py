@@ -11,8 +11,9 @@ import logging
 import time
 import uuid
 
-from . import commands, documents
+from . import commands, documents, reminders
 from .config import Settings
+from .schema import CLOSED_STATUSES, load_schema
 from .store import Store
 from .telegram import TelegramAPI, TelegramError
 
@@ -146,6 +147,8 @@ def handle_callback(store: Store, tg: TelegramAPI, settings: Settings, cq: dict)
         log.warning("answerCallbackQuery failed", exc_info=True)
     if data.startswith("save:"):
         return save_as_task(store, tg, user_id, chat_id, data[5:])
+    if data.startswith("rem:"):
+        return reminder_button(store, user_id, chat_id, data)
     if not data.startswith("tz:"):
         return "ignored:callback"
     with store.tx(system=True) as tx:
@@ -177,6 +180,44 @@ def save_as_task(store: Store, tg: TelegramAPI, user_id: int, chat_id: int, inbo
         tx.add_outbox(tenant["id"], chat_id=chat_id, body="Saving it as a task…", inbox_id=iid,
                       actor="receiver")
     return "refiled"
+
+
+def reminder_button(store: Store, user_id: int, chat_id: int, data: str) -> str:
+    """Done / In 1 hour / Tomorrow 9am under a reminder."""
+    _, choice, rid = (data.split(":", 2) + ["", ""])[:3]
+    try:
+        record_id = uuid.UUID(rid)
+    except ValueError:
+        return "ignored:bad-reminder"
+    if choice not in ("done", "1h", "tmrw"):
+        return "ignored:bad-reminder"
+    with store.tx(system=True) as tx:
+        tenant = tx.tenant_by_telegram(user_id)
+    if tenant is None or tenant["status"] != "active":
+        return "ignored:callback-no-tenant"
+    schema = load_schema(tenant["schema_name"])
+    tz = reminders.tzinfo(tenant["timezone"])
+    with store.tx(tenant["id"]) as tx:                 # row-level security: own tasks only
+        rec = tx.record(tenant["id"], record_id)
+        if rec is None or rec["type"] != "task":
+            return "ignored:no-task"
+        ref = f"{schema.types['task'].prefix}-{rec['seq']}"
+        if choice == "done":
+            if rec["fields"].get("Status") in CLOSED_STATUSES:
+                return "ignored:already-done"
+            changes = {"Status": "done"}
+            if "Completed At" in schema.types["task"].fields:
+                changes["Completed At"] = dt.datetime.now(tz).date().isoformat()
+            tx.update_record(tenant["id"], schema, record_id, changes, actor="receiver", by_user=True)
+            body = f"Done: {rec['title']} ({ref})"
+        else:
+            new_at = reminders.snooze_value(choice, tz)
+            tx.update_record(tenant["id"], schema, record_id, {"Remind At": new_at}, actor="receiver",
+                             by_user=True)
+            at = reminders.parse_at(new_at, tz)
+            body = f"OK, I'll remind you again at {reminders.human(at, dt.datetime.now(tz))}: {rec['title']} ({ref})"
+        tx.add_outbox(tenant["id"], chat_id=chat_id, body=body, actor="receiver")
+    return f"reminder:{choice}"
 
 
 def poll_once(store: Store, tg: TelegramAPI, settings: Settings, *, timeout: int = 30) -> int:

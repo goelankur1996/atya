@@ -49,6 +49,7 @@ types:
       Priority:     {type: select, options: [P0, P1, P2, P3]}
       Area:         {type: select, options: {vocab: area}}
       Due Date:     {type: date}
+      Remind At:    {type: date, description: "local date and time to send a reminder, YYYY-MM-DDTHH:MM, no offset"}
       Completed At: {type: date}
       Notes:        {type: text}
       Project:      {type: relation, to: project}
@@ -294,6 +295,7 @@ rules:
     - Observation / reflection / feeling (atomic, single topic) → create a thought. Body = the full verbatim capture (0a). The AI sets derived metadata only: Title, Mood if expressed, Area, Project/People if relevant. An optional short AI summary may go in Summary; it never replaces the body.
     - Day narrative / diary entry → create a journal entry. Body = verbatim capture, one block (0a, 0b). Title = the written date. Date = when written; Covers = subject period if different (0c). Mood / Energy / Sleep / Highlights only if expressed. Per-day data (sleep, workouts) is also extracted to the relevant child trackers, dated to when it happened. Thoughts = atomic fragment; Journal = dated narrative; when ambiguous prefer Thoughts unless it is clearly a whole-day reflection.
       - Sleep: when sleep is mentioned in any capture, fill Journal.Sleep with as much detail as possible: bedtime, wake time, total duration, interruptions, quality signal. One-line vague entries ("slept well") are not enough.
+    - Reminder request ("remind me to X at 2pm", "ping me tomorrow 9am about Y", "in 2 hours remind me...") → a task with Remind At = the exact local date and time (YYYY-MM-DDTHH:MM, no offset; code applies the owner's timezone) and Due Date = that date. If an open task for the same thing exists, update it instead (set Remind At) rather than creating a duplicate. Times relative to the capture time ("in 20 minutes", "in 2 hours") are added to it. Vague times: morning 09:00, noon 12:00, afternoon 14:00, evening 18:00, tonight 20:00, "later" = 3 hours from now. A time already past today with no day named means tomorrow. Never set Remind At unless the owner asked to be reminded.
     - Commitment / choice made → create a decision (Title, Decision, Reasoning, Decided At = today, Project/People if relevant).
     - Media to consume or consumed (books, articles, blogs, websites, movies, TV, videos, songs, podcasts) → library.
       - To consume ("want to read X", a recommendation, a link) → library record, Status=queued, with Type, Format, Priority. No journal entry.

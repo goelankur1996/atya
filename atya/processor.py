@@ -17,7 +17,7 @@ import uuid
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import documents
+from . import documents, reminders
 from .config import Settings
 from .embeddings import Embedder, EmbeddingError
 from .llm import LLM
@@ -363,6 +363,28 @@ def broaden_if_thin(store: Store, llm: LLM, schema: Schema, tenant_id: uuid.UUID
     return {**plan, "broader": broader} if broader else plan
 
 
+# --- reminders -------------------------------------------------------------------
+
+def confirm_reminders(tx: Tx, schema: Schema, tenant: dict, row: dict) -> None:
+    """If this message set a reminder, say exactly when it will fire, so a
+    misread time ("2" meaning 2 am?) can be corrected right away."""
+    tz = reminders.tzinfo(tenant["timezone"])
+    now = dt.datetime.now(dt.timezone.utc).astimezone(tz)
+    lines = []
+    prefix = schema.types["task"].prefix if "task" in schema.types else "TSK"
+    for r in tx.reminders_set_now(tenant["id"], row["id"]):
+        at = reminders.parse_at(r["remind_at"], tz)
+        if at is None:
+            continue
+        when = reminders.human(at, now)
+        if at < now:
+            when += " (that's already past, so it will go out right away)"
+        lines.append(f"I'll remind you at {when}: {r['title']} ({prefix}-{r['seq']})")
+    if lines:
+        tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body="Got it. " + "\n".join(lines),
+                      inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]))
+
+
 # --- files (PDFs) ----------------------------------------------------------------
 
 MAX_EXCERPTS = 6
@@ -524,6 +546,7 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                                    hint=hint)
             with store.tx(row["tenant_id"]) as tx:
                 notes = FanoutExecutor(tx, schema, tenant, row).run(plan)
+                confirm_reminders(tx, schema, tenant, row)
                 tx.finish_inbox(row["id"], status="processed", notes=notes, intent="log")
             return "processed"
 

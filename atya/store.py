@@ -645,6 +645,35 @@ class Tx:
             "WHERE c.tenant_id = %s AND c.search @@ q ORDER BY rank DESC LIMIT %s",
             (query, tenant_id, limit))
 
+    # --- reminders ----------------------------------------------------------------
+
+    def reminder_candidates(self, closed: tuple[str, ...]) -> list[dict]:
+        """Open tasks with a Remind At not yet sent (system scope; caller checks the clock)."""
+        return self._all(
+            "SELECT r.id, r.tenant_id, r.seq, r.title, r.fields->>'Remind At' AS remind_at, "
+            "       t.timezone, t.telegram_chat_id, t.schema_name "
+            "FROM records r JOIN tenants t ON t.id = r.tenant_id "
+            "WHERE t.status = 'active' AND t.telegram_chat_id IS NOT NULL AND r.type = 'task' "
+            "  AND r.fields ? 'Remind At' AND coalesce(r.fields->>'Remind At', '') <> '' "
+            "  AND NOT (coalesce(r.fields->>'Status', '') = ANY(%s)) "
+            "  AND NOT EXISTS (SELECT 1 FROM reminders_sent s "
+            "                  WHERE s.record_id = r.id AND s.remind_at = r.fields->>'Remind At')",
+            (list(closed),))
+
+    def claim_reminder(self, tenant_id: uuid.UUID, record_id: uuid.UUID, remind_at: str) -> bool:
+        """Mark a reminder as sent; False if it already was (exactly once)."""
+        row = self._one("INSERT INTO reminders_sent (tenant_id, record_id, remind_at) VALUES (%s, %s, %s) "
+                        "ON CONFLICT DO NOTHING RETURNING record_id", (tenant_id, record_id, remind_at))
+        return row is not None
+
+    def reminders_set_now(self, tenant_id: uuid.UUID, inbox_id: uuid.UUID) -> list[dict]:
+        """Tasks given a Remind At by this message: created from it, or changed in
+        this transaction (updated_at = now() is the transaction's start time)."""
+        return self._all(
+            "SELECT id, seq, title, fields->>'Remind At' AS remind_at FROM records "
+            "WHERE tenant_id = %s AND type = 'task' AND coalesce(fields->>'Remind At', '') <> '' "
+            "  AND (source_inbox_id = %s OR updated_at = now()) ORDER BY seq", (tenant_id, inbox_id))
+
     # --- morning brief -----------------------------------------------------------
 
     def set_brief(self, tenant_id: uuid.UUID, at: dt.time | None, *,

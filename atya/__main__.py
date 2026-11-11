@@ -1,4 +1,4 @@
-"""Entry point: migrate, then run receiver / processor / sender / web / briefs as supervised threads.
+"""Entry point: migrate, then run receiver / processor / sender / web / briefs / reminders as supervised threads.
 
 Workers share nothing but the database. A crash in one is logged and the
 worker restarts after 5 s; the others keep running.
@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
-from . import briefs, embeddings, processor, receiver, sender, web
+from . import briefs, embeddings, processor, receiver, reminders, sender, web
 from .config import load_settings
 from .llm import ClaudeLLM
 from .migrate import migrate
@@ -78,6 +78,7 @@ def main() -> None:
         ("sender", sender.run, (store, tg, settings)),
         ("web", web.run, (store, settings)),
         ("briefs", briefs.run, (store, settings)),
+        ("reminders", reminders.run, (store, settings)),
     ]
     if embedder is not None:
         workers.append(("embedder", embeddings.run, (store, embedder, settings)))

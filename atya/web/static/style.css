@@ -336,3 +336,4 @@ main.chat { padding-bottom: 0; }
 .composer-file span::before { content: "📎 "; }
 .reflink.file { background: #fff; }
 .me .meta .reflink.file { border-color: #c8daf3; }
+.prop input[type=datetime-local] { max-width: 240px; }

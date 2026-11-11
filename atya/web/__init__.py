@@ -157,7 +157,11 @@ def create_app(store: Store, settings: Settings) -> Flask:
     def fmt_cell(f: FieldDef, value: Any) -> str:
         """List-page rendering: dates as 'Fri' / '13 Nov', the rest via fmt_value."""
         if f.type == "date" and isinstance(value, str) and len(value) >= 10:
-            return day_label(value[:10], local_now().date())
+            label = day_label(value[:10], local_now().date())
+            if len(value) >= 16 and value[10] == "T":
+                h, m = int(value[11:13]), int(value[14:16])
+                label += f", {h % 12 or 12}:{m:02d} {'am' if h < 12 else 'pm'}"
+            return label
         return fmt_value(f, value).replace("_", " ")
 
     def fmt_clock(ts: dt.datetime | None) -> str:
@@ -740,6 +744,8 @@ def form_value(f: FieldDef, value: Any, links: set[str]) -> Any:
         return ""
     if f.type == "number" and isinstance(value, (int, float)):
         return num_str(value)
+    if f.type == "date" and "T" in str(value):
+        return str(value)[:16]                     # what a datetime-local input shows
     return str(value)
 
 

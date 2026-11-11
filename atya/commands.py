@@ -45,6 +45,8 @@ Ask me questions about it: "what do I owe Rahul?", "what did I decide about pric
 
 Progress counts too: "sent the deck to Meera" closes that task.
 
+Reminders: "remind me to call Jim at 2pm" and I'll message you at 2pm. PDFs: send the file and I'll file and summarise it.
+
 Commands:
 /brief 9am - a morning list of what's due, every day at that time (/brief off to stop)
 /web - a one-time link to browse, search and edit your records in a browser

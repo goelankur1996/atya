@@ -55,7 +55,8 @@
   </div>
   {% endif %}
 {% elif f.type == "date" %}
-  <input id="{{ fid }}" type="{{ 'date' if (not v or v|length == 10) else 'text' }}" name="{{ name }}" value="{{ v }}">
+  {% set with_time = f.name == "Remind At" or "T" in v %}
+  <input id="{{ fid }}" type="{{ 'datetime-local' if with_time else ('date' if (not v or v|length == 10) else 'text') }}" name="{{ name }}" value="{{ v }}">
 {% elif f.type == "number" %}
   <input id="{{ fid }}" type="number" step="any" name="{{ name }}" value="{{ v }}">
 {% else %}
