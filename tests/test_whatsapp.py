@@ -364,3 +364,6 @@ def test_privacy_page_is_public(store, settings):
     r = client.get("/privacy")
     assert r.status_code == 200 and b"Privacy policy" in r.data and b"Anthropic" in r.data
     assert b"style=" not in r.data
+    from dataclasses import replace
+    r = create_app(store, replace(settings, llm_provider="bedrock")).test_client().get("/privacy")
+    assert b"Amazon Bedrock" in r.data and b"Anthropic" not in r.data

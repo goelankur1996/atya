@@ -18,7 +18,11 @@
 <h2>How it's used</h2>
 <ul>
   <li>To file your messages, answer your questions and send the reminders and briefs you set up. Nothing else.</li>
+  {% if provider == "bedrock" %}
+  <li>To do that, the text of your messages and files is processed by AI models hosted on Amazon Bedrock, inside the same Amazon Web Services account that stores your data.</li>
+  {% else %}
   <li>To do that, the text of your messages and files is sent to Anthropic's Claude API for processing.</li>
+  {% endif %}
   <li>Messages travel through Telegram or Meta (WhatsApp), under their own privacy policies.</li>
   <li>Data is stored on Amazon Web Services servers in the United States.</li>
 </ul>
