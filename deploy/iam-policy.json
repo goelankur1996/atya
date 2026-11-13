@@ -94,7 +94,7 @@
     "ec2:RebootInstances",
     "ec2:AllocateAddress",
     "ec2:AssociateAddress",
-    "ec2:AuthorizeSecurityGroupIngress", "ec2:ModifyInstanceMetadataOptions"
+    "ec2:AuthorizeSecurityGroupIngress", "ec2:ModifyInstanceMetadataOptions", "budgets:ViewBudget", "budgets:ModifyBudget"
    ],
    "Resource": "*"
   }

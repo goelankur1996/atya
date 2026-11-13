@@ -225,7 +225,7 @@ def test_aws_transcriber_cleans_up(monkeypatch):
     monkeypatch.setattr(transcribe.requests, "get", lambda *a, **k: R())
     s3, api = FakeS3(), FakeTranscribeAPI(["IN_PROGRESS", "COMPLETED"])
     out = transcribe.AWSTranscriber(bucket="b", s3=s3, client=api).transcribe(OGG, "audio/ogg; codecs=opus")
-    assert out == {"text": "नमस्ते, call Jim", "language": "hi-IN"}
+    assert out == {"text": "नमस्ते, call Jim", "language": "hi-IN", "seconds": None}
     assert api.started["MediaFormat"] == "ogg" and api.started["LanguageOptions"] == ["en-IN", "hi-IN"]
     key = next(iter(s3.objects))
     assert key.startswith("transcribe-tmp/") and s3.deleted == [key] and len(api.deleted) == 1

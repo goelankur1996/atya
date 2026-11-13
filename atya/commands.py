@@ -4,6 +4,7 @@
 /invite         owner only: create a one-time invite code
 /help           what the bot does and the commands
 /web            one-time link to the web view
+/usage          today's usage and limits
 /link           connect the other channel (Telegram <-> WhatsApp) to the same account
 /export         download everything as a zip
 /delete         erase your account (asks for a typed confirmation code)
@@ -53,6 +54,7 @@ Commands:
 /brief 9am - a morning list of what's due, every day at that time (/brief off to stop)
 /web - a one-time link to browse, search and edit your records in a browser
 /link - use me on both Telegram and WhatsApp, with the same records
+/usage - how much you've used today, and the daily limits
 /export - download everything you've sent and everything I've filed, as a zip
 /delete - permanently erase your account and data
 /help - this message"""
@@ -168,6 +170,8 @@ def handle(ctx: Ctx, text: str) -> str:
         return web_link(ctx)
     if cmd == "/link":
         return link(ctx)
+    if cmd == "/usage":
+        return usage(ctx)
     if cmd == "/export":
         return export(ctx)
     if cmd == "/delete":
@@ -409,3 +413,34 @@ def delete(ctx: Ctx, arg: str) -> str:
     ctx.reply("Done. Your account and all your data have been erased."
               + (" The zip above is your only copy." if ctx.channel == "telegram" else ""))
     return "deleted"
+
+
+def usage(ctx: Ctx) -> str:
+    """/usage: today's counts against the daily limits."""
+    from zoneinfo import ZoneInfo
+    assert ctx.tenant is not None
+    st = ctx.settings
+    day = dt.datetime.now(ZoneInfo(ctx.tenant["timezone"] or "UTC")).date()
+    with ctx.store.tx(ctx.tenant["id"]) as tx:
+        u = tx.usage_on(ctx.tenant["id"], day)
+    owner = ctx.is_owner
+
+    def line(label: str, used: int, cap: int, unit: str = "") -> str:
+        return f"{label}: {used:,}{unit}" + ("" if owner or not cap else f" of {cap:,}{unit}")
+
+    lines = [f"Today ({day:%a %d %b}):",
+             line("Messages", u["messages"], st.daily_messages),
+             line("Voice notes", u["voice_seconds"] // 60, st.daily_voice_minutes, " min"),
+             line("PDF pages", u["pdf_pages"], st.daily_pdf_pages),
+             line("Processing", u["tokens_in"] + u["tokens_out"], st.daily_tokens, " tokens")]
+    if u["held"]:
+        lines.append(f"Held (over a limit): {u['held']}")
+    if owner:
+        with ctx.store.tx(system=True) as tx:
+            all_tokens = tx.add_tokens_all(dt.datetime.now(dt.timezone.utc).date(), 0)
+        lines += ["", "You have no limits as the owner.",
+                  f"Everyone today (UTC): {all_tokens:,} of {st.daily_tokens_all:,} tokens."]
+    else:
+        lines += ["", "Limits reset at midnight your time."]
+    ctx.reply("\n".join(lines))
+    return "usage"

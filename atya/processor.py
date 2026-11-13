@@ -17,7 +17,7 @@ import uuid
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import documents, reminders, transcribe
+from . import documents, limits, reminders, transcribe
 from .config import Settings
 from .embeddings import Embedder, EmbeddingError
 from .llm import LLM
@@ -551,7 +551,7 @@ def voice_text(store: Store, row: dict, tenant: dict, att: dict,
         text = (result.get("text") or "").strip()
         with store.tx(tid) as tx:
             tx.save_transcript(tid, att["id"], text=text, language=result.get("language"),
-                               chunks=transcribe.chunks(text))
+                               chunks=transcribe.chunks(text), seconds=result.get("seconds"))
     if not text:
         finish("I saved your voice note but couldn't make out any words in it.", "responded",
                "voice note kept; no speech found")
@@ -559,9 +559,67 @@ def voice_text(store: Store, row: dict, tenant: dict, att: dict,
     return text
 
 
+def hold(store: Store, row: dict, tenant: dict, day: dt.date, reason: str, settings: Settings) -> str:
+    """Over a cap: keep the message unprocessed and tell the user (once a day)."""
+    tid = tenant["id"]
+    everyone = reason == limits.ALL
+    with store.tx(tid) as tx:
+        tx.finish_inbox(row["id"], status="failed",
+                        notes="not processed: " + ("daily capacity for all users reached" if everyone
+                                                   else f"daily limit reached ({reason})"))
+        tx.add_usage(tid, day, held=1)
+        if tx.mark_told(tid, day):
+            body = ("I'm at capacity for today, so I've saved your message without processing it. "
+                    if everyone else f"You've reached today's limit of {reason}. I've saved your message "
+                                     "without processing it. ")
+            body += "Send it again tomorrow, or tap Retry on it in the web view (/web)."
+            tx.add_outbox(tid, chat_id=tenant["telegram_chat_id"], body=body, inbox_id=row["id"],
+                          reply_to_message_id=_reply_target(row["source_message_id"]))
+    if everyone:
+        limits.tell_owner_once(store, settings, "ATYA hit today's all-users processing cap "
+                               f"({settings.daily_tokens_all:,} tokens). Other users' messages are being "
+                               "held until tomorrow (UTC). Raise LIMIT_DAILY_TOKENS_ALL to change it.")
+    log.info("held inbox %s: %s", row["id"], reason)
+    return "held"
+
+
 def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                 embedder: Embedder | None = None,
                 transcriber: transcribe.Transcriber | None = None) -> str:
+    """Process one claimed inbox row within the spending caps. Returns the final status."""
+    with store.tx(row["tenant_id"]) as tx:
+        tenant = tx.tenant(row["tenant_id"])
+        files = tx.attachments_for([row["id"]])
+    assert tenant is not None
+    day = dt.datetime.now(dt.timezone.utc).astimezone(_tz(tenant)).date()
+    is_audio = lambda f: (f["mime_type"] or "").startswith("audio/")  # noqa: E731
+    if not limits.is_owner(tenant, settings):
+        with store.tx(tenant["id"]) as tx:
+            usage = tx.usage_on(tenant["id"], day)
+        reason = limits.over(usage, settings, voice=any(map(is_audio, files)),
+                             pdf=any(not is_audio(f) for f in files))
+        if reason is None and limits.all_over(store, settings):
+            reason = limits.ALL
+        if reason:
+            return hold(store, row, tenant, day, reason, settings)
+    before = limits.tokens_used(llm)
+    status = _process_row(store, llm, row, settings, embedder, transcriber)
+    after = limits.tokens_used(llm)
+    counted = status != "retry"
+    voice_seconds = pdf_pages = 0
+    if counted and files:
+        with store.tx(tenant["id"]) as tx:
+            files = tx.attachments_for([row["id"]])
+        voice_seconds = sum(f["seconds"] or 0 for f in files if is_audio(f) and f["transcript"] is not None)
+        pdf_pages = sum(f["pages"] or 0 for f in files if not is_audio(f))
+    limits.record(store, tenant["id"], day, messages=1 if counted else 0, voice_seconds=voice_seconds,
+                  pdf_pages=pdf_pages, tokens=(after[0] - before[0], after[1] - before[1]))
+    return status
+
+
+def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
+                 embedder: Embedder | None = None,
+                 transcriber: transcribe.Transcriber | None = None) -> str:
     """Process one claimed inbox row. Returns the final status."""
     raw = row["raw_content"]
     with store.tx(row["tenant_id"]) as tx:

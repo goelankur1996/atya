@@ -113,8 +113,11 @@ class AWSTranscriber:
             r = requests.get(uri, timeout=30)
             r.raise_for_status()
             body = r.json()
-            text = " ".join(t.get("transcript", "") for t in body.get("results", {}).get("transcripts", [])).strip()
-            return {"text": text, "language": j.get("LanguageCode")}
+            results = body.get("results", {})
+            text = " ".join(t.get("transcript", "") for t in results.get("transcripts", [])).strip()
+            ends = [float(i["end_time"]) for i in results.get("items", []) if i.get("end_time")]
+            return {"text": text, "language": j.get("LanguageCode"),
+                    "seconds": int(max(ends)) + 1 if ends else None}
         finally:
             for cleanup in (lambda: self.s3.delete_object(Bucket=self.bucket, Key=key),
                             lambda: self.client.delete_transcription_job(TranscriptionJobName=job)):

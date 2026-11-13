@@ -73,3 +73,20 @@ WhatsApp are transcribed with Amazon Transcribe (English (India) or Hindi,
 detected automatically), then filed like typed messages; replies start with
 "Heard: …". The audio is kept with the message (playable on the Messages page,
 included in exports); the copy staged in S3 for transcription is deleted at once.
+
+## Spending caps
+
+The app holds a user's messages (kept, not processed; the user is told once a
+day) when they pass a daily cap. Defaults, changed with SSM parameters then
+`deploy/deploy.sh` (0 = no cap; the owner is exempt):
+
+| Parameter | Default | Per |
+| --- | --- | --- |
+| `LIMIT_DAILY_MESSAGES` | 150 | user, day |
+| `LIMIT_DAILY_VOICE_MINUTES` | 30 | user, day |
+| `LIMIT_DAILY_PDF_PAGES` | 300 | user, day |
+| `LIMIT_DAILY_TOKENS` | 1500000 | user, day |
+| `LIMIT_DAILY_TOKENS_ALL` | 20000000 | all users, UTC day (the owner is told once if hit) |
+
+`/usage` shows today's numbers. For a dollar alarm from AWS itself:
+`deploy/budget-alert.sh <monthly USD> <email>`.

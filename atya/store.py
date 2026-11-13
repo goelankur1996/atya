@@ -671,10 +671,10 @@ class Tx:
                 "VALUES (%s, %s, %s, %s, %s)", (tenant_id, attachment_id, i, page, content))
 
     def save_transcript(self, tenant_id: uuid.UUID, attachment_id: uuid.UUID, *, text: str,
-                        language: str | None, chunks: list[str]) -> None:
+                        language: str | None, chunks: list[str], seconds: int | None = None) -> None:
         """A voice note's transcript: shown with the message and searchable like a PDF's text."""
-        self.conn.execute("UPDATE attachments SET extraction = 'transcript', text = %s, language = %s "
-                          "WHERE id = %s", (text, language, attachment_id))
+        self.conn.execute("UPDATE attachments SET extraction = 'transcript', text = %s, language = %s, "
+                          "seconds = coalesce(seconds, %s) WHERE id = %s", (text, language, seconds, attachment_id))
         self.conn.execute("DELETE FROM attachment_chunks WHERE attachment_id = %s", (attachment_id,))
         for i, content in enumerate(chunks, 1):
             self.conn.execute(
@@ -821,6 +821,41 @@ class Tx:
         self.audit(row["tenant_id"], actor="whatsapp", action="reject", target_table="outbox",
                    target_id=row["id"], summary=f"delivery failed: {error[:200]}")
         return True
+
+    # --- usage (spending caps) ------------------------------------------------
+
+    def usage_on(self, tenant_id: uuid.UUID, day: dt.date) -> dict:
+        row = self._one("SELECT * FROM usage_daily WHERE tenant_id = %s AND day = %s", (tenant_id, day))
+        return row or {"messages": 0, "voice_seconds": 0, "pdf_pages": 0, "tokens_in": 0, "tokens_out": 0,
+                       "held": 0, "told_at": None}
+
+    def add_usage(self, tenant_id: uuid.UUID, day: dt.date, *, messages: int = 0, voice_seconds: int = 0,
+                  pdf_pages: int = 0, tokens_in: int = 0, tokens_out: int = 0, held: int = 0) -> None:
+        self.conn.execute(
+            "INSERT INTO usage_daily (tenant_id, day, messages, voice_seconds, pdf_pages, tokens_in, tokens_out, held) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (tenant_id, day) DO UPDATE SET "
+            "messages = usage_daily.messages + EXCLUDED.messages, "
+            "voice_seconds = usage_daily.voice_seconds + EXCLUDED.voice_seconds, "
+            "pdf_pages = usage_daily.pdf_pages + EXCLUDED.pdf_pages, "
+            "tokens_in = usage_daily.tokens_in + EXCLUDED.tokens_in, "
+            "tokens_out = usage_daily.tokens_out + EXCLUDED.tokens_out, "
+            "held = usage_daily.held + EXCLUDED.held",
+            (tenant_id, day, messages, voice_seconds, pdf_pages, tokens_in, tokens_out, held))
+
+    def mark_told(self, tenant_id: uuid.UUID, day: dt.date) -> bool:
+        """Note that the user was told about a limit today. False if already told."""
+        self.add_usage(tenant_id, day)
+        row = self._one("UPDATE usage_daily SET told_at = now() WHERE tenant_id = %s AND day = %s "
+                        "AND told_at IS NULL RETURNING day", (tenant_id, day))
+        return row is not None
+
+    def add_tokens_all(self, utc_day: dt.date, n: int) -> int:
+        """Tokens used by everyone on a UTC day (system scope); returns the new total."""
+        row = self._one(
+            "INSERT INTO service_state (key, value) VALUES (%s, to_jsonb(%s::bigint)) "
+            "ON CONFLICT (key) DO UPDATE SET value = to_jsonb(service_state.value::text::bigint + %s), "
+            "updated_at = now() RETURNING value", (f"usage:all:{utc_day.isoformat()}", n, n))
+        return int(row["value"]) if row else n
 
     # --- WhatsApp webhook queue ---------------------------------------------
 

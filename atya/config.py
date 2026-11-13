@@ -52,6 +52,13 @@ class Settings:
     # Voice notes (Amazon Transcribe): on when VOICE_NOTES=on; audio is staged in this bucket.
     voice_notes: bool = False
     transcribe_bucket: str | None = None
+    # Spending caps, per user per day (owner exempt); 0 means no cap.
+    daily_messages: int = 150
+    daily_voice_minutes: int = 30
+    daily_pdf_pages: int = 300
+    daily_tokens: int = 1_500_000
+    # All users together, per UTC day.
+    daily_tokens_all: int = 20_000_000
     # Contact address shown on /privacy.
     privacy_email: str | None = None
 
@@ -71,6 +78,10 @@ def load_settings() -> Settings:
 
     def opt(name: str) -> str | None:
         return os.environ.get(name, "").strip() or None
+
+    def num(name: str, default: int) -> int:
+        v = os.environ.get(name, "").strip().replace("_", "").replace(",", "")
+        return int(v) if v else default
 
     provider = (os.environ.get("LLM_PROVIDER", "").strip() or "anthropic").lower()
     if provider not in ("anthropic", "bedrock"):
@@ -99,6 +110,11 @@ def load_settings() -> Settings:
         whatsapp_phone_number_id=opt("WHATSAPP_PHONE_NUMBER_ID"),
         whatsapp_verify_token=opt("WHATSAPP_VERIFY_TOKEN"),
         privacy_email=opt("PRIVACY_EMAIL"),
+        daily_messages=num("LIMIT_DAILY_MESSAGES", 150),
+        daily_voice_minutes=num("LIMIT_DAILY_VOICE_MINUTES", 30),
+        daily_pdf_pages=num("LIMIT_DAILY_PDF_PAGES", 300),
+        daily_tokens=num("LIMIT_DAILY_TOKENS", 1_500_000),
+        daily_tokens_all=num("LIMIT_DAILY_TOKENS_ALL", 20_000_000),
         voice_notes=(os.environ.get("VOICE_NOTES", "").strip().lower() in ("on", "1", "true", "yes")),
         transcribe_bucket=opt("TRANSCRIBE_BUCKET") or opt("BACKUP_BUCKET"),
         whatsapp_number="".join(c for c in os.environ.get("WHATSAPP_NUMBER", "") if c.isdigit()) or None,
