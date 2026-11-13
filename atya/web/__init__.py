@@ -237,6 +237,10 @@ def create_app(store: Store, settings: Settings) -> Flask:
                         secure=secure_cookie, samesite="Lax")
         return resp
 
+    @app.get("/privacy")
+    def privacy():
+        return render_template("privacy.html", email=settings.privacy_email)
+
     # --- WhatsApp webhook (Meta calls this; no session, no CSRF: the signature is the check) ---
 
     @app.get("/whatsapp/webhook")

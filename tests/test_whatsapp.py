@@ -357,3 +357,10 @@ def test_failed_event_is_kept_and_retried(store, settings, clean, monkeypatch):
     for _ in range(6):
         whatsapp.process_once(store, wa, settings)
     assert len(calls) == 5                        # gives up after 5 attempts; the row stays
+
+
+def test_privacy_page_is_public(store, settings):
+    client = create_app(store, settings).test_client()
+    r = client.get("/privacy")
+    assert r.status_code == 200 and b"Privacy policy" in r.data and b"Anthropic" in r.data
+    assert b"style=" not in r.data

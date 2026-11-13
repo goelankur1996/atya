@@ -44,6 +44,8 @@ class Settings:
     whatsapp_verify_token: str | None = None
     # The business number in digits (918920396095), for wa.me links in invites.
     whatsapp_number: str | None = None
+    # Contact address shown on /privacy.
+    privacy_email: str | None = None
 
     @property
     def whatsapp_on(self) -> bool:
@@ -79,5 +81,6 @@ def load_settings() -> Settings:
         whatsapp_app_secret=opt("WHATSAPP_APP_SECRET"),
         whatsapp_phone_number_id=opt("WHATSAPP_PHONE_NUMBER_ID"),
         whatsapp_verify_token=opt("WHATSAPP_VERIFY_TOKEN"),
+        privacy_email=opt("PRIVACY_EMAIL"),
         whatsapp_number="".join(c for c in os.environ.get("WHATSAPP_NUMBER", "") if c.isdigit()) or None,
     )

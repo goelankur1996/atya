@@ -337,3 +337,9 @@ main.chat { padding-bottom: 0; }
 .reflink.file { background: #fff; }
 .me .meta .reflink.file { border-color: #c8daf3; }
 .prop input[type=datetime-local] { max-width: 240px; }
+
+/* Long-form text (privacy policy) */
+main.prose { gap: 12px; line-height: 1.6; color: var(--text-2); }
+main.prose h2 { margin-top: 20px; }
+main.prose p, main.prose ul { margin: 0; }
+main.prose ul { padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }

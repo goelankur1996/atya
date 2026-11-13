@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Privacy · ATYA{% endblock %}
+{% block main_class %} class="narrow prose"{% endblock %}
+{% block body %}
+<h1>Privacy policy</h1>
+<p class="muted">Effective 13 November 2026</p>
+
+<p>ATYA is an invite-only personal memory assistant. You send it messages on Telegram, WhatsApp or its web page; it files them into notes, tasks, people and other records, answers your questions about them, and sends you reminders you ask for. This page explains what it keeps and what it does with it.</p>
+
+<h2>What we store</h2>
+<ul>
+  <li>Your account: your Telegram user id or WhatsApp number, the display name your messaging app shares, your timezone and settings.</li>
+  <li>Everything you send: messages, and PDF files with the text read from them.</li>
+  <li>What ATYA makes from them: records such as tasks and people, its replies to you, and a log of every change, so you can see what was done and why.</li>
+</ul>
+<p>We don't collect contacts, location, photos or anything else from your phone.</p>
+
+<h2>How it's used</h2>
+<ul>
+  <li>To file your messages, answer your questions and send the reminders and briefs you set up. Nothing else.</li>
+  <li>To do that, the text of your messages and files is sent to Anthropic's Claude API for processing.</li>
+  <li>Messages travel through Telegram or Meta (WhatsApp), under their own privacy policies.</li>
+  <li>Data is stored on Amazon Web Services servers in the United States.</li>
+</ul>
+<p>We don't sell your data, show ads, share it with anyone other than the services above, or use it to train AI models. Each account's data is kept separate from every other account's by the database itself.</p>
+
+<h2>How long it's kept, and your control</h2>
+<ul>
+  <li>Your data is kept until you delete it.</li>
+  <li>You can see and edit everything on the web view (send <code>/web</code> to the bot), and download all of it with <code>/export</code> or the Export button.</li>
+  <li><code>/delete</code> permanently erases your account and all its data, including the log. Encrypted nightly backups are kept for 30 days, so deleted data is gone from them within 30 days.</li>
+</ul>
+
+<h2>Contact</h2>
+<p>{% if email %}Questions or requests about your data: <a href="mailto:{{ email }}">{{ email }}</a>.{% else %}Questions or requests about your data: send a message to the bot, or reach the person who invited you.{% endif %}</p>
+<p>If this policy changes, the date above changes and the bot will tell you about anything significant.</p>
+{% endblock %}
