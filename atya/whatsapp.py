@@ -404,13 +404,7 @@ def send_once(store: Store, wa) -> int:
                     waiting = tx._one("SELECT count(*) AS n FROM outbox WHERE tenant_id = %s AND status = 'waiting'",
                                       (row["tenant_id"],))["n"] if nudge else 0
                 if nudge:
-                    if row.get("kind") == "brief":
-                        from zoneinfo import ZoneInfo
-                        day = now.astimezone(ZoneInfo(t.get("timezone") or "UTC"))
-                        msg = wa_templates.brief_ready(str(row["chat_id"]), f"{day:%A} {day.day} {day:%B}")
-                    else:
-                        msg = wa_templates.update_waiting(str(row["chat_id"]), waiting)
-                    wa.send_template(msg)
+                    send_nudge(store, wa, row, t, now, waiting)
                 continue                                   # stays 'waiting' until the user writes or taps Show
         except WhatsAppError as e:
             ok, err = False, str(e)
@@ -418,6 +412,42 @@ def send_once(store: Store, wa) -> int:
         with store.tx(system=True) as tx:
             tx.finish_outbox(row["id"], ok=ok, error=err, channel_message_id=wamid or None)
     return len(rows)
+
+
+def send_nudge(store: Store, wa, row: dict, tenant: dict, now: dt.datetime, waiting: int) -> None:
+    """The "tap Show" template for messages held outside the 24-hour window: the
+    Utility-worded v2 template, or the older one if v2 isn't approved yet."""
+    from zoneinfo import ZoneInfo
+    from .reminders import human
+    from .schema import CLOSED_STATUSES
+    to = str(row["chat_id"])
+    tz = ZoneInfo(tenant.get("timezone") or "UTC")
+    local = now.astimezone(tz)
+    if row.get("kind") == "brief":
+        today = local.date().isoformat()
+        with store.tx(row["tenant_id"]) as tx:
+            due = tx.due_records(row["tenant_id"], "task", until=local.date().isoformat(), closed=CLOSED_STATUSES,
+                                 limit=500)
+        on_day = sum(1 for r in due if str(r["fields"].get("Due Date", ""))[:10] == today)
+        label = f"{local:%A} {local.day} {local:%B}"
+        first = wa_templates.brief_summary(to, label, on_day, len(due) - on_day)
+        fallback = wa_templates.brief_ready(to, label)
+    else:
+        when = row["created_at"]
+        if row.get("inbox_id"):
+            with store.tx(row["tenant_id"]) as tx:
+                src = tx._one("SELECT captured_at FROM inbox WHERE id = %s", (row["inbox_id"],))
+            when = src["captured_at"] if src else when
+        hhmm, ampm, day = human(when, local).split(" ", 2)       # "6:40 pm today" -> "today at 6:40 pm"
+        first = wa_templates.reply_waiting(to, f"{day} at {hhmm} {ampm}")
+        fallback = wa_templates.update_waiting(to, waiting)
+    try:
+        wa.send_template(first)
+    except WhatsAppError as e:
+        if getattr(e, "code", None) not in wa_templates.NOT_USABLE_CODES:
+            raise
+        log.info("template %s not usable yet (%s); sending the older one", first["template"]["name"], e.code)
+        wa.send_template(fallback)
 
 
 def run_sender(store: Store, wa, settings: Settings) -> None:

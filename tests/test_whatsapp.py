@@ -261,9 +261,9 @@ def test_outside_window_messages_wait_behind_one_show_template(store, settings, 
     before = len(wa.sent)
     whatsapp.send_once(store, wa)
     assert len(wa.sent) == before                                 # nothing free-form
-    assert len(wa.templates) == 1 and wa.templates[0]["template"]["name"] == "atya_update"
+    assert len(wa.templates) == 1 and wa.templates[0]["template"]["name"] == "atya_reply_v2"
     comps = wa.templates[0]["template"]["components"]
-    assert comps[0]["parameters"][0]["text"] in ("1 new message", "2 new messages")
+    assert comps[0]["parameters"][0]["text"].startswith("today at ")
     assert comps[1]["parameters"][0]["payload"] == "show"
     with store.tx(t["id"]) as tx:
         assert {r["status"] for r in tx._all("SELECT status FROM outbox WHERE id = ANY(%s)", ([a, b],))} == {"waiting"}
@@ -299,7 +299,9 @@ def test_stale_brief_is_dropped_when_released(store, settings, clean):
         old = tx.add_outbox(t["id"], chat_id=None, body="brief", kind="brief")
         tx.conn.execute("UPDATE outbox SET created_at = now() - interval '30 hours' WHERE id = %s", (old,))
     whatsapp.send_once(store, wa)
-    assert wa.templates[-1]["template"]["name"] == "atya_brief"
+    tpl = wa.templates[-1]["template"]
+    assert tpl["name"] == "atya_brief_v2"
+    assert [p["text"] for p in tpl["components"][0]["parameters"]][1:] == ["0", "0"]
     deliver(store, wa, settings, event(FRIEND, text="hi"))
     with store.tx(t["id"]) as tx:
         assert tx._one("SELECT status FROM outbox WHERE id = %s", (old,))["status"] == "cancelled"
@@ -445,3 +447,19 @@ def test_template_definitions():
         assert t["category"] == "UTILITY"
     assert W.param("a\n\nb\t  c" + " " * 10 + "d") == "a b c d"
     assert len(W.param("x" * 500)) == 200
+
+
+def test_v2_template_not_approved_falls_back(store, settings, clean):
+    wa, t = friend_outside_window(store, settings)
+    with store.tx(system=True) as tx:
+        tx.add_outbox(t["id"], chat_id=None, body="An answer")
+    sent = []
+
+    def send_template(message):
+        if message["template"]["name"].endswith("_v2"):
+            raise whatsapp.WhatsAppError("send: 132001 template name does not exist in the translation", 132001)
+        sent.append(message["template"]["name"])
+        return {"message_id": "wamid.x"}
+    wa.send_template = send_template
+    whatsapp.send_once(store, wa)
+    assert sent == ["atya_update"]
