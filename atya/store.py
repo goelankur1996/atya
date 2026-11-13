@@ -590,8 +590,10 @@ class Tx:
                          "WHERE tenant_id = %s AND status = 'failed' AND inbox_id IS NOT NULL))")
             params.append(tenant_id)
         if query:
-            where.append("raw_content ILIKE %s")
-            params.append("%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
+            like = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            where.append("(raw_content ILIKE %s OR id IN (SELECT inbox_id FROM attachments "
+                         "WHERE extraction = 'transcript' AND text ILIKE %s))")
+            params += [like, like]
         return self._all(
             f"SELECT * FROM inbox WHERE {' AND '.join(where)} "  # noqa: S608 (fixed fragments)
             "ORDER BY captured_at DESC, seq DESC LIMIT %s OFFSET %s", (*params, limit, offset))
@@ -630,11 +632,12 @@ class Tx:
     # --- attachments (PDFs) ------------------------------------------------------
 
     def add_attachment(self, tenant_id: uuid.UUID, *, inbox_id: uuid.UUID, filename: str,
-                       mime_type: str, data: bytes, sha256: str, actor: str = "receiver") -> uuid.UUID:
+                       mime_type: str, data: bytes, sha256: str, actor: str = "receiver",
+                       seconds: int | None = None) -> uuid.UUID:
         row = self._one(
-            "INSERT INTO attachments (tenant_id, inbox_id, filename, mime_type, bytes, data, sha256) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-            (tenant_id, inbox_id, filename[:255], mime_type, len(data), data, sha256))
+            "INSERT INTO attachments (tenant_id, inbox_id, filename, mime_type, bytes, data, sha256, seconds) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (tenant_id, inbox_id, filename[:255], mime_type, len(data), data, sha256, seconds))
         assert row is not None
         self.audit(tenant_id, actor=actor, action="create", target_table="attachments", target_id=row["id"],
                    summary=f"file saved: {filename[:120]} ({len(data) // 1024} KB)")
@@ -643,6 +646,7 @@ class Tx:
     def attachments_for(self, inbox_ids: list[uuid.UUID]) -> list[dict]:
         """Attachment metadata (not the file bytes) for some inbox rows."""
         return self._all("SELECT id, inbox_id, record_id, filename, mime_type, bytes, pages, extraction, "
+                         "seconds, language, CASE WHEN extraction = 'transcript' THEN text END AS transcript, "
                          "created_at FROM attachments WHERE inbox_id = ANY(%s) ORDER BY created_at", (inbox_ids,))
 
     def attachments_of_record(self, record_id: uuid.UUID) -> list[dict]:
@@ -666,18 +670,32 @@ class Tx:
                 "INSERT INTO attachment_chunks (tenant_id, attachment_id, seq, page, content) "
                 "VALUES (%s, %s, %s, %s, %s)", (tenant_id, attachment_id, i, page, content))
 
+    def save_transcript(self, tenant_id: uuid.UUID, attachment_id: uuid.UUID, *, text: str,
+                        language: str | None, chunks: list[str]) -> None:
+        """A voice note's transcript: shown with the message and searchable like a PDF's text."""
+        self.conn.execute("UPDATE attachments SET extraction = 'transcript', text = %s, language = %s "
+                          "WHERE id = %s", (text, language, attachment_id))
+        self.conn.execute("DELETE FROM attachment_chunks WHERE attachment_id = %s", (attachment_id,))
+        for i, content in enumerate(chunks, 1):
+            self.conn.execute(
+                "INSERT INTO attachment_chunks (tenant_id, attachment_id, seq, page, content) "
+                "VALUES (%s, %s, %s, NULL, %s)", (tenant_id, attachment_id, i, content))
+
     def link_attachment(self, attachment_id: uuid.UUID, record_id: uuid.UUID) -> None:
         self.conn.execute("UPDATE attachments SET record_id = %s WHERE id = %s", (record_id, attachment_id))
 
-    def search_chunks(self, tenant_id: uuid.UUID, query: str, *, limit: int = 6) -> list[dict]:
-        """Best-matching passages from the user's files (any word matches, ranked)."""
+    def search_chunks(self, tenant_id: uuid.UUID, query: str, *, limit: int = 6,
+                      exclude_inbox_id: uuid.UUID | None = None) -> list[dict]:
+        """Best-matching passages from the user's files and voice notes (any word matches, ranked)."""
         return self._all(
-            "SELECT c.content, c.page, a.filename, r.type, r.seq, r.title, ts_rank(c.search, q) AS rank "
+            "SELECT c.content, c.page, a.filename, a.extraction, a.created_at, r.type, r.seq, r.title, "
+            "ts_rank(c.search, q) AS rank "
             "FROM attachment_chunks c JOIN attachments a ON a.id = c.attachment_id "
             "LEFT JOIN records r ON r.id = a.record_id, "
             "     CAST(nullif(replace(plainto_tsquery('english', %s)::text, '&', '|'), '') AS tsquery) q "
-            "WHERE c.tenant_id = %s AND c.search @@ q ORDER BY rank DESC LIMIT %s",
-            (query, tenant_id, limit))
+            "WHERE c.tenant_id = %s AND c.search @@ q AND a.inbox_id IS DISTINCT FROM %s "
+            "ORDER BY rank DESC LIMIT %s",
+            (query, tenant_id, exclude_inbox_id, limit))
 
     # --- reminders ----------------------------------------------------------------
 

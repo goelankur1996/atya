@@ -6,7 +6,7 @@ Contents:
   records/<type>.csv  one CSV per record type (fields as columns, links as refs)
   markdown/<Type>/... one Markdown file per record, links as [[REF Title]]
   audit_log.jsonl     every change the system made, oldest first
-  files/              the PDFs you sent, plus the text read from each (.txt)
+  files/              the PDFs and voice notes you sent, plus the text read from each (.txt)
   schema.yaml         what each type and field means
 Embeddings are not included: they are derived and can be recomputed.
 """
@@ -32,8 +32,8 @@ records/*.csv       One spreadsheet per record type (tasks, people, journal, ...
 markdown/           One Markdown file per record. Opens in Obsidian or any editor;
                     links between records are written as [[REF Title]].
 audit_log.jsonl     Every change the system made to your data, oldest first.
-files/              The PDFs you sent (named after the message they came with),
-                    each with a .txt of the text that was read from it.
+files/              The PDFs and voice notes you sent (named after the message they
+                    came with), each with a .txt of the text read or heard from it.
 schema.yaml         What each record type and field means.
 
 IDs like TSK-12 are the same IDs the bot uses in its answers.

@@ -49,6 +49,9 @@ class Settings:
     bedrock_fast_model: str | None = None
     bedrock_main_model: str | None = None
     aws_region: str = "us-east-1"
+    # Voice notes (Amazon Transcribe): on when VOICE_NOTES=on; audio is staged in this bucket.
+    voice_notes: bool = False
+    transcribe_bucket: str | None = None
     # Contact address shown on /privacy.
     privacy_email: str | None = None
 
@@ -96,5 +99,7 @@ def load_settings() -> Settings:
         whatsapp_phone_number_id=opt("WHATSAPP_PHONE_NUMBER_ID"),
         whatsapp_verify_token=opt("WHATSAPP_VERIFY_TOKEN"),
         privacy_email=opt("PRIVACY_EMAIL"),
+        voice_notes=(os.environ.get("VOICE_NOTES", "").strip().lower() in ("on", "1", "true", "yes")),
+        transcribe_bucket=opt("TRANSCRIBE_BUCKET") or opt("BACKUP_BUCKET"),
         whatsapp_number="".join(c for c in os.environ.get("WHATSAPP_NUMBER", "") if c.isdigit()) or None,
     )

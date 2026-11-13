@@ -17,7 +17,7 @@ import uuid
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import documents, reminders
+from . import documents, reminders, transcribe
 from .config import Settings
 from .embeddings import Embedder, EmbeddingError
 from .llm import LLM
@@ -390,14 +390,20 @@ def confirm_reminders(tx: Tx, schema: Schema, tenant: dict, row: dict) -> None:
 MAX_EXCERPTS = 6
 
 
-def document_excerpts(tx: Tx, schema: Schema, tenant_id: uuid.UUID, plan: dict, question: str) -> list[dict]:
-    """Passages from the user's PDFs that match the question's words."""
+def document_excerpts(tx: Tx, schema: Schema, tenant_id: uuid.UUID, plan: dict, question: str,
+                      exclude_inbox_id: uuid.UUID | None = None) -> list[dict]:
+    """Passages from the user's PDFs and voice notes that match the question's words
+    (never the question's own voice note)."""
     words = " ".join(w for w in (plan.get("search"), plan.get("broader")) if w) or question
     out = []
-    for c in tx.search_chunks(tenant_id, words, limit=MAX_EXCERPTS):
+    for c in tx.search_chunks(tenant_id, words, limit=MAX_EXCERPTS, exclude_inbox_id=exclude_inbox_id):
         tdef = schema.types.get(c["type"] or "")
         ref = f"{tdef.prefix}-{c['seq']}" if tdef and c["seq"] else None
-        out.append({"document_excerpt": True, "document": f"[{ref}] {c['title']}" if ref else c["filename"],
+        if c["extraction"] == "transcript":
+            label = f"Voice note, {with_weekday(c['created_at'].date().isoformat())}"
+        else:
+            label = f"[{ref}] {c['title']}" if ref else c["filename"]
+        out.append({"document_excerpt": True, "document": label,
                     "file": c["filename"], "page": c["page"], "text": c["content"]})
     return out
 
@@ -503,8 +509,59 @@ def process_files(store: Store, llm: LLM, row: dict, tenant: dict, schema: Schem
 
 # --- per-row orchestration -----------------------------------------------------
 
+HEARD_CHARS = 700
+
+
+def with_heard(heard: str | None, body: str) -> str:
+    """Replies to a voice note start with what was heard, so a mishearing shows."""
+    if heard is None:
+        return body
+    shown = heard if len(heard) <= HEARD_CHARS else heard[:HEARD_CHARS].rsplit(" ", 1)[0] + " …"
+    return f"Heard: \u201c{shown}\u201d\n\n{body}".strip()
+
+
+def voice_text(store: Store, row: dict, tenant: dict, att: dict,
+               transcriber: transcribe.Transcriber | None) -> str | None:
+    """The transcript of a voice note (made now, or kept from an earlier attempt).
+    None when there is nothing to process; the user has been told why."""
+    tid = tenant["id"]
+
+    def finish(body: str, status: str, notes: str) -> None:
+        with store.tx(tid) as tx:
+            tx.add_outbox(tid, chat_id=tenant["telegram_chat_id"], body=body, inbox_id=row["id"],
+                          reply_to_message_id=_reply_target(row["source_message_id"]))
+            tx.finish_inbox(row["id"], status=status, notes=notes)
+
+    if att.get("transcript") is not None:
+        text = att["transcript"]
+    elif transcriber is None:
+        finish("I got your voice note and saved it, but voice notes aren't switched on yet, so I can't "
+               "read it. Please type it for now.", "failed", "voice note kept; transcription is off")
+        return None
+    else:
+        with store.tx(tid) as tx:
+            a = tx.attachment(tid, att["id"], with_data=True)
+        try:
+            result = transcriber.transcribe(bytes(a["data"]), a["mime_type"] or "audio/ogg")
+        except transcribe.TranscribeError as e:
+            log.warning("transcription failed for %s: %s", row["id"], e)
+            finish("I saved your voice note but couldn't turn it into text. Please type it, or try again.",
+                   "failed", f"voice note kept; transcription failed: {e}")
+            return None
+        text = (result.get("text") or "").strip()
+        with store.tx(tid) as tx:
+            tx.save_transcript(tid, att["id"], text=text, language=result.get("language"),
+                               chunks=transcribe.chunks(text))
+    if not text:
+        finish("I saved your voice note but couldn't make out any words in it.", "responded",
+               "voice note kept; no speech found")
+        return None
+    return text
+
+
 def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
-                embedder: Embedder | None = None) -> str:
+                embedder: Embedder | None = None,
+                transcriber: transcribe.Transcriber | None = None) -> str:
     """Process one claimed inbox row. Returns the final status."""
     raw = row["raw_content"]
     with store.tx(row["tenant_id"]) as tx:
@@ -522,7 +579,14 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
 
         with store.tx(row["tenant_id"]) as tx:
             files = tx.attachments_for([row["id"]])
-        if files:                                     # a PDF is always a capture
+        audio = [f for f in files if (f["mime_type"] or "").startswith("audio/")]
+        heard: str | None = None
+        if audio:                                     # a voice note: work on what was said
+            heard = voice_text(store, row, tenant, audio[0], transcriber)
+            if heard is None:
+                return "responded"
+            raw = heard
+        elif files:                                   # a PDF is always a capture
             return process_files(store, llm, row, tenant, schema, tz, files)
 
         if row.get("forced_intent") == "log":       # the user tapped "Save as task"
@@ -532,7 +596,7 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
         intent = cls["intent"]
         if intent == "chat":
             with store.tx(row["tenant_id"]) as tx:
-                tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=cls["reply"],
+                tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=with_heard(heard, cls["reply"]),
                               inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]))
                 tx.finish_inbox(row["id"], status="responded", intent="chat", notes="small talk; nothing saved")
             return "responded"
@@ -546,6 +610,12 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                                    hint=hint)
             with store.tx(row["tenant_id"]) as tx:
                 notes = FanoutExecutor(tx, schema, tenant, row).run(plan)
+                if heard is not None:                 # say what was saved, so the transcript is visible
+                    made = tx.records_from_inbox(tenant["id"], row["id"])
+                    saved = "\n".join(f"- {record_ref(schema, r)} {r['title']}" for r in made)
+                    tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"],
+                                  body=with_heard(heard, f"Saved:\n{saved}" if made else "Noted."),
+                                  inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]))
                 confirm_reminders(tx, schema, tenant, row)
                 tx.finish_inbox(row["id"], status="processed", notes=notes, intent="log")
             return "processed"
@@ -561,12 +631,12 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
             plan = broaden_if_thin(store, llm, schema, tenant["id"], raw, plan)
         with store.tx(row["tenant_id"]) as tx:
             records = gather_records(tx, schema, tenant["id"], plan, query_vector)
-            records += document_excerpts(tx, schema, tenant["id"], plan, raw)
+            records += document_excerpts(tx, schema, tenant["id"], plan, raw, exclude_inbox_id=row["id"])
         answer = llm.answer(schema=schema, question=raw, records=records, now=now)
         # Nothing relevant found: maybe it was a to-do, not a question. Offer to save it.
         buttons = None if answer["found"] else [[("Save as task", f"save:{row['id']}")]]
         with store.tx(row["tenant_id"]) as tx:
-            tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=answer["text"],
+            tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=with_heard(heard, answer["text"]),
                           inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]),
                           buttons=buttons)
             tx.finish_inbox(row["id"], status="responded", intent="query",
@@ -593,19 +663,21 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
 
 
 def process_once(store: Store, llm: LLM, settings: Settings,
-                 embedder: Embedder | None = None) -> int:
+                 embedder: Embedder | None = None,
+                 transcriber: transcribe.Transcriber | None = None) -> int:
     with store.tx(system=True) as tx:
         rows = tx.claim_inbox(limit=10, reclaim_after_minutes=settings.reclaim_minutes)
     for row in rows:
-        process_row(store, llm, row, settings, embedder)
+        process_row(store, llm, row, settings, embedder, transcriber)
     return len(rows)
 
 
-def run(store: Store, llm: LLM, settings: Settings, embedder: Embedder | None = None) -> None:
+def run(store: Store, llm: LLM, settings: Settings, embedder: Embedder | None = None,
+        transcriber: transcribe.Transcriber | None = None) -> None:
     log.info("processor started (search: %s)", "full text + vectors" if embedder else "full text only")
     while True:
         try:
-            if process_once(store, llm, settings, embedder) == 0:
+            if process_once(store, llm, settings, embedder, transcriber) == 0:
                 time.sleep(settings.poll_interval)
         except Exception:
             log.exception("processor loop error")

@@ -321,7 +321,7 @@ def test_pdf_media_and_export_on_whatsapp(store, settings, clean):
     photo = event(FRIEND)
     photo["entry"][0]["changes"][0]["value"]["messages"][0].update(type="image", image={"id": "i"})
     deliver(store, wa, settings, photo)
-    assert "Photos and voice notes" in wa.texts(FRIEND)[-1]
+    assert "Photos and videos" in wa.texts(FRIEND)[-1]
 
     deliver(store, wa, settings, event(FRIEND, text="/export"))
     assert "/web" in wa.texts(FRIEND)[-1]

@@ -26,7 +26,7 @@ from typing import Any
 
 import requests
 
-from . import commands, documents
+from . import commands, documents, transcribe
 from .config import Settings
 from .receiver import reminder_button, save_as_task
 from .store import Store
@@ -226,6 +226,7 @@ def handle_message(store: Store, wa, settings: Settings, msg: dict, name: str | 
 
     doc = msg.get("document") if kind == "document" else None
     file_data: bytes | None = None
+    audio: dict | None = None
     filename = "file.pdf"
     if doc:
         filename = doc.get("filename") or "file.pdf"
@@ -245,8 +246,23 @@ def handle_message(store: Store, wa, settings: Settings, msg: dict, name: str | 
                 return "skipped:too-big"
             raise                                      # retried with the event
         text = doc.get("caption") or f"[PDF] {filename}"
-    elif kind in ("image", "audio", "video", "sticker", "voice"):
-        ctx.reply("I can only save text and PDF files for now. Photos and voice notes are coming later.")
+    elif kind in ("audio", "voice"):
+        a = msg.get(kind) or {}
+        mime = transcribe.base_mime(a.get("mime_type") or "audio/ogg")
+        if not transcribe.supported(mime):
+            ctx.reply("I can't read that audio format. Voice notes, MP3 and M4A work.")
+            return "skipped:audio-format"
+        try:
+            data = wa.download_file(a["id"], transcribe.MAX_BYTES)
+        except WhatsAppError as e:
+            if "larger than the limit" in str(e):
+                ctx.reply(f"Voice notes can be up to {transcribe.MAX_SECONDS // 60} minutes. Send a shorter one.")
+                return "skipped:too-long"
+            raise
+        audio = {"data": data, "mime": mime, "filename": f"voice.{transcribe.extension(mime)}"}
+        text = transcribe.placeholder(None)
+    elif kind in ("image", "video", "sticker"):
+        ctx.reply("I can only save text, voice notes and PDF files for now. Photos and videos are coming later.")
         return "skipped:media"
     elif kind in ("location", "contacts", "order"):
         ctx.reply("I can only save text and PDF files for now.")
@@ -262,6 +278,9 @@ def handle_message(store: Store, wa, settings: Settings, msg: dict, name: str | 
         if file_data is not None:
             tx.add_attachment(tenant["id"], inbox_id=inbox_id, filename=filename, mime_type="application/pdf",
                               data=file_data, sha256=documents.sha256(file_data))
+        if audio is not None:
+            tx.add_attachment(tenant["id"], inbox_id=inbox_id, filename=audio["filename"], mime_type=audio["mime"],
+                              data=audio["data"], sha256=documents.sha256(audio["data"]))
         tx.note_inbound(tenant["id"], "whatsapp")
     log.info("inbox <- %s (whatsapp, %d chars)", inbox_id, len(text))
     return "stored"

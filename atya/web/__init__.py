@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import hmac
+import io
 import json
 import logging
 import re
@@ -24,7 +25,7 @@ import uuid
 import zoneinfo
 from typing import Any
 
-from flask import Flask, Response, abort, g, redirect, render_template, request, url_for
+from flask import Flask, Response, abort, g, redirect, render_template, request, send_file, url_for
 
 from ..config import Settings
 from .. import documents, whatsapp
@@ -100,7 +101,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
     @app.after_request
     def headers(resp: Response) -> Response:
         resp.headers["Content-Security-Policy"] = (
-            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; "
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; media-src 'self'; "
             "form-action 'self'; connect-src 'self'; "
             "frame-ancestors 'none'; base-uri 'none'")
         resp.headers["X-Content-Type-Options"] = "nosniff"
@@ -400,6 +401,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
                 oldest = rows[-1]["captured_at"] if rows and more else None
                 extra = t.unlinked_outbox(tid, after=oldest, before=newest)
         items = [{"kind": "in", "at": r["captured_at"], "row": r, "files": files.get(r["id"], []),
+                  "voice": next((f for f in files.get(r["id"], []) if (f["mime_type"] or "").startswith("audio/")), None),
                   "replies": replies.get(r["id"], []), "filed": filed.get(r["id"], [])} for r in rows]
         items += [{"kind": "out", "at": o["created_at"], "row": o} for o in extra]
         # Read like a chat: oldest at the top of the page, newest at the bottom.
@@ -456,7 +458,12 @@ def create_app(store: Store, settings: Settings) -> Flask:
         if a is None or a["data"] is None:
             abort(404)
         safe = re.sub(r'[^A-Za-z0-9._ -]', "_", a["filename"] or "file.pdf")[:120]
-        resp = Response(bytes(a["data"]), mimetype=a["mime_type"] or "application/pdf")
+        mime = a["mime_type"] or "application/pdf"
+        if request.args.get("play") and mime.startswith("audio/"):
+            # For the audio player: inline, with byte ranges (Safari needs them to play).
+            return send_file(io.BytesIO(bytes(a["data"])), mimetype=mime, conditional=True,
+                             download_name=safe, as_attachment=False)
+        resp = Response(bytes(a["data"]), mimetype=mime)
         resp.headers["Content-Disposition"] = f'attachment; filename="{safe}"'
         return resp
 

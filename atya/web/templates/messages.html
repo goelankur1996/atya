@@ -50,12 +50,20 @@
     {% set failed = m.status == "failed" %}
     {% set waiting = m.status in ("pending", "processing") %}
     <div class="me">
+      {% if it.voice %}{% set v = it.voice %}
+      <div class="bubble voice{% if failed %} failed{% endif %}">
+        <audio controls preload="none" src="{{ url_for('file_download', attachment_id=v.id, play=1) }}"></audio>
+        {% if v.transcript is not none %}<p class="transcript">{{ v.transcript or "(no words heard)" }}</p>
+        {% elif waiting %}<p class="transcript muted">Transcribing…</p>{% endif %}
+      </div>
+      {% else %}
       <div class="bubble{% if m.intent == 'command' %} cmd{% endif %}{% if failed %} failed{% endif %}">{{ m.raw_content }}</div>
+      {% endif %}
       <div class="meta">
         <span>{{ fmt_clock(m.captured_at) }}</span>
         {% if m.source == "web" %}<span>· from the web</span>{% elif m.source != "telegram" %}<span>· via {{ m.source|replace("_", " ") }}</span>{% endif %}
         {% if failed %}<span class="pill dark">failed</span>{% elif not waiting %}<span>· {{ status_label(m) }}</span>{% endif %}
-        {% for f in it.files %}<a class="reflink file" href="{{ url_for('file_download', attachment_id=f.id) }}">📎 {{ f.filename|truncate(36) }}{% if f.pages %} <span class="muted">· {{ f.pages }} p.</span>{% endif %}</a>{% endfor %}
+        {% for f in it.files if not (f.mime_type or "").startswith("audio/") %}<a class="reflink file" href="{{ url_for('file_download', attachment_id=f.id) }}">📎 {{ f.filename|truncate(36) }}{% if f.pages %} <span class="muted">· {{ f.pages }} p.</span>{% endif %}</a>{% endfor %}
         {% for r in it.filed %}<a class="reflink" href="{{ url_for('record_view', ref_str=ref(r)) }}"><span class="ref">{{ ref(r) }}</span>{{ r.title|truncate(40) }}</a>{% endfor %}
       </div>
       {% if m.processor_notes and m.intent != "command" and not waiting %}<div class="meta">{{ m.processor_notes }}</div>{% endif %}

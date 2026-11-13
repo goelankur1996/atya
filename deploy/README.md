@@ -65,3 +65,11 @@ deploy/run.sh "cd /opt/atya && docker compose exec -T app python -m atya.eval --
 The last one replays your recent messages (read-only) and saves a report at
 `/eval` on the web view (owner only). To switch models for real, set
 `LLM_PROVIDER=bedrock`, `BEDROCK_FAST_MODEL` and `BEDROCK_MAIN_MODEL` in SSM and deploy.
+
+## Voice notes
+
+`deploy/enable-voice.sh` then `deploy/deploy.sh`. Voice notes on Telegram and
+WhatsApp are transcribed with Amazon Transcribe (English (India) or Hindi,
+detected automatically), then filed like typed messages; replies start with
+"Heard: …". The audio is kept with the message (playable on the Messages page,
+included in exports); the copy staged in S3 for transcription is deleted at once.

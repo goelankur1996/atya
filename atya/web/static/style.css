@@ -356,3 +356,8 @@ main.prose ul { padding-left: 20px; display: flex; flex-direction: column; gap: 
 @media (max-width: 640px) { .cols { grid-template-columns: 1fr; } }
 .pre { white-space: pre-wrap; }
 .pad { padding: 16px; margin: 0; }
+
+/* Voice notes in Messages */
+.bubble.voice { display: flex; flex-direction: column; gap: 8px; }
+.bubble.voice audio { width: 260px; max-width: 100%; height: 36px; }
+.bubble.voice .transcript { margin: 0; white-space: pre-wrap; }

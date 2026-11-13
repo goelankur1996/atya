@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
-from . import briefs, embeddings, processor, receiver, reminders, sender, web, whatsapp
+from . import transcribe, briefs, embeddings, processor, receiver, reminders, sender, web, whatsapp
 from .config import load_settings
 from .llm import BedrockLLM, ClaudeLLM
 from .migrate import migrate
@@ -75,13 +75,19 @@ def main() -> None:
         log.info("models: Bedrock %s (fast), %s (main)", settings.bedrock_fast_model, settings.bedrock_main_model)
     else:
         llm = ClaudeLLM(settings.anthropic_api_key)
+    transcriber = None
+    if settings.voice_notes and settings.transcribe_bucket:
+        transcriber = transcribe.AWSTranscriber(bucket=settings.transcribe_bucket, region=settings.aws_region)
+        log.info("voice notes on (Amazon Transcribe)")
+    else:
+        log.warning("voice notes off (needs VOICE_NOTES=on and a bucket)")
     embedder = embeddings.VoyageEmbedder(settings.voyage_api_key) if settings.voyage_api_key else None
     if embedder is None:
         log.warning("VOYAGE_API_KEY not set: embeddings off, search uses full text only")
 
     workers = [
         ("receiver", receiver.run, (store, tg, settings)),
-        ("processor", processor.run, (store, llm, settings, embedder)),
+        ("processor", processor.run, (store, llm, settings, embedder, transcriber)),
         ("sender", sender.run, (store, tg, settings)),
         ("web", web.run, (store, settings)),
         ("briefs", briefs.run, (store, settings)),

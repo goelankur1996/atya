@@ -11,7 +11,7 @@ import logging
 import time
 import uuid
 
-from . import commands, documents, reminders
+from . import commands, documents, reminders, transcribe
 from .config import Settings
 from .schema import CLOSED_STATUSES, load_schema
 from .store import Store
@@ -93,8 +93,23 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
     if tenant["status"] != "active":
         return "dropped:inactive-tenant"
     doc = msg.get("document")
+    voice = msg.get("voice") or msg.get("audio")
     file_data: bytes | None = None
-    if doc:
+    audio: dict | None = None            # {"data", "mime", "seconds", "filename"} for a voice note
+    if voice:
+        mime = voice.get("mime_type") or ("audio/ogg" if msg.get("voice") else "")
+        seconds = voice.get("duration")
+        if not transcribe.supported(mime):
+            ctx.reply("I can't read that audio format. Voice notes, MP3 and M4A work.")
+            return "skipped:audio-format"
+        if (voice.get("file_size") or 0) > transcribe.MAX_BYTES or (seconds or 0) > transcribe.MAX_SECONDS:
+            ctx.reply(f"Voice notes can be up to {transcribe.MAX_SECONDS // 60} minutes. Send a shorter one.")
+            return "skipped:too-long"
+        data = tg.download_file(voice["file_id"], transcribe.MAX_BYTES)   # failure: update is retried
+        audio = {"data": data, "mime": transcribe.base_mime(mime), "seconds": seconds,
+                 "filename": voice.get("file_name") or f"voice.{transcribe.extension(mime)}"}
+        text = transcribe.placeholder(seconds)
+    elif doc:
         name = doc.get("file_name") or "file.pdf"
         if not (doc.get("mime_type") == "application/pdf" or name.lower().endswith(".pdf")):
             ctx.reply("I can only save PDF files for now. Other files and photos are coming later.")
@@ -111,8 +126,8 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
         # A download failure (TelegramError) propagates: the update is retried.
         if not text.strip():
             text = f"[PDF] {name}"          # the message is the file itself
-    elif msg.get("photo") or msg.get("voice") or msg.get("video") or msg.get("audio"):
-        ctx.reply("I can only save text and PDF files for now. Photos and voice notes are coming later.")
+    elif msg.get("photo") or msg.get("video") or msg.get("video_note"):
+        ctx.reply("I can only save text, voice notes and PDF files for now. Photos and videos are coming later.")
         return "skipped:media"
     if not text.strip():
         return "skipped:no-text"
@@ -129,6 +144,9 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
             tx.add_attachment(tenant["id"], inbox_id=inbox_id, filename=doc.get("file_name") or "file.pdf",
                               mime_type="application/pdf", data=file_data,
                               sha256=documents.sha256(file_data))
+        if audio is not None:
+            tx.add_attachment(tenant["id"], inbox_id=inbox_id, filename=audio["filename"], mime_type=audio["mime"],
+                              data=audio["data"], sha256=documents.sha256(audio["data"]), seconds=audio["seconds"])
         tx.note_inbound(tenant["id"], "telegram")
         if tenant["telegram_chat_id"] != chat_id:
             tx.conn.execute("UPDATE tenants SET telegram_chat_id = %s WHERE id = %s",
