@@ -28,6 +28,7 @@ class FakeWhatsApp:
         self.sent: list[tuple[str, str, list | None]] = []
         self.files: dict[str, bytes] = {}
         self.fail_with: whatsapp.WhatsAppError | None = None
+        self.templates: list[dict] = []
         self._n = 0
 
     def send_message(self, chat_id, text, reply_to=None, buttons=None, preview=True):
@@ -36,6 +37,13 @@ class FakeWhatsApp:
         self._n += 1
         self.sent.append((str(chat_id), text, buttons))
         return {"message_id": f"wamid.out{self._n}"}
+
+    def send_template(self, message):
+        if self.fail_with:
+            raise self.fail_with
+        self._n += 1
+        self.templates.append(message)
+        return {"message_id": f"wamid.tpl{self._n}"}
 
     def send_document(self, *a, **k):
         raise whatsapp.WhatsAppError("no")
@@ -230,7 +238,7 @@ def test_invite_signup_onboarding_and_a_message_through_the_pipeline(store, sett
     assert row["status"] == "failed" and "24 hours" in row["error"]
 
 
-def test_outside_24h_window_is_not_sent(store, settings, clean):
+def friend_outside_window(store, settings):
     code, _, _ = owner_invite(store, settings)
     wa = FakeWhatsApp()
     deliver(store, wa, settings, event(FRIEND, text=f"/start {code}"))
@@ -239,13 +247,70 @@ def test_outside_24h_window_is_not_sent(store, settings, clean):
     with store.tx(system=True) as tx:
         tx.conn.execute("UPDATE tenants SET whatsapp_last_inbound = now() - interval '25 hours' WHERE id = %s",
                         (t["id"],))
-        oid = tx.add_outbox(t["id"], chat_id=None, body="Reminder: call Jim", priority="alert")
+    return wa, t
+
+
+def test_outside_window_messages_wait_behind_one_show_template(store, settings, clean):
+    wa, t = friend_outside_window(store, settings)
+    with store.tx(system=True) as tx:
+        a = tx.add_outbox(t["id"], chat_id=None, body="An answer")
+        b = tx.add_outbox(t["id"], chat_id=None, body="Another")
     before = len(wa.sent)
     whatsapp.send_once(store, wa)
-    assert len(wa.sent) == before
+    assert len(wa.sent) == before                                 # nothing free-form
+    assert len(wa.templates) == 1 and wa.templates[0]["template"]["name"] == "atya_update"
+    comps = wa.templates[0]["template"]["components"]
+    assert comps[0]["parameters"][0]["text"] in ("1 new message", "2 new messages")
+    assert comps[1]["parameters"][0]["payload"] == "show"
     with store.tx(t["id"]) as tx:
-        row = tx._one("SELECT * FROM outbox WHERE id = %s", (oid,))
-    assert row["status"] == "failed" and "24 hours" in row["error"] and row["chat_id"] == int(FRIEND)
+        assert {r["status"] for r in tx._all("SELECT status FROM outbox WHERE id = ANY(%s)", ([a, b],))} == {"waiting"}
+
+    # Tapping Show opens the window: both go out.
+    deliver(store, wa, settings, {"entry": [{"changes": [{"field": "messages", "value": {
+        "metadata": {"phone_number_id": PHONE_ID},
+        "messages": [{"from": FRIEND, "id": "wamid.tap1", "timestamp": str(int(time.time())), "type": "button",
+                      "button": {"payload": "show", "text": "Show"}}]}}]}]})
+    whatsapp.send_once(store, wa)
+    assert wa.texts(FRIEND)[-2:] == ["An answer", "Another"]
+    assert len(wa.templates) == 1
+
+
+def test_outside_window_reminder_goes_as_template(store, settings, clean):
+    wa, t = friend_outside_window(store, settings)
+    with store.tx(system=True) as tx:
+        oid = tx.add_outbox(t["id"], chat_id=None, body="\u23f0 Call Jim (TSK-3)\n(was due 2:00 pm)",
+                            buttons=[[("Done", "rem:done:x"), ("In 1 hour", "rem:1h:x"),
+                                      ("Tomorrow 9am", "rem:tmrw:x")]], kind="reminder")
+    whatsapp.send_once(store, wa)
+    tpl = wa.templates[-1]["template"]
+    assert tpl["name"] == "atya_reminder"
+    assert tpl["components"][0]["parameters"][0]["text"] == "Call Jim (TSK-3)"
+    assert [c["parameters"][0]["payload"] for c in tpl["components"][1:]] == ["rem:done:x", "rem:1h:x", "rem:tmrw:x"]
+    with store.tx(t["id"]) as tx:
+        assert tx._one("SELECT status FROM outbox WHERE id = %s", (oid,))["status"] == "sent"
+
+
+def test_stale_brief_is_dropped_when_released(store, settings, clean):
+    wa, t = friend_outside_window(store, settings)
+    with store.tx(system=True) as tx:
+        old = tx.add_outbox(t["id"], chat_id=None, body="brief", kind="brief")
+        tx.conn.execute("UPDATE outbox SET created_at = now() - interval '30 hours' WHERE id = %s", (old,))
+    whatsapp.send_once(store, wa)
+    assert wa.templates[-1]["template"]["name"] == "atya_brief"
+    deliver(store, wa, settings, event(FRIEND, text="hi"))
+    with store.tx(t["id"]) as tx:
+        assert tx._one("SELECT status FROM outbox WHERE id = %s", (old,))["status"] == "cancelled"
+
+
+def test_failed_nudge_is_reported(store, settings, clean):
+    wa, t = friend_outside_window(store, settings)
+    with store.tx(system=True) as tx:
+        oid = tx.add_outbox(t["id"], chat_id=None, body="x")
+    wa.fail_with = whatsapp.WhatsAppError("send: 132001 template name does not exist")
+    whatsapp.send_once(store, wa)
+    with store.tx(t["id"]) as tx:
+        row = tx._one("SELECT status, error FROM outbox WHERE id = %s", (oid,))
+    assert row["status"] == "failed" and "132001" in row["error"]
 
 
 def test_owner_links_whatsapp_to_the_telegram_account(store, settings, clean):
@@ -367,3 +432,13 @@ def test_privacy_page_is_public(store, settings):
     from dataclasses import replace
     r = create_app(store, replace(settings, llm_provider="bedrock")).test_client().get("/privacy")
     assert b"Amazon Bedrock" in r.data and b"Anthropic" not in r.data
+
+
+def test_template_definitions():
+    from atya import wa_templates as W
+    for t in W.TEMPLATES:
+        body = next(c for c in t["components"] if c["type"] == "BODY")["text"]
+        assert not body.startswith("{{") and not body.rstrip(".").endswith("}}")   # Meta rejects these
+        assert t["category"] == "UTILITY"
+    assert W.param("a\n\nb\t  c" + " " * 10 + "d") == "a b c d"
+    assert len(W.param("x" * 500)) == 200

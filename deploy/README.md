@@ -48,9 +48,19 @@ Webhook in the Meta app (WhatsApp → Configuration): callback URL
 to the `messages` field. The web view must be on.
 
 Users join with an invite (`/invite` gives a wa.me link) or connect WhatsApp to
-an existing Telegram account with `/link`. WhatsApp only allows free-form
-messages within 24 hours of the user's last message; reminders and briefs
-outside that window are marked failed until message templates are added.
+an existing Telegram account with `/link`.
+
+WhatsApp only allows free-form messages within 24 hours of the user's last
+message. After that, reminders go out as the `atya_reminder` template (with
+Done / snooze buttons), and anything else waits behind one `atya_brief` or
+`atya_update` template ("tap Show"); it is sent as soon as the user taps or
+writes. Templates need `WHATSAPP_WABA_ID` in SSM, a payment method on the
+WhatsApp account, and Meta's approval:
+
+```bash
+deploy/run.sh "cd /opt/atya && docker compose exec -T app python -m atya.wa_templates create"
+deploy/run.sh "cd /opt/atya && docker compose exec -T app python -m atya.wa_templates status"
+```
 
 ## Trying other models (Amazon Bedrock)
 

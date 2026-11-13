@@ -137,10 +137,15 @@ class Tx:
 
     def note_inbound(self, tenant_id: uuid.UUID, channel: str) -> None:
         """The user just wrote on this channel: unprompted messages go there, and
-        on WhatsApp it opens the 24-hour window for free-form replies."""
+        on WhatsApp it opens the 24-hour window for free-form replies, so
+        anything waiting for it is released (a brief more than a day old is dropped)."""
         self.conn.execute(
             "UPDATE tenants SET channel = %s, whatsapp_last_inbound = CASE WHEN %s = 'whatsapp' "
             "THEN now() ELSE whatsapp_last_inbound END WHERE id = %s", (channel, channel, tenant_id))
+        if channel == "whatsapp":
+            self.conn.execute(
+                "UPDATE outbox SET status = CASE WHEN kind = 'brief' AND created_at < now() - interval '20 hours' "
+                "THEN 'cancelled' ELSE 'pending' END WHERE tenant_id = %s AND status = 'waiting'", (tenant_id,))
 
     def set_tenant_status(self, tenant_id: uuid.UUID, status: str, *, actor: str = "system") -> None:
         self.conn.execute("UPDATE tenants SET status = %s WHERE id = %s", (status, tenant_id))
@@ -529,7 +534,7 @@ class Tx:
                    inbox_id: uuid.UUID | None = None, reply_to_message_id: int | None = None,
                    priority: str = "routine", actor: str = "processor",
                    buttons: list[list[tuple[str, str]]] | None = None,
-                   channel: str | None = None) -> uuid.UUID:
+                   channel: str | None = None, kind: str | None = None) -> uuid.UUID:
         """Queue a reply. It goes back where the message came from: a message
         sent from the web view is answered there (channel 'web', marked sent at
         once; no sender sees it), a WhatsApp message on WhatsApp. Without a
@@ -550,11 +555,11 @@ class Tx:
         channel = channel or "telegram"
         row = self._one(
             "INSERT INTO outbox (tenant_id, inbox_id, channel, chat_id, reply_to_message_id, body, priority, "
-            "buttons, status, sent_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            "buttons, status, sent_at, kind) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (tenant_id, inbox_id, channel, chat_id or 0, reply_to_message_id, body, priority,
              Jsonb([[list(b) for b in r] for r in buttons]) if buttons else None,
              "sent" if channel == "web" else "pending",
-             dt.datetime.now(dt.timezone.utc) if channel == "web" else None))
+             dt.datetime.now(dt.timezone.utc) if channel == "web" else None, kind))
         assert row is not None
         self.audit(tenant_id, actor=actor, action="create", target_table="outbox",
                    target_id=row["id"], summary="reply queued",
@@ -800,6 +805,17 @@ class Tx:
             "  ORDER BY created_at LIMIT %s FOR UPDATE SKIP LOCKED) RETURNING *", (channel, limit))
         return sorted(rows, key=lambda r: r["created_at"])
 
+    def wait_outbox(self, outbox_id: uuid.UUID) -> None:
+        """Hold a WhatsApp message until the user next writes (outside the 24-hour window)."""
+        self.conn.execute("UPDATE outbox SET status = 'waiting' WHERE id = %s", (outbox_id,))
+
+    def nudge_due(self, tenant_id: uuid.UUID) -> bool:
+        """True (and noted) if no 'tap Show' template went out since the user last wrote."""
+        row = self._one("UPDATE tenants SET whatsapp_nudged_at = now() WHERE id = %s AND (whatsapp_nudged_at IS NULL "
+                        "OR whatsapp_nudged_at < coalesce(whatsapp_last_inbound, '-infinity')) RETURNING id",
+                        (tenant_id,))
+        return row is not None
+
     def finish_outbox(self, outbox_id: uuid.UUID, *, ok: bool, error: str | None = None,
                       actor: str = "sender", channel_message_id: str | None = None) -> None:
         row = self._one(
@@ -821,6 +837,28 @@ class Tx:
         self.audit(row["tenant_id"], actor="whatsapp", action="reject", target_table="outbox",
                    target_id=row["id"], summary=f"delivery failed: {error[:200]}")
         return True
+
+    # --- cohort (owner's view of activity; counts only) ----------------------
+
+    def cohort(self, days: int = 21) -> list[dict]:
+        """Every account with its active days (local dates with at least one message) and counts."""
+        return self._all(
+            "SELECT t.id, t.display_name, t.status, t.channel, t.created_at, t.timezone, t.telegram_user_id, "
+            "       t.whatsapp_phone IS NOT NULL AS on_whatsapp, t.telegram_user_id IS NOT NULL AS on_telegram, "
+            "       coalesce(a.days, '{}') AS days, coalesce(a.recent, 0) AS recent, coalesce(a.total, 0) AS total, "
+            "       a.last_at, coalesce(u.held, 0) AS held, coalesce(f.failed, 0) AS failed "
+            "FROM tenants t "
+            "LEFT JOIN LATERAL (SELECT array_agg(DISTINCT (i.captured_at AT TIME ZONE t.timezone)::date) "
+            "         FILTER (WHERE i.captured_at > now() - make_interval(days => %s)) AS days, "
+            "       count(*) FILTER (WHERE i.captured_at > now() - interval '7 days') AS recent, "
+            "       count(*) AS total, max(i.captured_at) AS last_at "
+            "       FROM inbox i WHERE i.tenant_id = t.id) a ON true "
+            "LEFT JOIN LATERAL (SELECT sum(held) AS held FROM usage_daily WHERE tenant_id = t.id "
+            "       AND day > current_date - 7) u ON true "
+            "LEFT JOIN LATERAL (SELECT count(*) AS failed FROM inbox WHERE tenant_id = t.id AND status = 'failed' "
+            "       AND coalesce(processor_notes, '') NOT LIKE 'not processed:%%' "
+            "       AND captured_at > now() - interval '7 days') f ON true "
+            "ORDER BY a.last_at DESC NULLS LAST", (days + 1,))
 
     # --- usage (spending caps) ------------------------------------------------
 

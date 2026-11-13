@@ -42,6 +42,8 @@ class Settings:
     whatsapp_app_secret: str | None = None
     whatsapp_phone_number_id: str | None = None
     whatsapp_verify_token: str | None = None
+    # WhatsApp Business Account id (for creating message templates).
+    whatsapp_waba_id: str | None = None
     # The business number in digits (918920396095), for wa.me links in invites.
     whatsapp_number: str | None = None
     # Which models: "anthropic" (Claude API) or "bedrock" (models on Amazon Bedrock).
@@ -109,6 +111,7 @@ def load_settings() -> Settings:
         whatsapp_app_secret=opt("WHATSAPP_APP_SECRET"),
         whatsapp_phone_number_id=opt("WHATSAPP_PHONE_NUMBER_ID"),
         whatsapp_verify_token=opt("WHATSAPP_VERIFY_TOKEN"),
+        whatsapp_waba_id=opt("WHATSAPP_WABA_ID"),
         privacy_email=opt("PRIVACY_EMAIL"),
         daily_messages=num("LIMIT_DAILY_MESSAGES", 150),
         daily_voice_minutes=num("LIMIT_DAILY_VOICE_MINUTES", 30),

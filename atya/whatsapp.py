@@ -26,7 +26,7 @@ from typing import Any
 
 import requests
 
-from . import commands, documents, transcribe
+from . import commands, documents, transcribe, wa_templates
 from .config import Settings
 from .receiver import reminder_button, save_as_task
 from .store import Store
@@ -85,6 +85,11 @@ class WhatsApp:
             body = self._post(payload)
             last = ((body.get("messages") or [{}])[0]).get("id", "")
         return {"message_id": last}
+
+    def send_template(self, message: dict) -> dict:
+        """Send a prepared template message (see wa_templates). Returns {"message_id": wamid}."""
+        body = self._post(message)
+        return {"message_id": ((body.get("messages") or [{}])[0]).get("id", "")}
 
     def send_document(self, chat_id: int | str, filename: str, data: bytes, caption: str = "") -> dict:
         raise WhatsAppError("sending files is not supported on WhatsApp here")
@@ -327,6 +332,8 @@ def handle_tap(store: Store, ctx: commands.Ctx, data: str) -> str:
     if tenant is not None:
         with store.tx(tenant["id"]) as tx:
             tx.note_inbound(tenant["id"], "whatsapp")
+    if data == wa_templates.SHOW:
+        return "released" if tenant is not None else "ignored:callback-no-tenant"
     if data.startswith("save:"):
         return save_as_task(store, tenant, ctx.chat_id, data[5:], channel="whatsapp")
     if data.startswith("rem:"):
@@ -372,26 +379,42 @@ def run(store: Store, wa, settings: Settings, telegram: TelegramAPI | None = Non
 # --- sender ----------------------------------------------------------------------
 
 def send_once(store: Store, wa) -> int:
+    """Deliver queued WhatsApp messages. Within 24 hours of the user's last message
+    anything goes; after that only templates: a reminder goes as the reminder
+    template, anything else waits behind one "tap Show" template."""
     with store.tx(system=True) as tx:
         rows = tx.claim_outbox(limit=20, channel="whatsapp")
-        last_in = {}
-        for tid in {r["tenant_id"] for r in rows}:
-            t = tx.tenant(tid)
-            last_in[tid] = t["whatsapp_last_inbound"] if t else None
+        tenants = {tid: tx.tenant(tid) for tid in {r["tenant_id"] for r in rows}}
     now = dt.datetime.now(dt.timezone.utc)
     for row in rows:
-        wamid = None
-        seen = last_in.get(row["tenant_id"])
-        if seen is None or now - seen > WINDOW:
-            ok, err = False, OUTSIDE_WINDOW
-        else:
-            try:
+        t = tenants.get(row["tenant_id"]) or {}
+        seen = t.get("whatsapp_last_inbound")
+        wamid, ok, err = None, True, None
+        try:
+            if seen is not None and now - seen <= WINDOW:
                 buttons = [[tuple(b) for b in r] for r in row["buttons"]] if row.get("buttons") else None
                 wamid = wa.send_message(row["chat_id"], row["body"], buttons=buttons, preview=False).get("message_id")
-                ok, err = True, None
-            except WhatsAppError as e:
-                ok, err = False, str(e)
-                log.warning("send failed for %s: %s", row["id"], e)
+            elif row.get("kind") == "reminder":
+                wamid = wa.send_template(wa_templates.reminder(str(row["chat_id"]), row["body"],
+                                                               row.get("buttons"))).get("message_id")
+            else:
+                with store.tx(system=True) as tx:
+                    tx.wait_outbox(row["id"])
+                    nudge = tx.nudge_due(row["tenant_id"])
+                    waiting = tx._one("SELECT count(*) AS n FROM outbox WHERE tenant_id = %s AND status = 'waiting'",
+                                      (row["tenant_id"],))["n"] if nudge else 0
+                if nudge:
+                    if row.get("kind") == "brief":
+                        from zoneinfo import ZoneInfo
+                        day = now.astimezone(ZoneInfo(t.get("timezone") or "UTC"))
+                        msg = wa_templates.brief_ready(str(row["chat_id"]), f"{day:%A} {day.day} {day:%B}")
+                    else:
+                        msg = wa_templates.update_waiting(str(row["chat_id"]), waiting)
+                    wa.send_template(msg)
+                continue                                   # stays 'waiting' until the user writes or taps Show
+        except WhatsAppError as e:
+            ok, err = False, str(e)
+            log.warning("send failed for %s: %s", row["id"], e)
         with store.tx(system=True) as tx:
             tx.finish_outbox(row["id"], ok=ok, error=err, channel_message_id=wamid or None)
     return len(rows)

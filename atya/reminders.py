@@ -92,7 +92,7 @@ def send_due_reminders(store: Store, now: dt.datetime | None = None) -> int:
                 late = f"\n(was due {human(at, local_now)})" if now_utc - at > LATE_AFTER else ""
                 tx.add_outbox(c["tenant_id"], chat_id=c["telegram_chat_id"],
                               body=f"⏰ {c['title']} ({prefix}-{c['seq']}){late}",
-                              buttons=buttons(c["id"]), priority="alert", actor="reminders")
+                              buttons=buttons(c["id"]), priority="alert", actor="reminders", kind="reminder")
             sent += 1
         except Exception:
             log.exception("reminder for task %s failed; will retry", c["id"])

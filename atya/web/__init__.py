@@ -127,7 +127,9 @@ def create_app(store: Store, settings: Settings) -> Flask:
                 "fmt_cell": fmt_cell,
                 "fmt_value": fmt_value, "status_label": status_label,
                 "csrf": g.get("csrf", ""),
-                "tenant": g.get("tenant"), "schema": g.get("schema")}
+                "tenant": g.get("tenant"), "schema": g.get("schema"),
+                "is_owner": bool(g.get("tenant") and settings.owner_telegram_user_id
+                                 and g.tenant.get("telegram_user_id") == settings.owner_telegram_user_id)}
 
     def ref(rec: dict) -> str:
         tdef = g.schema.types.get(rec["type"])
@@ -512,6 +514,30 @@ def create_app(store: Store, settings: Settings) -> Flask:
         need_login()
         if not settings.owner_telegram_user_id or g.tenant.get("telegram_user_id") != settings.owner_telegram_user_id:
             abort(404)
+
+    @app.get("/cohort")
+    def cohort():
+        """Who is using ATYA: active days per user, counts only, never content."""
+        need_owner()
+        days = 21
+        with store.tx(system=True) as t:
+            rows = t.cohort(days)
+        out = []
+        for r in rows:
+            today = dt.datetime.now(zoneinfo.ZoneInfo(r["timezone"] or "UTC")).date()
+            active = set(r["days"] or [])
+            strip = [{"day": today - dt.timedelta(days=n), "on": (today - dt.timedelta(days=n)) in active}
+                     for n in range(days - 1, -1, -1)]
+            out.append({**r, "strip": strip,
+                        "owner": r["telegram_user_id"] == settings.owner_telegram_user_id,
+                        "a7": sum(1 for x in strip[-7:] if x["on"]),
+                        "a14": sum(1 for x in strip[-14:] if x["on"]),
+                        "a21": sum(1 for x in strip if x["on"]),
+                        "joined_days": (dt.datetime.now(dt.timezone.utc) - r["created_at"]).days})
+        users = [r for r in out if not r["owner"] and r["status"] == "active"]
+        summary = {"users": len(users), "active7": sum(1 for r in users if r["a7"]),
+                   "daily": sum(1 for r in users if r["a7"] >= 5)}
+        return render_template("cohort.html", rows=out, summary=summary, days=days)
 
     @app.get("/eval")
     def eval_index():

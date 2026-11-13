@@ -145,3 +145,24 @@ def test_match_writes():
     m = ev.match_writes([{"type": "task", "title": "Call Jim"}, {"type": "person", "title": "Jim"}],
                         [{"type": "task", "title": "Call Jim at 2pm"}, {"type": "note", "title": "x"}])
     assert m["matched"] == 1 and len(m["missed"]) == 1 and len(m["extra"]) == 1 and not m["same_types"]
+
+
+def test_users_page_owner_only_counts_no_content(store, settings, clean):  # noqa: F811
+    seed(store, settings)
+    t = owner_tenant(store)
+    with store.tx(system=True) as tx:
+        friend = tx.create_tenant(telegram_user_id=777002, telegram_chat_id=777002, display_name="Ravi",
+                                  timezone="Asia/Kolkata")
+        tx.add_inbox(friend["id"], source="whatsapp", raw_content="my private diary entry")
+    try:
+        app = web.create_app(store, settings)
+        c, _ = sign_in(app, store, settings, t)
+        page = c.get("/cohort").get_data(as_text=True)
+        assert "Ravi" in page and "private diary" not in page and "style=" not in page
+        assert 'href="/cohort"' in c.get("/").get_data(as_text=True)
+        c2, _ = sign_in(app, store, settings, friend)
+        assert c2.get("/cohort").status_code == 404
+        assert 'href="/cohort"' not in c2.get("/").get_data(as_text=True)
+    finally:
+        with store.tx(system=True) as tx:
+            tx.delete_tenant(friend["id"])

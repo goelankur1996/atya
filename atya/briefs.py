@@ -136,7 +136,7 @@ def send_due_briefs(store: Store, now: dt.datetime | None = None) -> int:
                 if not tx.claim_brief(c["id"], local.date()):
                     continue                     # another run got there first
                 body = build_brief(tx, schema, c["id"], local.date())
-                tx.add_outbox(c["id"], chat_id=c["telegram_chat_id"], body=body, actor="briefs")
+                tx.add_outbox(c["id"], chat_id=c["telegram_chat_id"], body=body, actor="briefs", kind="brief")
             sent += 1
         except Exception:
             log.exception("brief for tenant %s failed; will retry next minute", c["id"])

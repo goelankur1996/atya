@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% set active = "cohort" %}
+{% block title %}Users · ATYA{% endblock %}
+{% block main_class %} class="wide"{% endblock %}
+{% block body %}
+<section>
+  <h1>Users</h1>
+  <p class="muted flush">Who used ATYA on which days (their own timezone). Counts only: no one's messages are shown here.</p>
+</section>
+<section class="cards">
+  <div class="card"><span class="n">{{ summary.users }}</span><span class="t">Users (not counting you)</span></div>
+  <div class="card"><span class="n">{{ summary.active7 }}</span><span class="t">Active in the last 7 days</span></div>
+  <div class="card"><span class="n">{{ summary.daily }}</span><span class="t">Active 5+ of the last 7 days</span></div>
+</section>
+<div class="box cohort">
+  <div class="crow head">
+    <span class="who">User</span><span class="strip">Last {{ days }} days (oldest → today)</span>
+    <span class="num">7d</span><span class="num">14d</span><span class="num">21d</span><span class="num">Msgs 7d</span><span class="num">Total</span>
+  </div>
+  {% for r in rows %}
+  <div class="crow">
+    <span class="who">
+      <b>{{ r.display_name or "(no name)" }}</b>{% if r.owner %} <span class="pill">you</span>{% endif %}
+      <span class="muted small">{{ "WhatsApp" if r.on_whatsapp else "" }}{{ " · " if r.on_whatsapp and r.on_telegram else "" }}{{ "Telegram" if r.on_telegram else "" }}
+        · joined {{ r.joined_days }}d ago{% if r.status != "active" %} · {{ r.status }}{% endif %}
+        {% if r.held %} · {{ r.held }} held{% endif %}{% if r.failed %} · {{ r.failed }} failed{% endif %}</span>
+    </span>
+    <span class="strip">{% for d in r.strip %}<i class="{{ 'on' if d.on else '' }}{{ ' before' if d.day < r.created_at.date() else '' }}" title="{{ d.day.strftime('%a %d %b') }}"></i>{% endfor %}</span>
+    <span class="num">{{ r.a7 }}</span><span class="num">{{ r.a14 }}</span><span class="num">{{ r.a21 }}</span>
+    <span class="num">{{ r.recent }}</span><span class="num">{{ r.total }}</span>
+  </div>
+  {% endfor %}
+</div>
+<p class="muted small">Week-3 check: a user who joined 21+ days ago and still has dots in the last 7 days is a keeper.</p>
+{% endblock %}
