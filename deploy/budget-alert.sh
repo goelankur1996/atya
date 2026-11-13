@@ -21,7 +21,7 @@ make_budget() {   # name, amount, period, thresholds...
     --budget "{\"BudgetName\":\"$name\",\"BudgetLimit\":{\"Amount\":\"$amount\",\"Unit\":\"USD\"},\"TimeUnit\":\"$period\",\"BudgetType\":\"COST\",
                \"CostTypes\":{\"IncludeCredit\":false,\"IncludeRefund\":false,\"IncludeTax\":true,\"IncludeSubscription\":true,\"UseBlended\":false}}" \
     --notifications-with-subscribers "[${notes%,}]"
-  echo "ok: $name \$$amount per ${period,,}"
+  echo "ok: $name \$$amount ($period)"
 }
 
 make_budget atya-monthly "$AMOUNT" MONTHLY 50 80 100
