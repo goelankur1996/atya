@@ -40,7 +40,8 @@ class LLM(Protocol):
     def plan_query(self, *, schema: Schema, question: str, now: str) -> dict: ...
     def broaden_search(self, *, question: str, tried: str, found: list[str]) -> str: ...
     def answer(self, *, schema: Schema, question: str, records: list[dict], now: str) -> dict: ...
-    def interview_next(self, *, transcript: list[dict], n: int, max_turns: int) -> dict: ...
+    def interview_next(self, *, transcript: list[dict], areas: dict[str, str], still_open: list[str],
+                       saved: int, target: int) -> dict: ...
     def read_document(self, *, filename: str, caption: str, text: str | None = None,
                       pdf: bytes | None = None) -> dict: ...
 
@@ -197,27 +198,21 @@ READ_SCAN_EXTRA = """
 
 This PDF is a scan (no text layer). After the JSON object, write a line containing only ===== and then the document's readable text, page by page, each page starting with [page N]. Transcribe faithfully; skip decorative elements; use [illegible] where needed."""
 
-INTERVIEW_SYSTEM = """You are setting up a personal memory assistant for a new user by interviewing them, one question at a time. Everything they answer is filed as tasks, people, projects, goals and notes, so the assistant is useful from day one.
+INTERVIEW_SYSTEM = """You are setting up a personal memory assistant for a new user by interviewing them, one question at a time. Everything they answer is filed as tasks, reminders, people, projects and goals, so the assistant is useful from day one, above all this week. The aim is many concrete, dated facts, not a pleasant chat.
 
-Cover, over the conversation:
-- what they are working on (work and outside it), and the projects inside that
-- the people who matter right now, and what is open with each (owed, waiting on, to follow up)
-- deadlines and commitments in the next two weeks
-- goals for the next few months
-- recurring things (weekly meetings, habits, bills)
-- what has been nagging them or slipping
+Areas (key: what to find out):
+{areas}
 
 How to ask:
 - One question per turn, short (under 30 words), warm and plain, like a sharp assistant on their first day.
-- Follow up on specifics they just gave when something useful is missing: a deadline with no date, a person with no context, a task with no next step. Use their own words and names.
-- Don't ask about something they already covered. Move to an area not yet covered when the current one is answered.
-- If they skipped a question, don't ask it again.
+- Go after concrete facts with dates: who, what, which day, what time. If something time-bound came without a date (a birthday, a trip, a deadline, a bill), ask for the date next.
+- Follow up on specifics they just gave when something useful is missing: a person with no context, a task with no next step. Use their own words and names. Two follow-ups on one thread at most, then move on.
+- Then move to an area still open (listed in the message), in the order given, phrased naturally.
+- Short answers are fine; never wrap up because answers are short. If an area gets "nothing" or a skip, it is covered.
 - Ask in the language they answer in.
-- Stop when the areas above are reasonably covered, or the user seems done (short or reluctant answers).
 
 Reply with JSON only:
-{{"done": true or false, "question": "<the next question, empty if done>", "suggest": "<when done: one question they could ask the assistant later about their own answers, e.g. What do I owe Rahul?>"}}
-This is question number {n} of at most {max_turns}."""
+{{"covered": ["<keys of all areas the conversation has now covered or the user said have nothing>"], "question": "<the next question>", "done": <true only if every area is covered and there is nothing useful left to ask>, "suggest": "<one question they could ask the assistant later about their own answers, e.g. What do I owe Rahul?>"}}"""
 
 ANSWER_SYSTEM = """You answer questions from the owner of a personal memory system.
 
@@ -341,13 +336,19 @@ class PromptLLM:
         raw = self._call(model=self.main_model, system=system, user=user, max_tokens=2048)
         return parse_answer(raw, had_records=bool(records))
 
-    def interview_next(self, *, transcript: list[dict], n: int, max_turns: int) -> dict:
+    def interview_next(self, *, transcript: list[dict], areas: dict[str, str], still_open: list[str],
+                       saved: int, target: int) -> dict:
         """The next onboarding question, from the conversation so far."""
         convo = "\n\n".join(f"Q: {t['q']}\nA: {t['a'] if t.get('a') else '(skipped)'}" for t in transcript)
-        obj = parse_json(self._call(model=self.main_model, system=INTERVIEW_SYSTEM.format(n=n, max_turns=max_turns),
-                                    user=convo[-12000:] or "(no answers yet)", max_tokens=300, cache=False))
+        status = (f"\n\n---\nAreas still open, in order: {', '.join(still_open) or '(none)'}\n"
+                  f"Things saved so far: {saved} (aim: at least {target}).")
+        system = INTERVIEW_SYSTEM.format(areas="\n".join(f"- {k}: {v}" for k, v in areas.items()))
+        obj = parse_json(self._call(model=self.main_model, system=system,
+                                    user=(convo[-12000:] or "(no answers yet)") + status, max_tokens=400, cache=False))
         q = str(obj.get("question") or "").strip()
-        return {"done": bool(obj.get("done")) or not q, "question": q, "suggest": str(obj.get("suggest") or "").strip()}
+        covered = [str(c) for c in (obj.get("covered") or []) if str(c) in areas]
+        return {"done": bool(obj.get("done")) or not q, "question": q, "covered": covered,
+                "suggest": str(obj.get("suggest") or "").strip()}
 
     def read_document(self, *, filename: str, caption: str, text: str | None = None,
                       pdf: bytes | None = None) -> dict:

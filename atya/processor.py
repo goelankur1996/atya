@@ -754,18 +754,29 @@ def interview_turn(store: Store, llm: LLM, row: dict, tenant: dict, schema: Sche
         counts: dict[str, int] = {}
         for r in made:
             counts[r["type"]] = counts.get(r["type"], 0) + 1
+        st["saved"] = st.get("saved", 0) + len(made)
         if counts:
-            saved_line = f"Saved {interview.count_phrase(counts)}."
+            saved_line = f"Saved {interview.count_phrase(counts)} ({st['saved']} so far)."
     else:
         turns[-1]["a"] = None
+    if turns[-1].get("area"):                         # a fixed question, answered or skipped, covers its area
+        st["covered"] = sorted(set(st.get("covered", [])) | {turns[-1]["area"]})
     st["inbox"] = [*st.get("inbox", []), str(row["id"])]
     answered = sum(1 for t in turns if t.get("a"))
-    nxt = {"done": True, "question": "", "suggest": ""}
+    nxt = {"done": True, "question": "", "suggest": "", "area": None}
     if kind != "stop" and len(turns) < interview.MAX_TURNS:
         try:
-            nxt = llm.interview_next(transcript=turns, n=len(turns) + 1, max_turns=interview.MAX_TURNS)
-        except Exception as e:  # a bad model reply ends the interview gracefully
-            log.warning("interview question failed, wrapping up: %s", e)
+            got = llm.interview_next(transcript=turns, areas=interview.AREAS, still_open=interview.still_open(st),
+                                     saved=st.get("saved", 0), target=interview.TARGET_RECORDS)
+            st["covered"] = sorted(set(st.get("covered", [])) | set(got.get("covered", [])))
+            nxt = {**got, "area": None}
+        except Exception as e:  # a bad model reply: fall back to a fixed question, or wrap up
+            log.warning("interview question failed: %s", e)
+        if not interview.may_finish(st):              # too early to stop: always ask something
+            nxt["done"] = False
+            if not nxt["question"]:
+                area = interview.still_open(st)[0] if interview.still_open(st) else None
+                nxt = {"done": False, "question": interview.fallback_question(area), "suggest": "", "area": area}
     with store.tx(tid) as tx:
         if nxt["done"]:
             ids = [uuid.UUID(i) for i in st["inbox"]]
@@ -779,7 +790,7 @@ def interview_turn(store: Store, llm: LLM, row: dict, tenant: dict, schema: Sche
                 local_now = dt.datetime.now(dt.timezone.utc).astimezone(tz)
                 tx.set_brief(tid, at, skip_until=local_now.date() if local_now.time() >= at else None)
         else:
-            turns.append({"q": nxt["question"]})
+            turns.append({"q": nxt["question"], **({"area": nxt["area"]} if nxt.get("area") else {})})
             st["asked"] = dt.datetime.now(dt.timezone.utc).isoformat()
             tx.set_state(interview.key(tid), st)
             body = "\n\n".join(x for x in (saved_line, nxt["question"]) if x)

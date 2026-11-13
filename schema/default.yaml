@@ -112,6 +112,7 @@ types:
       LinkedIn:      {type: url}
       Last Contact:  {type: date}
       Next Followup: {type: date}
+      Birthday:      {type: text, description: "MM-DD, or YYYY-MM-DD if the year is known"}
       Projects:      {type: relation, to: project, many: true}
 
   library:
@@ -296,6 +297,8 @@ rules:
     - Day narrative / diary entry → create a journal entry. Body = verbatim capture, one block (0a, 0b). Title = the written date. Date = when written; Covers = subject period if different (0c). Mood / Energy / Sleep / Highlights only if expressed. Per-day data (sleep, workouts) is also extracted to the relevant child trackers, dated to when it happened. Thoughts = atomic fragment; Journal = dated narrative; when ambiguous prefer Thoughts unless it is clearly a whole-day reflection.
       - Sleep: when sleep is mentioned in any capture, fill Journal.Sleep with as much detail as possible: bedtime, wake time, total duration, interruptions, quality signal. One-line vague entries ("slept well") are not enough.
     - Reminder request ("remind me to X at 2pm", "ping me tomorrow 9am about Y", "in 2 hours remind me...") → a task with Remind At = the exact local date and time (YYYY-MM-DDTHH:MM, no offset; code applies the owner's timezone) and Due Date = that date. If an open task for the same thing exists, update it instead (set Remind At) rather than creating a duplicate. Times relative to the capture time ("in 20 minutes", "in 2 hours") are added to it. Vague times: morning 09:00, noon 12:00, afternoon 14:00, evening 18:00, tonight 20:00, "later" = 3 hours from now. A time already past today with no day named means tomorrow. Never set Remind At unless the owner asked to be reminded.
+    - Birthday or anniversary ("Meera's birthday is on 14 March") → set the person's Birthday (MM-DD, with year if given; create the person if needed) and create a task "Wish <name> a happy birthday" (or "...happy anniversary") with Due Date = the next occurrence and Remind At = that date 09:00. Occasions always get this reminder, even though no reminder was asked for.
+    - Trip or travel plan ("flying to Goa on the 20th") → a task "Trip: <place>" with Due Date = the departure date (Status next) and the dates and details in the body, plus a task for each preparation step mentioned (tickets, packing, visa), with due dates before departure.
     - Commitment / choice made → create a decision (Title, Decision, Reasoning, Decided At = today, Project/People if relevant).
     - Media to consume or consumed (books, articles, blogs, websites, movies, TV, videos, songs, podcasts) → library.
       - To consume ("want to read X", a recommendation, a link) → library record, Status=queued, with Type, Format, Priority. No journal entry.

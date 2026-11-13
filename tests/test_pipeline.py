@@ -113,7 +113,8 @@ class FakeLLM:
                                      "from": "VVPM", "summary": "A services agreement with VVPM.",
                                      "key_points": ["Payment due 30 Nov"], "actions": [], "text": ""})
 
-    def interview_next(self, *, transcript, n, max_turns):
+    def interview_next(self, *, transcript, areas, still_open, saved, target):
+        self.interview_seen = {"still_open": still_open, "saved": saved, "target": target}
         self.interview_calls = getattr(self, "interview_calls", 0) + 1
         script = getattr(self, "interview_script", None)
         if script:
