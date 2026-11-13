@@ -5,6 +5,7 @@
 /help           what the bot does and the commands
 /web            one-time link to the web view
 /usage          today's usage and limits
+/setup          the 10-minute setup interview
 /link           connect the other channel (Telegram <-> WhatsApp) to the same account
 /export         download everything as a zip
 /delete         erase your account (asks for a typed confirmation code)
@@ -22,7 +23,7 @@ import secrets
 import zoneinfo
 from dataclasses import dataclass
 
-from . import briefs
+from . import briefs, interview
 from .config import Settings
 from .export import build_export
 from .schema import load_schema
@@ -55,6 +56,7 @@ Commands:
 /web - a one-time link to browse, search and edit your records in a browser
 /link - use me on both Telegram and WhatsApp, with the same records
 /usage - how much you've used today, and the daily limits
+/setup - a short interview so I know what you're working on (answer by voice)
 /export - download everything you've sent and everything I've filed, as a zip
 /delete - permanently erase your account and data
 /help - this message"""
@@ -128,7 +130,8 @@ def finish_onboarding(ctx: Ctx, zone: str) -> None:
     with ctx.store.tx(ctx.tenant["id"]) as tx:
         tx.set_timezone(ctx.tenant["id"], zone, actor="commands")
         tx.set_tenant_status(ctx.tenant["id"], "active", actor="commands")
-    ctx.reply(f"Timezone set to {zone}.\n\n{WELCOME}")
+        opening = interview.begin(tx, ctx.tenant["id"])
+    ctx.reply(f"Timezone set to {zone}. You're in.\n\n{opening}")
 
 
 def stranger(ctx: Ctx) -> str:
@@ -172,6 +175,11 @@ def handle(ctx: Ctx, text: str) -> str:
         return link(ctx)
     if cmd == "/usage":
         return usage(ctx)
+    if cmd == "/setup":
+        with ctx.store.tx(ctx.tenant["id"]) as tx:
+            opening = interview.begin(tx, ctx.tenant["id"])
+        ctx.reply(opening)
+        return "setup:started"
     if cmd == "/export":
         return export(ctx)
     if cmd == "/delete":

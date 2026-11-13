@@ -17,7 +17,7 @@ import uuid
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import documents, limits, reminders, transcribe
+from . import documents, interview, limits, reminders, transcribe
 from .config import Settings
 from .embeddings import Embedder, EmbeddingError
 from .llm import LLM
@@ -649,6 +649,11 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
         elif files:                                   # a PDF is always a capture
             return process_files(store, llm, row, tenant, schema, tz, files)
 
+        with store.tx(row["tenant_id"]) as tx:
+            setup = interview.current(tx, tenant["id"])
+        if setup is not None and row.get("forced_intent") is None:
+            return interview_turn(store, llm, row, tenant, schema, tz, raw, heard, setup)
+
         if row.get("forced_intent") == "log":       # the user tapped "Save as task"
             cls = {"intent": "log", "reply": ""}
         else:
@@ -724,6 +729,64 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                          target_id=row["id"], summary=f"attempt {row['attempts']} failed; will retry",
                          source_data={"error": str(e)[:1000]})
         return "failed" if final else "retry"
+
+
+def interview_turn(store: Store, llm: LLM, row: dict, tenant: dict, schema: Schema, tz, raw: str,
+                   heard: str | None, st: dict) -> str:
+    """One answer in the setup interview: file it, then ask the next question (or wrap up)."""
+    tid = tenant["id"]
+    kind = interview.classify_reply(raw)
+    turns = st["turns"]
+    saved_line = ""
+    notes = "setup interview: " + kind
+    if kind == "answer":
+        with store.tx(tid) as tx:
+            context = fanout_context(tx, tid)
+        plan = llm.plan_fanout(schema=schema, raw_content=raw, captured_local=local_label(row["captured_at"], tz),
+                               context=context,
+                               hint=f"This answers a setup question I was asked: \u201c{turns[-1]['q']}\u201d. "
+                                    "File everything it mentions (tasks, people, projects, goals, deadlines).")
+        with store.tx(tid) as tx:
+            notes = FanoutExecutor(tx, schema, tenant, row).run(plan)
+            made = tx.records_from_inbox(tid, row["id"])
+            confirm_reminders(tx, schema, tenant, row)
+        turns[-1]["a"] = raw[:4000]
+        counts: dict[str, int] = {}
+        for r in made:
+            counts[r["type"]] = counts.get(r["type"], 0) + 1
+        if counts:
+            saved_line = f"Saved {interview.count_phrase(counts)}."
+    else:
+        turns[-1]["a"] = None
+    st["inbox"] = [*st.get("inbox", []), str(row["id"])]
+    answered = sum(1 for t in turns if t.get("a"))
+    nxt = {"done": True, "question": "", "suggest": ""}
+    if kind != "stop" and len(turns) < interview.MAX_TURNS:
+        try:
+            nxt = llm.interview_next(transcript=turns, n=len(turns) + 1, max_turns=interview.MAX_TURNS)
+        except Exception as e:  # a bad model reply ends the interview gracefully
+            log.warning("interview question failed, wrapping up: %s", e)
+    with store.tx(tid) as tx:
+        if nxt["done"]:
+            ids = [uuid.UUID(i) for i in st["inbox"]]
+            rows = tx._all("SELECT type, count(*) AS n FROM records WHERE tenant_id = %s "
+                           "AND source_inbox_id = ANY(%s) GROUP BY type ORDER BY count(*) DESC", (tid, ids))
+            counts = {r["type"]: r["n"] for r in rows}
+            body = interview.summary(counts if answered else {}, nxt.get("suggest", ""))
+            tx.set_state(interview.key(tid), None)
+            if answered and tenant.get("brief_time") is None:     # the first habit: a brief every morning
+                at = dt.time(9, 0)
+                local_now = dt.datetime.now(dt.timezone.utc).astimezone(tz)
+                tx.set_brief(tid, at, skip_until=local_now.date() if local_now.time() >= at else None)
+        else:
+            turns.append({"q": nxt["question"]})
+            st["asked"] = dt.datetime.now(dt.timezone.utc).isoformat()
+            tx.set_state(interview.key(tid), st)
+            body = "\n\n".join(x for x in (saved_line, nxt["question"]) if x)
+        tx.add_outbox(tid, chat_id=tenant["telegram_chat_id"], body=with_heard(heard, body), inbox_id=row["id"],
+                      reply_to_message_id=_reply_target(row["source_message_id"]))
+        tx.finish_inbox(row["id"], status="processed", intent="log", notes=notes)
+    return "processed"
 
 
 def process_once(store: Store, llm: LLM, settings: Settings,

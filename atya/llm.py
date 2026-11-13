@@ -40,6 +40,7 @@ class LLM(Protocol):
     def plan_query(self, *, schema: Schema, question: str, now: str) -> dict: ...
     def broaden_search(self, *, question: str, tried: str, found: list[str]) -> str: ...
     def answer(self, *, schema: Schema, question: str, records: list[dict], now: str) -> dict: ...
+    def interview_next(self, *, transcript: list[dict], n: int, max_turns: int) -> dict: ...
     def read_document(self, *, filename: str, caption: str, text: str | None = None,
                       pdf: bytes | None = None) -> dict: ...
 
@@ -196,6 +197,28 @@ READ_SCAN_EXTRA = """
 
 This PDF is a scan (no text layer). After the JSON object, write a line containing only ===== and then the document's readable text, page by page, each page starting with [page N]. Transcribe faithfully; skip decorative elements; use [illegible] where needed."""
 
+INTERVIEW_SYSTEM = """You are setting up a personal memory assistant for a new user by interviewing them, one question at a time. Everything they answer is filed as tasks, people, projects, goals and notes, so the assistant is useful from day one.
+
+Cover, over the conversation:
+- what they are working on (work and outside it), and the projects inside that
+- the people who matter right now, and what is open with each (owed, waiting on, to follow up)
+- deadlines and commitments in the next two weeks
+- goals for the next few months
+- recurring things (weekly meetings, habits, bills)
+- what has been nagging them or slipping
+
+How to ask:
+- One question per turn, short (under 30 words), warm and plain, like a sharp assistant on their first day.
+- Follow up on specifics they just gave when something useful is missing: a deadline with no date, a person with no context, a task with no next step. Use their own words and names.
+- Don't ask about something they already covered. Move to an area not yet covered when the current one is answered.
+- If they skipped a question, don't ask it again.
+- Ask in the language they answer in.
+- Stop when the areas above are reasonably covered, or the user seems done (short or reluctant answers).
+
+Reply with JSON only:
+{{"done": true or false, "question": "<the next question, empty if done>", "suggest": "<when done: one question they could ask the assistant later about their own answers, e.g. What do I owe Rahul?>"}}
+This is question number {n} of at most {max_turns}."""
+
 ANSWER_SYSTEM = """You answer questions from the owner of a personal memory system.
 
 You may ONLY use the records provided in the user message. Do not guess, do not invent figures, do not refer to data you weren't shown.
@@ -317,6 +340,14 @@ class PromptLLM:
         user = f"Question:\n{question}\n\nRecords:\n{data if records else '(none found)'}"
         raw = self._call(model=self.main_model, system=system, user=user, max_tokens=2048)
         return parse_answer(raw, had_records=bool(records))
+
+    def interview_next(self, *, transcript: list[dict], n: int, max_turns: int) -> dict:
+        """The next onboarding question, from the conversation so far."""
+        convo = "\n\n".join(f"Q: {t['q']}\nA: {t['a'] if t.get('a') else '(skipped)'}" for t in transcript)
+        obj = parse_json(self._call(model=self.main_model, system=INTERVIEW_SYSTEM.format(n=n, max_turns=max_turns),
+                                    user=convo[-12000:] or "(no answers yet)", max_tokens=300, cache=False))
+        q = str(obj.get("question") or "").strip()
+        return {"done": bool(obj.get("done")) or not q, "question": q, "suggest": str(obj.get("suggest") or "").strip()}
 
     def read_document(self, *, filename: str, caption: str, text: str | None = None,
                       pdf: bytes | None = None) -> dict:

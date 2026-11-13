@@ -113,6 +113,13 @@ class FakeLLM:
                                      "from": "VVPM", "summary": "A services agreement with VVPM.",
                                      "key_points": ["Payment due 30 Nov"], "actions": [], "text": ""})
 
+    def interview_next(self, *, transcript, n, max_turns):
+        self.interview_calls = getattr(self, "interview_calls", 0) + 1
+        script = getattr(self, "interview_script", None)
+        if script:
+            return script.pop(0)
+        return {"done": True, "question": "", "suggest": "What's due this week?"}
+
     def answer(self, *, schema, question, records, now):
         self.seen_records = records
         found = self.found.get(question, bool(records))
