@@ -515,7 +515,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
     @app.get("/eval/<run_id>")
     def eval_report(run_id: str):
         need_owner()
-        if not re.fullmatch(r"\d{8}-\d{6}", run_id):
+        if not re.fullmatch(r"\d{8}-\d{6}(-[0-9a-f]{4})?", run_id):
             abort(404)
         with store.tx(system=True) as t:
             r = t.get_state(f"eval:{run_id}")

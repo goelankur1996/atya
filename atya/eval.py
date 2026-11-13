@@ -207,13 +207,15 @@ def save_report(store: Store, report: dict) -> None:
 
 def run_eval(store: Store, llm: BedrockLLM, tenant: dict, *, limit: int, workers: int,
              with_files: bool = True) -> dict:
-    report = {"id": dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S"), "fast": llm.fast_model,
+    # Timestamp plus a random suffix: runs started together must not share an id.
+    report = {"id": dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4], "fast": llm.fast_model,
               "main": llm.main_model, "started": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
               "status": "running", "items": [], "files": [], "summary": {}}
     save_report(store, report)
     rows = pick_messages(store, tenant["id"], limit)
     print(f"evaluating {len(rows)} messages with fast={llm.fast_model} main={llm.main_model}", flush=True)
     items: list[dict] = []
+    report["messages_available"] = len(rows)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for n, item in enumerate(pool.map(lambda r: eval_message(store, llm, tenant, r), rows), 1):
             items.append(item)
