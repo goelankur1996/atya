@@ -1028,6 +1028,39 @@ class Tx:
         self.conn.execute("UPDATE signin_codes SET used_at = now() WHERE id = %s", (handle,))
         return row["tenant_id"]
 
+    # --- waitlist (system scope) ---------------------------------------------
+
+    def waitlist_entry(self, *, whatsapp: str | None = None, telegram: int | None = None) -> dict | None:
+        if whatsapp:
+            return self._one("SELECT * FROM waitlist WHERE whatsapp_phone = %s", (whatsapp,))
+        return self._one("SELECT * FROM waitlist WHERE telegram_user_id = %s", (telegram,))
+
+    def waitlist_join(self, *, channel: str, whatsapp_phone: str | None = None,
+                      telegram_user_id: int | None = None, telegram_chat_id: int | None = None,
+                      display_name: str | None = None, source: str = "chat") -> dict | None:
+        """Add someone; None if they were already on the list."""
+        return self._one(
+            "INSERT INTO waitlist (channel, whatsapp_phone, telegram_user_id, telegram_chat_id, display_name, "
+            "source, last_inbound_at) VALUES (%s, %s, %s, %s, %s, %s, now()) ON CONFLICT DO NOTHING RETURNING *",
+            (channel, whatsapp_phone, telegram_user_id, telegram_chat_id, display_name, source))
+
+    def waitlist_position(self, entry_id: uuid.UUID) -> int:
+        return self._one("SELECT count(*) AS n FROM waitlist WHERE created_at <= "
+                         "(SELECT created_at FROM waitlist WHERE id = %s)", (entry_id,))["n"]
+
+    def waitlist_seen(self, entry_id: uuid.UUID, *, want: str | None = None) -> None:
+        self.conn.execute("UPDATE waitlist SET last_inbound_at = now(), want = coalesce(want, %s) WHERE id = %s",
+                          (want, entry_id))
+
+    def waitlist(self) -> list[dict]:
+        return self._all("SELECT * FROM waitlist ORDER BY created_at")
+
+    def waitlist_get(self, entry_id: uuid.UUID) -> dict | None:
+        return self._one("SELECT * FROM waitlist WHERE id = %s", (entry_id,))
+
+    def waitlist_remove(self, entry_id: uuid.UUID) -> None:
+        self.conn.execute("DELETE FROM waitlist WHERE id = %s", (entry_id,))
+
     def purge_signin_codes(self) -> None:
         self.conn.execute("DELETE FROM signin_codes WHERE created_at < now() - interval '2 days'")
 

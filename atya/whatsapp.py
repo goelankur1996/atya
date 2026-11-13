@@ -218,7 +218,7 @@ def handle_message(store: Store, wa, settings: Settings, msg: dict, name: str | 
         return run_command(store, ctx, text.strip(), captured_at, source_id, phone)
 
     if tenant is None:
-        return commands.stranger(ctx)
+        return commands.stranger(ctx, text)
     if tenant["status"] == "invited":
         zone = commands.match_timezone(text)
         if zone:

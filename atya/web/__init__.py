@@ -325,6 +325,14 @@ def create_app(store: Store, settings: Settings) -> Flask:
                                    error="That code didn't work. Check it, or start again for a new one."), 400
         return start_session(tenant_id, url_for("home"))
 
+    @app.get("/waitlist")
+    def waitlist_page():
+        from ..commands import JOIN_PHRASE, whatsapp_link
+        wa = (whatsapp_link(settings, JOIN_PHRASE.capitalize())
+              if settings.whatsapp_on and settings.whatsapp_number else None)
+        tg = f"https://t.me/{telegram_bot()}?start=waitlist" if telegram_bot() else None
+        return render_template("waitlist.html", wa=wa, tg=tg)
+
     @app.get("/terms")
     def terms():
         return render_template("terms.html", email=settings.privacy_email)
@@ -853,7 +861,28 @@ def create_app(store: Store, settings: Settings) -> Flask:
         users = [r for r in out if not r["owner"] and r["status"] == "active"]
         summary = {"users": len(users), "active7": sum(1 for r in users if r["a7"]),
                    "daily": sum(1 for r in users if r["a7"] >= 5)}
-        return render_template("cohort.html", rows=out, summary=summary, days=days)
+        with store.tx(system=True) as t:
+            waiting = t.waitlist()
+        return render_template("cohort.html", rows=out, summary=summary, days=days, waiting=waiting,
+                               saved=request.args.get("saved"))
+
+    @app.post("/cohort/waitlist/<uuid:entry_id>/admit")
+    def waitlist_admit(entry_id):
+        need_owner()
+        check_csrf()
+        from ..commands import admit
+        tenant = admit(store, entry_id)
+        msg = (f"Let in {tenant['display_name'] or 'them'}. They've been sent a welcome message."
+               if tenant else "They're no longer on the waitlist.")
+        return redirect(url_for("cohort", saved=msg) + "#waitlist")
+
+    @app.post("/cohort/waitlist/<uuid:entry_id>/remove")
+    def waitlist_remove(entry_id):
+        need_owner()
+        check_csrf()
+        with store.tx(system=True) as t:
+            t.waitlist_remove(entry_id)
+        return redirect(url_for("cohort", saved="Removed from the waitlist.") + "#waitlist")
 
     @app.get("/eval")
     def eval_index():

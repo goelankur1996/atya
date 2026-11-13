@@ -8,7 +8,7 @@ import zipfile
 
 import pytest
 
-from atya import processor, receiver, sender
+from atya import commands, processor, receiver, sender
 from atya.schema import load_schema
 from tests.test_pipeline import OWNER, FakeLLM, FakeTelegram, run_all
 
@@ -32,6 +32,7 @@ def clean(store):
             if t:
                 tx.delete_tenant(t["id"])
         tx.conn.execute("DELETE FROM service_state")
+        tx.conn.execute("DELETE FROM waitlist")
     yield
 
 
@@ -99,14 +100,41 @@ def test_typed_timezone(store, settings, clean):
     assert tenant_of(store, FRIEND)["timezone"] == "Europe/Paris"
 
 
-def test_stranger_gets_one_reply_a_day_and_nothing_is_stored(store, settings, clean):
+def test_stranger_joins_the_waitlist_and_answers_once(store, settings, clean):
     tg = FakeTelegram()
-    for text in ("hello", "/help", "/start", "anyone there?"):
+    tg.push("/start")                                       # the owner, to be told
+    for text in ("hello", "/help", "/start", "Planning my week, and birthdays", "anyone there?"):
         tg.push(text, user_id=STRANGER, chat_id=999)
     poll(store, tg, settings)
-    assert texts(tg, 999) == ["This bot is invite-only. If someone shared it with you, ask them for an "
-                              "invite code, then send: /start <code>"]
+    assert texts(tg, 999) == [commands.WAITLIST_JOINED.format(n=1), commands.WAITLIST_THANKS.format(n=1)]
     assert tenant_of(store, STRANGER) is None
+    with store.tx(system=True) as tx:
+        (w,) = tx.waitlist()
+        owner = tx.tenant_by_telegram(OWNER)
+        note = tx._one("SELECT body FROM outbox WHERE tenant_id = %s ORDER BY created_at DESC LIMIT 1",
+                       (owner["id"],))["body"]
+    assert (w["channel"], w["telegram_user_id"], w["want"], w["source"]) == (
+        "telegram", STRANGER, "Planning my week, and birthdays", "chat")
+    assert note.startswith("New on the waitlist:") and "#1" in note and "Planning" not in note
+
+
+def test_waitlist_deep_link_and_let_in(store, settings, clean):
+    tg = FakeTelegram()
+    tg.push("/start waitlist", user_id=STRANGER, chat_id=999)
+    poll(store, tg, settings)
+    with store.tx(system=True) as tx:
+        (w,) = tx.waitlist()
+    assert w["source"] == "web" and w["want"] is None
+    tenant = commands.admit(store, w["id"])
+    assert tenant["status"] == "invited" and tenant["telegram_chat_id"] == 999
+    with store.tx(system=True) as tx:
+        assert tx.waitlist() == []
+        out = tx._one("SELECT body, channel, buttons FROM outbox WHERE tenant_id = %s", (tenant["id"],))
+    assert out["body"] == commands.SPOT_OPEN and out["channel"] == "telegram" and out["buttons"]
+    assert commands.admit(store, w["id"]) is None             # already let in
+    tg.push_tap("tz:Asia/Kolkata", user_id=STRANGER, chat_id=999)
+    poll(store, tg, settings)
+    assert tenant_of(store, STRANGER)["status"] == "active"
 
 
 def test_only_owner_can_invite(store, settings, clean):

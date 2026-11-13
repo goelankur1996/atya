@@ -81,7 +81,7 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
                                           actor="receiver")
             log.info("created owner tenant %s", tenant["id"])
         else:
-            return commands.stranger(ctx)
+            return commands.stranger(ctx, text)
     if tenant["status"] == "invited":
         zone = commands.match_timezone(text)
         ctx.tenant = tenant

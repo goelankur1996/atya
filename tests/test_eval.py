@@ -166,3 +166,35 @@ def test_users_page_owner_only_counts_no_content(store, settings, clean):  # noq
     finally:
         with store.tx(system=True) as tx:
             tx.delete_tenant(friend["id"])
+
+
+def test_waitlist_on_the_users_page(store, settings, clean):  # noqa: F811
+    from tests.test_web import csrf
+    seed(store, settings)
+    t = owner_tenant(store)
+    with store.tx(system=True) as tx:
+        tx.conn.execute("DELETE FROM waitlist")
+        w = tx.waitlist_join(channel="telegram", telegram_user_id=777003, telegram_chat_id=777003,
+                             display_name="Meera")
+        tx.waitlist_seen(w["id"], want="Remember birthdays")
+        gone = tx.waitlist_join(channel="whatsapp", whatsapp_phone="919800000001", display_name="Spam")
+    app = web.create_app(store, settings)
+    c, _ = sign_in(app, store, settings, t)
+    page = c.get("/cohort").get_data(as_text=True)
+    assert "Meera" in page and "Remember birthdays" in page and "Waitlist · 2" in page and "style=" not in page
+    token = csrf(c, "/cohort")
+    assert c.post(f"/cohort/waitlist/{gone['id']}/remove", data={"csrf": token}).status_code == 302
+    r = c.post(f"/cohort/waitlist/{w['id']}/admit", data={"csrf": token})
+    assert r.status_code == 302 and r.location.endswith("#waitlist")
+    with store.tx(system=True) as tx:
+        assert tx.waitlist() == []
+        friend = tx.tenant_by_telegram(777003)
+    try:
+        assert friend["status"] == "invited" and friend["display_name"] == "Meera"
+        with store.tx(system=True) as tx:
+            tx.set_tenant_status(friend["id"], "active", actor="test")
+        c2, _ = sign_in(app, store, settings, friend)
+        assert c2.post(f"/cohort/waitlist/{w['id']}/admit", data={"csrf": token}).status_code in (400, 404)
+    finally:
+        with store.tx(system=True) as tx:
+            tx.delete_tenant(friend["id"])

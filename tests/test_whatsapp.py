@@ -97,6 +97,7 @@ def clean(store):
             tx.delete_tenant(t["id"])
         tx.conn.execute("DELETE FROM service_state")
         tx.conn.execute("DELETE FROM whatsapp_events")
+        tx.conn.execute("DELETE FROM waitlist")
     yield
 
 
@@ -181,14 +182,36 @@ def test_webhook_off_without_settings(store, db_url):
 
 # --- people -----------------------------------------------------------------------
 
-def test_stranger_one_reply_a_day_nothing_stored(store, settings, clean):
+def test_stranger_joins_waitlist_from_the_website(store, settings, clean):
     wa = FakeWhatsApp()
-    for t in ("hi", "/help", "anyone?"):
-        deliver(store, wa, settings, event(STRANGER, text=t))
-    assert wa.texts(STRANGER) == [commands.INVITE_ONLY]
+    for t in ("Join the waitlist", "/help", "Tracking my runs", "anyone?"):
+        deliver(store, wa, settings, event(STRANGER, text=t, name="Asha"))
+    assert wa.texts(STRANGER) == [commands.WAITLIST_JOINED.format(n=1), commands.WAITLIST_THANKS.format(n=1)]
     assert by_phone(store, STRANGER) is None
     with store.tx(system=True) as tx:      # processed events are deleted
         assert tx._one("SELECT count(*) AS n FROM whatsapp_events")["n"] == 0
+        (w,) = tx.waitlist()
+    assert (w["whatsapp_phone"], w["display_name"], w["source"], w["want"]) == (
+        str(STRANGER), "Asha", "web", "Tracking my runs")
+    deliver(store, wa, settings, event(STRANGER, text="STOP"))
+    assert wa.texts(STRANGER)[-1].startswith("Done. You're off")
+    with store.tx(system=True) as tx:
+        assert tx.waitlist() == []
+
+
+def test_let_in_on_whatsapp_keeps_the_24_hour_window(store, settings, clean):
+    wa = FakeWhatsApp()
+    deliver(store, wa, settings, event(STRANGER, text="hi"))
+    with store.tx(system=True) as tx:
+        (w,) = tx.waitlist()
+        tx.conn.execute("UPDATE waitlist SET last_inbound_at = now() - interval '3 days' WHERE id = %s", (w["id"],))
+    tenant = commands.admit(store, w["id"])
+    t = by_phone(store, STRANGER)
+    assert t["id"] == tenant["id"] and t["status"] == "invited" and t["channel"] == "whatsapp"
+    assert dt.datetime.now(dt.timezone.utc) - t["whatsapp_last_inbound"] > dt.timedelta(days=2)
+    with store.tx(system=True) as tx:
+        out = tx._one("SELECT body, channel FROM outbox WHERE tenant_id = %s", (tenant["id"],))
+    assert out == {"body": commands.SPOT_OPEN, "channel": "whatsapp"}
 
 
 def test_invite_signup_onboarding_and_a_message_through_the_pipeline(store, settings, clean):

@@ -65,6 +65,18 @@ Commands:
 
 WELCOME = "You're set up.\n\n" + HELP
 INVITE_ONLY = "This bot is invite-only. If someone shared it with you, ask them for an invite code, then send: /start <code>"
+JOIN_PHRASE = "join the waitlist"
+LEAVE_WORDS = {"stop", "/stop", "remove me", "unsubscribe", "leave", "/leave"}
+WANT_MAX = 500
+WAITLIST_JOINED = ("You're on the ATYA waitlist, #{n}. I'll message you here when your spot opens.\n\n"
+                   "While you wait: what would you most want ATYA to help you with? Reply in a line. "
+                   "Your answer goes to the team, so we can let people in in the right order.")
+WAITLIST_THANKS = ("Thanks, noted. You're #{n} on the list. I'll message you here when your spot opens. "
+                   "To leave the list, send STOP.")
+WAITLIST_WAITING = ("You're on the ATYA waitlist, #{n}. I'll message you here when your spot opens. "
+                    "If someone gave you an invite code, send: /start <code>")
+SPOT_OPEN = ("Your spot on ATYA is open. Welcome.\n\nOne question first: which timezone are you in? "
+             "It's used for dates like \"by Friday\". Tap one, or type its name (for example Europe/Paris).")
 TZ_PROMPT = ("Welcome. One question first: which timezone are you in? It's used for dates like "
              "\"by Friday\". Tap one, or type its name (for example Europe/Paris).")
 
@@ -136,17 +148,101 @@ def finish_onboarding(ctx: Ctx, zone: str) -> None:
     ctx.reply(f"Timezone set to {zone}. You're in.\n\n{opening}")
 
 
-def stranger(ctx: Ctx) -> str:
-    """Reply to someone without an account, at most once a day."""
+def stranger(ctx: Ctx, text: str | None = None) -> str:
+    """Someone without an account: they join the waitlist. Their message came from
+    their own WhatsApp number or Telegram account, which is all the proof we need.
+    Their first message isn't kept; the one after we ask is kept as their answer."""
+    whatsapp = ctx.channel == "whatsapp"
+    ident = {"whatsapp": str(ctx.user_id)} if whatsapp else {"telegram": ctx.user_id}
+    text = (text or "").strip()
+    with ctx.store.tx(system=True) as tx:
+        entry = tx.waitlist_entry(**ident)
+        if text.lower().strip(" .!") in LEAVE_WORDS:
+            if entry is not None:
+                tx.waitlist_remove(entry["id"])
+            leaving = True
+        else:
+            leaving = False
+    if leaving:
+        ctx.reply("Done. You're off the ATYA waitlist and I won't message you again.")
+        return "waitlist:left"
+    with ctx.store.tx(system=True) as tx:
+        entry = tx.waitlist_entry(**ident)
+        joined = None
+        if entry is None:
+            joined = tx.waitlist_join(
+                channel=ctx.channel, whatsapp_phone=str(ctx.user_id) if whatsapp else None,
+                telegram_user_id=None if whatsapp else ctx.user_id,
+                telegram_chat_id=None if whatsapp else ctx.chat_id, display_name=ctx.name,
+                source="web" if JOIN_PHRASE in text.lower() else "chat")
+            entry = joined or tx.waitlist_entry(**ident)
+        place = tx.waitlist_position(entry["id"])
+        answer = (not joined and entry["want"] is None and len(text) >= 2 and not text.startswith("/")
+                  and JOIN_PHRASE not in text.lower())
+        if not joined:
+            tx.waitlist_seen(entry["id"], want=text[:WANT_MAX] if answer else None)
     key = f"stranger:{ctx.user_id}" if ctx.channel == "telegram" else f"stranger:{ctx.channel}:{ctx.user_id}"
+    if joined:
+        with ctx.store.tx(system=True) as tx:          # no "you're on the list" again for a day
+            tx.set_state(key, dt.datetime.now(dt.timezone.utc).isoformat())
+        ctx.reply(WAITLIST_JOINED.format(n=place))
+        tell_owner(ctx.store, ctx.settings,
+                   f"New on the waitlist: {ctx.name or 'someone'} ({'WhatsApp' if whatsapp else 'Telegram'}), "
+                   f"#{place}{' via the website' if joined['source'] == 'web' else ''}.")
+        return "waitlist:joined"
+    if answer:
+        ctx.reply(WAITLIST_THANKS.format(n=place))
+        return "waitlist:answered"
     with ctx.store.tx(system=True) as tx:
         last = tx.get_state(key)
         now = dt.datetime.now(dt.timezone.utc)
         if last and now - dt.datetime.fromisoformat(last) < dt.timedelta(hours=STRANGER_REPLY_HOURS):
             return "dropped:stranger-quiet"
         tx.set_state(key, now.isoformat())
-    ctx.reply(INVITE_ONLY)
-    return "replied:stranger"
+    ctx.reply(WAITLIST_WAITING.format(n=place))
+    return "waitlist:waiting"
+
+
+def tell_owner(store: Store, settings: Settings, text: str) -> None:
+    """A short note to the owner on Telegram (best effort). Never message content."""
+    try:
+        with store.tx(system=True) as tx:
+            owner = tx.tenant_by_telegram(settings.owner_telegram_user_id) if settings.owner_telegram_user_id else None
+            if owner is not None and owner["telegram_chat_id"]:
+                tx.add_outbox(owner["id"], chat_id=owner["telegram_chat_id"], body=text, channel="telegram",
+                              actor="commands")
+    except Exception:
+        log.warning("could not tell the owner", exc_info=True)
+
+
+def admit(store: Store, entry_id) -> dict | None:
+    """Let someone in from the waitlist: their account is created (they pick a
+    timezone, then the setup questions start) and they're told on the channel they
+    joined from. On WhatsApp outside the 24-hour window the message waits behind
+    a "tap Show" template. None if they're no longer on the list."""
+    with store.tx(system=True) as tx:
+        e = tx.waitlist_get(entry_id)
+        if e is None:
+            return None
+        whatsapp = e["channel"] == "whatsapp"
+        tenant = tx.tenant_by_whatsapp(e["whatsapp_phone"]) if whatsapp else tx.tenant_by_telegram(e["telegram_user_id"])
+        if tenant is None:
+            tenant = tx.create_tenant(telegram_user_id=e["telegram_user_id"], telegram_chat_id=e["telegram_chat_id"],
+                                      whatsapp_phone=e["whatsapp_phone"], display_name=e["display_name"],
+                                      status="invited", actor="web")
+            if whatsapp:
+                tx.conn.execute("UPDATE tenants SET whatsapp_last_inbound = %s WHERE id = %s",
+                                (e["last_inbound_at"], tenant["id"]))
+            fresh = True
+        else:
+            fresh = False
+        tx.waitlist_remove(e["id"])
+    if fresh:
+        with store.tx(tenant["id"]) as tx:
+            tx.add_outbox(tenant["id"], chat_id=int(e["whatsapp_phone"]) if whatsapp else e["telegram_chat_id"],
+                          body=SPOT_OPEN, channel=e["channel"], buttons=tz_buttons(), actor="web")
+    log.info("let in %s from the waitlist (%s)", str(tenant["id"])[:4], e["channel"])
+    return tenant
 
 
 def handle(ctx: Ctx, text: str) -> str:
@@ -158,7 +254,7 @@ def handle(ctx: Ctx, text: str) -> str:
     if cmd == "/start":
         return start(ctx, arg)
     if ctx.tenant is None:
-        return stranger(ctx)
+        return stranger(ctx, cmd if cmd in LEAVE_WORDS else None)
     if ctx.tenant["status"] == "invited":
         ctx.reply(TZ_PROMPT, buttons=tz_buttons())
         return "prompted:timezone"
@@ -196,6 +292,8 @@ def handle(ctx: Ctx, text: str) -> str:
 
 
 def start(ctx: Ctx, code: str) -> str:
+    if code.lower() == "waitlist" and ctx.tenant is None:
+        return stranger(ctx, JOIN_PHRASE)
     if code and ctx.tenant is None:
         linked = use_link_code(ctx, code)
         if linked:

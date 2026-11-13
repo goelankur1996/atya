@@ -31,5 +31,26 @@
   </div>
   {% endfor %}
 </div>
+<section id="waitlist">
+  <div class="section-head"><h2>Waitlist · {{ waiting|length }}</h2></div>
+  {% if saved %}<p class="notice ok">{{ saved }}</p>{% endif %}
+  <p class="muted flush small">People who messaged ATYA without an invite. Their answer is to the waitlist question, which told them it goes to the team.</p>
+  {% if waiting %}
+  <div class="box">
+    {% for w in waiting %}
+    <div class="row static">
+      <span class="ref">#{{ loop.index }}</span>
+      <span class="grow"><b>{{ w.display_name or "(no name)" }}</b>
+        <span class="muted small">· {{ "WhatsApp" if w.channel == "whatsapp" else "Telegram" }} · {{ fmt_time(w.created_at) }}{% if w.source == "web" %} · from the website{% endif %}</span><br>
+        <span class="small">{% if w.want %}{{ w.want }}{% else %}<span class="muted">No answer yet</span>{% endif %}</span></span>
+      <span class="side actions">
+        <form action="{{ url_for('waitlist_admit', entry_id=w.id) }}" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn primary" type="submit">Let in</button></form>
+        <form action="{{ url_for('waitlist_remove', entry_id=w.id) }}" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="linkbtn" type="submit">Remove</button></form>
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}<p class="muted">Nobody yet.</p>{% endif %}
+</section>
 <p class="muted small">Week-3 check: a user who joined 21+ days ago and still has dots in the last 7 days is a keeper.</p>
 {% endblock %}

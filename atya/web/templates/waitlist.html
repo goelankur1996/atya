@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Join the waitlist · ATYA{% endblock %}
+{% block header %}
+<header class="site">
+  <a class="brand" href="{{ url_for('home') }}">atya</a>
+  <nav aria-label="Site"><a href="{{ url_for('signin_page') }}">Log in</a></nav>
+</header>
+{% endblock %}
+{% block page %}
+<main class="auth">
+  <h1>Join the waitlist</h1>
+  <p class="muted">Send ATYA one message from the app you'd use it on. That confirms it's you and puts you on the list.</p>
+  {% if wa or tg %}
+  <div class="authform">
+    {% if wa %}<a class="btn primary wide" href="{{ wa }}">Join on WhatsApp</a>{% endif %}
+    {% if tg %}<a class="btn wide" href="{{ tg }}">Join on Telegram</a>{% endif %}
+  </div>
+  <p class="fine">ATYA replies with your place in line and one question, and writes again when your spot opens. Send STOP any time to leave the list.</p>
+  {% else %}
+  <p class="notice">The waitlist isn't open right now. Try again soon.</p>
+  {% endif %}
+  <p class="fine">By joining you agree to ATYA's <a href="{{ url_for('terms') }}">Terms of service</a> and acknowledge the <a href="{{ url_for('privacy') }}">Privacy policy</a>.</p>
+</main>
+{% endblock %}

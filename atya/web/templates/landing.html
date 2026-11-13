@@ -21,9 +21,8 @@
   <p class="prose">Your records are yours alone. Export them any time, or delete everything with one command.</p>
 
   <p class="cta">
-    <a class="cta-link" href="{{ url_for('signin_page') }}">Log in</a>
-    {% if invite_email %}<a class="cta-quiet" href="mailto:{{ invite_email }}?subject=ATYA%20invite">Ask for an invite</a>
-    {% else %}<span class="cta-quiet">Invite-only for now.</span>{% endif %}
+    <a class="cta-link" href="{{ url_for('waitlist_page') }}">Join the waitlist</a>
+    <a class="cta-quiet" href="{{ url_for('signin_page') }}">Already in? Log in</a>
   </p>
 </main>
 <footer class="site-foot">
