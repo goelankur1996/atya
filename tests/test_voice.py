@@ -57,6 +57,11 @@ def push_voice(tg, data=OGG, seconds=42, mime="audio/ogg"):
                                        "file_size": len(data)}}})
 
 
+def mine(tg):
+    """Texts sent to the owner's chat (other tests may leave other users' rows behind)."""
+    return [m[1] for m in tg.sent if m[0] == 555]
+
+
 def start_owner(store, settings, tg):
     tg.push("/start")
     receiver.poll_once(store, tg, settings, timeout=0)
@@ -87,7 +92,7 @@ def test_voice_note_is_kept_transcribed_and_filed(store, settings, clean):
     assert att["transcript"] == "Remind me to call Jim at 5 pm" and att["seconds"] == 42
     assert att["mime_type"] == "audio/ogg" and att["filename"] == "voice.ogg"
     assert task["title"] == "Call Jim" and task["source_inbox_id"] == inbox["id"]
-    reply = tg.sent[-1][1]
+    reply = mine(tg)[-1]
     assert reply.startswith("Heard: “Remind me to call Jim at 5 pm”") and "TSK-1 Call Jim" in reply
 
     # A retry uses the saved transcript instead of transcribing again.
@@ -107,7 +112,7 @@ def test_voice_question_answer_starts_with_heard(store, settings, clean):
     llm.query_plans["What do I owe Rahul?"] = {"types": ["task"], "search": "Rahul"}
     push_voice(tg)
     run(store, tg, llm, settings, tr)
-    assert tg.sent[-1][1].startswith("Heard: “What do I owe Rahul?”\n\nAnswer:")
+    assert mine(tg)[-1].startswith("Heard: “What do I owe Rahul?”\n\nAnswer:")
 
 
 @pytest.mark.parametrize("tr,expect", [
@@ -120,7 +125,7 @@ def test_voice_note_problems_are_explained_and_audio_kept(store, settings, clean
     start_owner(store, settings, tg)
     push_voice(tg)
     run(store, tg, llm, settings, tr)
-    assert expect in tg.sent[-1][1]
+    assert expect in mine(tg)[-1]
     with store.tx(owner_tenant(store)["id"]) as tx:
         assert tx._one("SELECT count(*) AS n FROM attachments WHERE mime_type = 'audio/ogg'")["n"] == 1
 
@@ -131,8 +136,8 @@ def test_unsupported_and_too_long_audio(store, settings, clean):
     push_voice(tg, mime="audio/aac")
     push_voice(tg, seconds=transcribe.MAX_SECONDS + 1)
     receiver.poll_once(store, tg, settings, timeout=0)
-    assert "can't read that audio format" in tg.sent[-2][1]
-    assert "up to 15 minutes" in tg.sent[-1][1]
+    assert "can't read that audio format" in mine(tg)[-2]
+    assert "up to 15 minutes" in mine(tg)[-1]
 
 
 def test_whatsapp_voice_note(store, settings, clean):

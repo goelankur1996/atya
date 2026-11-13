@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
-from . import transcribe, briefs, embeddings, processor, receiver, reminders, sender, web, whatsapp
+from . import health, transcribe, briefs, embeddings, processor, receiver, reminders, sender, web, whatsapp
 from .config import load_settings
 from .llm import BedrockLLM, ClaudeLLM
 from .migrate import migrate
@@ -92,6 +92,7 @@ def main() -> None:
         ("web", web.run, (store, settings)),
         ("briefs", briefs.run, (store, settings)),
         ("reminders", reminders.run, (store, settings)),
+        ("health", health.run, (store, settings)),
     ]
     if settings.whatsapp_on:
         wa = whatsapp.WhatsApp(settings.whatsapp_token, settings.whatsapp_phone_number_id)

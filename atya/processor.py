@@ -510,6 +510,8 @@ def process_files(store: Store, llm: LLM, row: dict, tenant: dict, schema: Schem
 # --- per-row orchestration -----------------------------------------------------
 
 HEARD_CHARS = 700
+FAILED_REPLY = ("Sorry, something went wrong on my side and I couldn't process that. It's saved: "
+                "send it again in a bit, or tap Retry on it in the web view (/web).")
 
 
 def with_heard(heard: str | None, body: str) -> str:
@@ -711,6 +713,10 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
         with store.tx(row["tenant_id"]) as tx:
             if final:
                 tx.finish_inbox(row["id"], status="failed", notes=f"gave up after {row['attempts']} attempts: {e}")
+                tenant_row = tx.tenant(row["tenant_id"])
+                if tenant_row is not None:            # never leave the user waiting in silence
+                    tx.add_outbox(row["tenant_id"], chat_id=tenant_row["telegram_chat_id"], body=FAILED_REPLY,
+                                  inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]))
             else:
                 tx.conn.execute("UPDATE inbox SET status = 'pending', processor_notes = %s WHERE id = %s",
                                 (f"attempt {row['attempts']} failed: {e}", row["id"]))
