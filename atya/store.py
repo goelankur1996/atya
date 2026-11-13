@@ -838,6 +838,59 @@ class Tx:
                    target_id=row["id"], summary=f"delivery failed: {error[:200]}")
         return True
 
+    # --- connected accounts (Google) ---------------------------------------------
+
+    def connection(self, tenant_id: uuid.UUID, provider: str = "google") -> dict | None:
+        return self._one("SELECT * FROM connections WHERE tenant_id = %s AND provider = %s", (tenant_id, provider))
+
+    def save_connection(self, tenant_id: uuid.UUID, *, provider: str, account: str | None, scopes: str,
+                        refresh_token: bytes, access_token: bytes | None, expires_at: dt.datetime | None) -> None:
+        self.conn.execute(
+            "INSERT INTO connections (tenant_id, provider, account, scopes, refresh_token, access_token, expires_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (tenant_id, provider) DO UPDATE SET "
+            "account = EXCLUDED.account, scopes = EXCLUDED.scopes, refresh_token = EXCLUDED.refresh_token, "
+            "access_token = EXCLUDED.access_token, expires_at = EXCLUDED.expires_at, status = 'active', "
+            "error = NULL, last_sync_at = NULL",
+            (tenant_id, provider, account, scopes, refresh_token, access_token, expires_at))
+        self.audit(tenant_id, actor="web", action="create", target_table="connections", target_id=tenant_id,
+                   summary=f"{provider} connected" + (f" ({account})" if account else ""))
+
+    def update_connection(self, connection_id: uuid.UUID, **values: Any) -> None:
+        allowed = {"access_token", "expires_at", "status", "error", "last_sync_at", "sync_state"}
+        sets = [k for k in values if k in allowed]
+        if not sets:
+            return
+        params = [Jsonb(values[k]) if k == "sync_state" else values[k] for k in sets]
+        self.conn.execute(f"UPDATE connections SET {', '.join(f'{k} = %s' for k in sets)} WHERE id = %s",  # noqa: S608
+                          (*params, connection_id))
+
+    def delete_connection(self, tenant_id: uuid.UUID, provider: str = "google") -> dict | None:
+        row = self._one("DELETE FROM connections WHERE tenant_id = %s AND provider = %s RETURNING *",
+                        (tenant_id, provider))
+        if row:
+            self.audit(tenant_id, actor="web", action="delete", target_table="connections", target_id=tenant_id,
+                       summary=f"{provider} disconnected")
+        return row
+
+    def connections_due(self, every_minutes: int) -> list[dict]:
+        """Active connections not synced recently (system scope)."""
+        return self._all("SELECT c.*, t.timezone, t.schema_name, t.telegram_chat_id FROM connections c "
+                         "JOIN tenants t ON t.id = c.tenant_id WHERE c.status = 'active' AND t.status = 'active' "
+                         "AND (c.last_sync_at IS NULL OR c.last_sync_at < now() - make_interval(mins => %s))",
+                         (every_minutes,))
+
+    def record_by_external(self, tenant_id: uuid.UUID, external_id: str) -> dict | None:
+        return self._one("SELECT * FROM records WHERE tenant_id = %s AND external_id = %s", (tenant_id, external_id))
+
+    def set_title(self, tenant_id: uuid.UUID, record_id: uuid.UUID, title: str, *, actor: str = "google") -> None:
+        self.conn.execute("UPDATE records SET title = %s WHERE id = %s AND tenant_id = %s", (title[:500], record_id, tenant_id))
+
+    def events_on(self, tenant_id: uuid.UUID, day: str) -> list[dict]:
+        """Calendar events starting on a local date (YYYY-MM-DD), not cancelled, in time order."""
+        return self._all("SELECT * FROM records WHERE tenant_id = %s AND type = 'event' "
+                         "AND left(fields->>'Start', 10) = %s AND coalesce(fields->>'Status', '') <> 'cancelled' "
+                         "ORDER BY fields->>'Start'", (tenant_id, day))
+
     # --- cohort (owner's view of activity; counts only) ----------------------
 
     def cohort(self, days: int = 21) -> list[dict]:

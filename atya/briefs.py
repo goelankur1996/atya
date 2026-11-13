@@ -77,6 +77,15 @@ def _since(day: dt.date, today: dt.date) -> str:
     return f"since {day.strftime('%-d %b')}"
 
 
+def _clock(hhmm: str) -> str:
+    """'14:30' -> '2:30 pm'."""
+    try:
+        h, m = int(hhmm[:2]), int(hhmm[3:5])
+    except ValueError:
+        return hhmm
+    return f"{h % 12 or 12}:{m:02d} {'am' if h < 12 else 'pm'}"
+
+
 def build_brief(tx: Tx, schema: Schema, tenant_id, today: dt.date) -> str:
     """The brief's text for one user on one (local) day."""
     head = f"Good morning. {today.strftime('%A %-d %b')}"
@@ -104,11 +113,22 @@ def build_brief(tx: Tx, schema: Schema, tenant_id, today: dt.date) -> str:
     waiting = tx.count_open(tenant_id, "task", CLOSED_STATUSES, status="waiting") \
         if "waiting" in getattr(schema.types["task"].fields.get("Status"), "options", ()) else 0
 
+    calendar = []
+    if "event" in schema.types:
+        for e in tx.events_on(tenant_id, today.isoformat())[:MAX_PER_SECTION]:
+            start = str(e["fields"].get("Start", ""))
+            when = "all day" if e["fields"].get("All Day") or len(start) <= 10 else _clock(start[11:16])
+            where = f" ({e['fields']['Location']})" if e["fields"].get("Location") else ""
+            calendar.append(f"- {when}: {e['title']}{where}")
+
     if not (overdue or today_items or week):
         tail = f"{open_count} open task{'s' if open_count != 1 else ''}." if open_count else "No open tasks."
-        return f"{head}\n\nNothing due today or this week. {tail}"
+        cal = ("\n\nCalendar today\n" + "\n".join(calendar)) if calendar else ""
+        return f"{head}{cal}\n\nNothing due today or this week. {tail}"
 
     parts = [head]
+    if calendar:
+        parts.append("Calendar today\n" + "\n".join(calendar))
     for title, items in (("Overdue", overdue), ("Today", today_items), ("This week", week)):
         if items:
             extra = len(items) - MAX_PER_SECTION

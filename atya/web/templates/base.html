@@ -17,6 +17,7 @@
     <a href="{{ url_for('home') }}"{% if active == "home" %} class="on" aria-current="page"{% endif %}>Home</a>
     <a href="{{ url_for('messages') }}"{% if active == "messages" %} class="on" aria-current="page"{% endif %}>Messages</a>
     <a href="{{ url_for('db_tables') }}"{% if active == "db" %} class="on" aria-current="page"{% endif %}>Database</a>
+    <a href="{{ url_for('connect_page') }}"{% if active == "connect" %} class="on" aria-current="page"{% endif %}>Connect</a>
     {% if is_owner %}<a href="{{ url_for('cohort') }}"{% if active == "cohort" %} class="on" aria-current="page"{% endif %}>Users</a>{% endif %}
   </nav>
   <form class="topsearch" action="{{ url_for('search') }}" method="get" role="search">

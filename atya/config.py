@@ -67,6 +67,16 @@ class Settings:
     daily_tokens_all: int = 20_000_000
     # The owner's own schema file (schema/<name>.yaml); everyone else gets "default".
     owner_schema: str | None = "ankur"
+    # Google (calendar + contacts' birthdays, read-only). All three set, or it stays off.
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    connections_key: str | None = None      # Fernet key that encrypts stored tokens
+
+    @property
+    def google_on(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret and self.connections_key
+                    and self.web_base_url)
+
     # Contact address shown on /privacy.
     privacy_email: str | None = None
 
@@ -119,6 +129,9 @@ def load_settings() -> Settings:
         whatsapp_verify_token=opt("WHATSAPP_VERIFY_TOKEN"),
         whatsapp_waba_id=opt("WHATSAPP_WABA_ID"),
         privacy_email=opt("PRIVACY_EMAIL"),
+        google_client_id=opt("GOOGLE_CLIENT_ID"),
+        google_client_secret=opt("GOOGLE_CLIENT_SECRET"),
+        connections_key=opt("CONNECTIONS_KEY"),
         owner_schema=os.environ.get("OWNER_SCHEMA", "ankur").strip() or None,
         daily_messages=num("LIMIT_DAILY_MESSAGES", 150),
         daily_voice_minutes=num("LIMIT_DAILY_VOICE_MINUTES", 30),

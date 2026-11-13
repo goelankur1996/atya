@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
-from . import health, research, transcribe, briefs, embeddings, processor, receiver, reminders, sender, web, whatsapp
+from . import connections, health, research, transcribe, briefs, embeddings, processor, receiver, reminders, sender, web, whatsapp
 from .config import load_settings
 from .llm import BedrockLLM, ClaudeLLM
 from .migrate import migrate
@@ -117,6 +117,10 @@ def main() -> None:
         ("reminders", reminders.run, (store, settings)),
         ("health", health.run, (store, settings)),
     ]
+    if settings.google_on:
+        workers.append(("google-sync", connections.run, (store, settings)))
+    else:
+        log.warning("Google connect off (needs GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, CONNECTIONS_KEY, WEB_BASE_URL)")
     if settings.whatsapp_on:
         wa = whatsapp.WhatsApp(settings.whatsapp_token, settings.whatsapp_phone_number_id)
         workers += [("whatsapp", whatsapp.run, (store, wa, settings, tg)),

@@ -170,6 +170,24 @@ types:
       People:     {type: relation, to: person, many: true}
       Decisions:  {type: relation, to: decision, many: true}
 
+  event:
+    label: Calendar
+    prefix: EVT
+    description: >-
+      Events copied from the user's connected Google Calendar and kept in sync
+      (read-only). Never created from messages: a meeting mentioned in a
+      message is a task as usual.
+    title_field: Title
+    fields:
+      Start:     {type: date, description: "local YYYY-MM-DDTHH:MM, or YYYY-MM-DD for all-day events"}
+      End:       {type: date, description: "local YYYY-MM-DDTHH:MM, or YYYY-MM-DD for all-day events"}
+      All Day:   {type: checkbox}
+      Location:  {type: text}
+      Attendees: {type: text}
+      Calendar:  {type: text}
+      Status:    {type: select, options: [confirmed, tentative, cancelled]}
+      Link:      {type: url}
+
 rules:
 
   hard: |
@@ -184,6 +202,7 @@ rules:
     9. Replies to the user's own questions go to the outbox autonomously. Anything sent to third parties, calendar changes and deletions require explicit user approval.
     10. The audit log is never edited or deleted by automation.
     11. Child trackers follow the child pattern: spine present (source, Project relation, date), registered in this schema before use, field authority and create-or-leave respected. Never write to an unregistered type.
+    12. Calendar events (the event type) come only from the connected calendar. Never create or update them from a message.
     0a. Verbatim: for types with verbatim_body, the record body is the inbox raw text, byte for byte. Never paraphrase, summarize or rewrite it.
     0b. A journal body is kept as one block, never split.
     0c. Journal Date = when written; the subject period goes in Covers.

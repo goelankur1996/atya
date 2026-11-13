@@ -6,6 +6,7 @@
 /web            one-time link to the web view
 /usage          today's usage and limits
 /setup          the 10-minute setup interview
+/connect        connect Google Calendar (and contacts' birthdays)
 /link           connect the other channel (Telegram <-> WhatsApp) to the same account
 /export         download everything as a zip
 /delete         erase your account (asks for a typed confirmation code)
@@ -57,6 +58,7 @@ Commands:
 /link - use me on both Telegram and WhatsApp, with the same records
 /usage - how much you've used today, and the daily limits
 /setup - a short interview so I know what you're working on (answer by voice)
+/connect - let me read your Google Calendar, so I know what's coming up
 /export - download everything you've sent and everything I've filed, as a zip
 /delete - permanently erase your account and data
 /help - this message"""
@@ -175,6 +177,11 @@ def handle(ctx: Ctx, text: str) -> str:
         return link(ctx)
     if cmd == "/usage":
         return usage(ctx)
+    if cmd == "/connect":
+        if not ctx.settings.google_on:
+            ctx.reply("Connecting your calendar isn't available yet.")
+            return "connect:off"
+        return web_link(ctx, "/connect", "Open this to connect your Google Calendar")
     if cmd == "/setup":
         with ctx.store.tx(ctx.tenant["id"]) as tx:
             opening = interview.begin(tx, ctx.tenant["id"])
@@ -359,8 +366,8 @@ def brief(ctx: Ctx, arg: str) -> str:
     return "brief:on"
 
 
-def web_link(ctx: Ctx) -> str:
-    """A single-use sign-in link for the web view."""
+def web_link(ctx: Ctx, next_path: str | None = None, intro: str = "Your sign-in link") -> str:
+    """A single-use sign-in link for the web view (optionally landing on a page)."""
     assert ctx.tenant is not None
     base = ctx.settings.web_base_url
     if not base:
@@ -370,7 +377,8 @@ def web_link(ctx: Ctx) -> str:
     with ctx.store.tx(ctx.tenant["id"]) as tx:
         tx.create_login_token(ctx.tenant["id"], hashlib.sha256(token.encode()).hexdigest(),
                               LOGIN_LINK_MINUTES)
-    msg = (f"Your sign-in link (works once, for {LOGIN_LINK_MINUTES} minutes):\n{base}/login/{{}}\n\n"
+    suffix = f"?next={next_path}" if next_path else ""
+    msg = (f"{intro} (works once, for {LOGIN_LINK_MINUTES} minutes):\n{base}/login/{{}}{suffix}\n\n"
            "Don't forward it: anyone who opens it first gets into your account.")
     ctx.reply(msg.format(token), preview=False, log_text=msg.format("[hidden]"))
     return "web:link-sent"

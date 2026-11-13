@@ -28,7 +28,7 @@ from typing import Any
 from flask import Flask, Response, abort, g, redirect, render_template, request, send_file, url_for
 
 from ..config import Settings
-from .. import documents, whatsapp
+from .. import connections as gsync, documents, google, whatsapp
 from ..export import build_export
 from ..schema import CLOSED_STATUSES, FieldDef, TypeDef, load_schema
 from ..store import Store
@@ -210,7 +210,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
     @app.get("/login/<token>")
     def login_page(token: str):
         # Does not consume the token (link previews would burn it).
-        return render_template("login.html", token=token)
+        return render_template("login.html", token=token, next=safe_back(request.args.get("next")) or "")
 
     def same_origin_only() -> None:
         """Block cross-site form posts to /login (login CSRF): another site
@@ -235,7 +235,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
             t.create_session(tenant_id, _hash(session), SESSION_DAYS)
         with store.tx(system=True) as t:
             t.purge_expired_logins()
-        resp = redirect(url_for("home"))
+        resp = redirect(safe_back(request.form.get("next")) or url_for("home"))
         resp.set_cookie(COOKIE, session, max_age=SESSION_DAYS * 86400, httponly=True,
                         secure=secure_cookie, samesite="Lax")
         return resp
@@ -507,6 +507,96 @@ def create_app(store: Store, settings: Settings) -> Flask:
         with tx() as t:
             t.retry_inbox(g.tenant["id"], iid)
         return redirect(url_for("messages", kind=request.form.get("kind") or None))
+
+    # --- connected accounts (Google) ---------------------------------------------
+
+    def google_redirect() -> str:
+        return f"{settings.web_base_url.rstrip('/')}/connect/google/callback"
+
+    @app.get("/connect")
+    def connect_page():
+        need_login()
+        with tx() as t:
+            conn = t.connection(g.tenant["id"])
+            events = t._one("SELECT count(*) AS n FROM records WHERE tenant_id = %s AND type = 'event'",
+                            (g.tenant["id"],))["n"]
+        return render_template("connect.html", active="connect", conn=conn, events=events,
+                               google_on=settings.google_on, error=request.args.get("error"))
+
+    @app.post("/connect/google")
+    def connect_google():
+        need_login()
+        check_csrf()
+        if not settings.google_on:
+            abort(404)
+        state = secrets.token_urlsafe(24)
+        with store.tx(system=True) as t:
+            t.set_state(f"oauth:{state}", {"tenant_id": str(g.tenant["id"]),
+                                           "expires": (dt.datetime.now(dt.timezone.utc)
+                                                       + dt.timedelta(minutes=10)).isoformat()})
+        oauth = google.GoogleOAuth(settings.google_client_id, settings.google_client_secret)
+        return redirect(oauth.auth_url(state=state, redirect_uri=google_redirect()))
+
+    @app.get("/connect/google/callback")
+    def connect_google_callback():
+        need_login()
+        if not settings.google_on:
+            abort(404)
+        state = request.args.get("state", "")
+        with store.tx(system=True) as t:
+            pending = t.get_state(f"oauth:{state}") if state else None
+            if pending:
+                t.set_state(f"oauth:{state}", None)          # single use
+        if (not pending or pending["tenant_id"] != str(g.tenant["id"])
+                or dt.datetime.fromisoformat(pending["expires"]) < dt.datetime.now(dt.timezone.utc)):
+            return redirect(url_for("connect_page", error="That sign-in link expired. Try connecting again."))
+        if request.args.get("error") or not request.args.get("code"):
+            return redirect(url_for("connect_page", error="Google sign-in was cancelled."))
+        oauth = google.GoogleOAuth(settings.google_client_id, settings.google_client_secret)
+        try:
+            tok = oauth.exchange(code=request.args["code"], redirect_uri=google_redirect())
+        except google.GoogleError as e:
+            log.warning("google token exchange failed: %s", e)
+            return redirect(url_for("connect_page", error="Google didn't complete the connection. Try again."))
+        granted = tok.get("scope", "")
+        if "calendar.readonly" not in granted:
+            oauth.revoke(tok.get("refresh_token") or tok.get("access_token", ""))
+            return redirect(url_for("connect_page", error="Calendar access wasn't allowed, so nothing was connected. "
+                                                          "Tick the calendar box on Google's screen."))
+        if not tok.get("refresh_token"):
+            return redirect(url_for("connect_page", error="Google didn't grant lasting access. Try again."))
+        vault = google.Vault(settings.connections_key)
+        with tx() as t:
+            t.save_connection(g.tenant["id"], provider="google", account=oauth.email(tok["access_token"]),
+                              scopes=granted, refresh_token=vault.seal(tok["refresh_token"]),
+                              access_token=vault.seal(tok["access_token"]),
+                              expires_at=dt.datetime.now(dt.timezone.utc)
+                              + dt.timedelta(seconds=int(tok.get("expires_in", 3600))))
+        return redirect(url_for("connect_page"))
+
+    @app.post("/connect/google/sync")
+    def connect_google_sync():
+        need_login()
+        check_csrf()
+        with tx() as t:
+            conn = t.connection(g.tenant["id"])
+            if conn:
+                t.update_connection(conn["id"], last_sync_at=None, status="active")   # the worker picks it up
+        return redirect(url_for("connect_page"))
+
+    @app.post("/connect/google/disconnect")
+    def connect_google_disconnect():
+        need_login()
+        check_csrf()
+        with tx() as t:
+            conn = t.delete_connection(g.tenant["id"])
+        if conn and settings.google_on:
+            try:
+                token = google.Vault(settings.connections_key).open(conn["refresh_token"])
+                google.GoogleOAuth(settings.google_client_id, settings.google_client_secret).revoke(token)
+            except google.GoogleError:
+                pass
+        return redirect(url_for("connect_page"))
 
     # --- model tests (owner only) ---------------------------------------------
 

@@ -374,3 +374,10 @@ main.prose ul { padding-left: 20px; display: flex; flex-direction: column; gap: 
 .cohort .strip i.before { background: transparent; border: 1px solid var(--line); }
 .small { font-size: 12px; }
 @media (max-width: 760px) { .cohort .crow { grid-template-columns: 1fr repeat(3, 40px); } .cohort .crow > .num:nth-last-child(-n+2) { display: none; } .cohort .strip { grid-column: 1 / -1; order: 9; } }
+
+/* Connect page */
+.connect .row.static { cursor: default; align-items: flex-start; gap: 16px; }
+.connect .row.static:hover { background: none; }
+.connect .actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; max-width: none; }
+.connect .actions form { margin: 0; }
+.notice { padding: 12px 16px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--soft); margin: 0; }

@@ -6,6 +6,7 @@
   <p>This link works once. Continue to stay signed in on this device for 30 days.</p>
   <form action="{{ url_for('login') }}" method="post">
     <input type="hidden" name="token" value="{{ token }}">
+    {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
     <button class="btn primary" type="submit">Continue</button>
   </form>
 </div>

@@ -187,6 +187,9 @@ class FanoutExecutor:
         if key is None:
             self.notes.append(f"unknown type {w.get('type')!r}")
             return
+        if key == "event":                            # calendar events come only from the calendar sync
+            self.notes.append("skipped an event write: calendar events come from the connected calendar")
+            return
         tdef = self.schema.types[key]
         fields = dict(w.get("fields") or {})
         title = str(w.get("title") or fields.pop(tdef.title_field, "") or "").strip()

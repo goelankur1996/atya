@@ -108,3 +108,17 @@ best physios in Noida" (or that the classifier reads as a request to look
 something up on the web) are answered by Amazon Nova 2 Lite with web search,
 with sources, and saved as a report (document, Kind: report). Capped per user
 per day by `LIMIT_DAILY_RESEARCH` (default 10).
+
+## Google Calendar (and contacts' birthdays)
+
+Read-only. Users connect at `/connect` on the web view (or send `/connect`).
+Events from yesterday to 30 days ahead are copied into Calendar records and
+kept in sync every 15 minutes; birthdays in the next 30 days become reminder
+tasks; the morning brief lists today's events. Tokens are encrypted with
+`CONNECTIONS_KEY`.
+
+Setup: create an OAuth client (Web application) in Google Cloud Console with
+the redirect URI printed by `deploy/enable-google.sh`, enable the Google
+Calendar API and People API, store the client id and secret in SSM, then run
+`deploy/enable-google.sh` and `deploy/deploy.sh`. While the app is in Testing
+mode, only the test users listed on the consent screen (up to 100) can connect.
