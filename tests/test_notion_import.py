@@ -9,7 +9,7 @@ import pytest
 from atya import notion_import as ni
 from atya.schema import load_schema
 
-S = load_schema("default")
+S = load_schema("ankur")   # the owner's schema: default types plus his trackers
 
 
 def rt(text):  return {"type": "rich_text", "rich_text": [{"plain_text": text}] if text else []}

@@ -61,6 +61,8 @@ class Settings:
     daily_tokens: int = 1_500_000
     # All users together, per UTC day.
     daily_tokens_all: int = 20_000_000
+    # The owner's own schema file (schema/<name>.yaml); everyone else gets "default".
+    owner_schema: str | None = "ankur"
     # Contact address shown on /privacy.
     privacy_email: str | None = None
 
@@ -113,6 +115,7 @@ def load_settings() -> Settings:
         whatsapp_verify_token=opt("WHATSAPP_VERIFY_TOKEN"),
         whatsapp_waba_id=opt("WHATSAPP_WABA_ID"),
         privacy_email=opt("PRIVACY_EMAIL"),
+        owner_schema=os.environ.get("OWNER_SCHEMA", "ankur").strip() or None,
         daily_messages=num("LIMIT_DAILY_MESSAGES", 150),
         daily_voice_minutes=num("LIMIT_DAILY_VOICE_MINUTES", 30),
         daily_pdf_pages=num("LIMIT_DAILY_PDF_PAGES", 300),

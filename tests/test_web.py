@@ -264,7 +264,9 @@ def test_untouched_fields_dont_revert_bot_changes(app, store, settings, tenant):
 
 
 def test_odd_input_does_not_crash(app, store, settings, tenant):
+    S = load_schema("ankur")                                     # a schema with a tracker (number fields)
     with store.tx(system=True) as tx:
+        tx.conn.execute("UPDATE tenants SET schema_name = 'ankur' WHERE id = %s", (tenant["id"],))
         tx.create_record(tenant["id"], S, "task", title="T", fields={"Status": "next"})
         tx.create_record(tenant["id"], S, "fitness", title="Run", fields={})
     client, _ = sign_in(app, store, settings, tenant)

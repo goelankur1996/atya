@@ -1,9 +1,9 @@
-# ATYA default schema, version 1.
+# ATYA default schema, version 1: what every new account gets.
 #
-# Converted from the Notion "System Schema" page and the property schemas of
-# every registered Notion database (snapshot 2026-11-02). This file replaces
-# the Notion page as the source of rules for the processor: every tenant points
-# at a schema version, and the processor validates every write against it.
+# Generic types only. Personal trackers (child types tied to one person's
+# projects) belong in that person's own schema file, e.g. schema/ankur.yaml
+# for the owner. Every tenant points at a schema by name (tenants.schema_name)
+# and the processor validates every write against it.
 #
 # Conventions
 # - Record types are keyed by a short slug (task, person, ...). `label` is the
@@ -169,105 +169,6 @@ types:
       Project:    {type: relation, to: project}
       People:     {type: relation, to: person, many: true}
       Decisions:  {type: relation, to: decision, many: true}
-
-  # --- Child trackers (project-scoped) -----------------------------------
-
-  fitness:
-    label: Fitness — Training Log
-    prefix: FIT
-    description: Training log to progress from zero to 10 pullups. Each session's work and notes.
-    title_field: Entry
-    child:
-      parent_project: 10-Pullup Goal
-      date_field: Date
-      trigger: >-
-        Captures about pullups, hangs, grip, bodyweight training, bodyweight,
-        running, or progress toward 10 pullups.
-      agent_fillable: [Date, What I Did, Notes, Bodyweight (kg), Pullups (max), Pushups (max), Dead Hang (s), Run (km), How It Felt, Type]
-    fields:
-      Date:            {type: date}
-      Type:            {type: select, options: [Workout, Weekly Review, Test]}
-      What I Did:      {type: text}
-      Notes:           {type: text}
-      How It Felt:     {type: select, options: [Easy, Moderate, Hard, Failed]}
-      Bodyweight (kg): {type: number}
-      Pullups (max):   {type: number}
-      Pushups (max):   {type: number}
-      Dead Hang (s):   {type: number}
-      Run (km):        {type: number}
-      Project:         {type: relation, to: project}
-
-  robotics_milestone:
-    label: Robotics Learning — Milestones
-    prefix: ROB
-    description: Granular tracking of every milestone across all phases of the robotics learning journey.
-    title_field: Milestone
-    child:
-      parent_project: Learn Robotics
-      date_field: Date Logged
-      trigger: Captures about robotics study, ROS, hardware projects, or robotics-learning progress.
-      agent_fillable: [Date Logged, Hours Spent, Notes]
-      human_only_unless_explicit: [Phase, Status]
-    fields:
-      Date Logged:     {type: date}
-      Phase:           {type: select, options: [Phase 1, Phase 1.5, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7]}
-      Status:          {type: select, options: [Not Started, In Progress, Done, Blocked, Skipped Deliberately]}
-      Hours Spent:     {type: number}
-      Hours Estimated: {type: number}
-      Date Completed:  {type: date}
-      Notes:           {type: text}
-      Project:         {type: relation, to: project}
-
-  meal:
-    label: Meals Log
-    prefix: MEAL
-    description: Daily meal log. Holds full meal detail.
-    title_field: Meal
-    child:
-      parent_project: 10-Pullup Goal
-      date_field: Date
-      trigger: Captures describing food or drink consumed — meals, snacks, what was eaten or drunk, diet notes.
-      agent_fillable: [Date, Meal Type, What I Ate, Notes, How I Felt]
-      only_if_stated: [Est. Calories, Protein (g)]
-    fields:
-      Date:          {type: date}
-      Meal Type:     {type: select, options: [Breakfast, Lunch, Dinner, Snack, Drink]}
-      What I Ate:    {type: text}
-      Notes:         {type: text}
-      How I Felt:    {type: select, options: [Great, Fine, Heavy, Off]}
-      Est. Calories: {type: number}
-      Protein (g):   {type: number}
-      Project:       {type: relation, to: project}
-
-  vla_milestone:
-    label: VLA Milestones
-    prefix: VLA
-    description: The VLA plan's tasks across its 20 checkpoints.
-    title_field: Task
-    child:
-      parent_project: VLA Learning
-      date_field: Date
-      trigger: >-
-        Captures about the VLA plan's 20 checkpoints — pi0.5/openpi, the
-        SO-101 rig, the DROID 75k audit, the hygiene checker, the VLM
-        instruction loop, long-horizon tasks, failure detection/recovery, the
-        eval harness, or EnvHub. Overlaps the Robotics Learning trigger;
-        multi-match writes to both are expected and correct.
-      agent_fillable: [Date, Status, Notes]
-      human_only: [Task ID, Checkpoint, Tier, Detail, Hours, Depends on, Bucket, Emphasised in source]
-    fields:
-      Date:                 {type: date}
-      Status:               {type: select, options: [Not started, In progress, Done]}
-      Notes:                {type: text}
-      Task ID:              {type: text}
-      Checkpoint:           {type: number}
-      Tier:                 {type: select, options: ["0", "1", "1b", "2", "3", "4"]}
-      Bucket:               {type: select, options: [Checkpointed, Ongoing, Unscheduled, Maybe, Killed]}
-      Detail:               {type: text}
-      Hours:                {type: text}
-      Depends on:           {type: text}
-      Emphasised in source: {type: checkbox}
-      Project:              {type: relation, to: project}
 
 rules:
 

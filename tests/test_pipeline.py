@@ -210,8 +210,8 @@ def test_thought_body_is_verbatim_and_child_links_parent(store, settings, clean)
     tg, llm = FakeTelegram(), FakeLLM()
     t = None
     with store.tx(system=True) as tx:  # owner tenant + the child's parent project
-        t = tx.create_tenant(telegram_user_id=OWNER, telegram_chat_id=555)
-        tx.create_record(t["id"], S, "project", title="10-Pullup Goal", fields={"Status": "active"})
+        t = tx.create_tenant(telegram_user_id=OWNER, telegram_chat_id=555, schema_name="ankur")
+        tx.create_record(t["id"], load_schema("ankur"), "project", title="10-Pullup Goal", fields={"Status": "active"})
     msg = "Did 3 pullups today!! Felt strong, grip held."
     llm.plans[msg] = {"writes": [
         {"type": "thought", "title": "Pullup progress", "fields": {"Mood": "energized"},

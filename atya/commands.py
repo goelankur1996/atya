@@ -203,7 +203,7 @@ def start(ctx: Ctx, code: str) -> str:
         with ctx.store.tx(system=True) as tx:
             tx.create_tenant(telegram_user_id=ctx.user_id, telegram_chat_id=ctx.chat_id,
                              display_name=ctx.name, timezone=ctx.settings.owner_timezone,
-                             actor="commands")
+                             actor="commands", schema_name=owner_schema(ctx.settings))
         ctx.reply(WELCOME)
         return "created:owner"
     if not code:
@@ -243,6 +243,13 @@ def invite(ctx: Ctx) -> str:
     ways.append(f"Or send this to the bot:\n/start {code}")
     ctx.reply(f"Invite code (one use): {code}\n\nSend them this:\n" + "\n".join(ways), preview=False)
     return "invite-created"
+
+
+def owner_schema(settings: Settings) -> str:
+    """The owner's own schema if its file exists, else the default."""
+    from .schema import SCHEMA_DIR
+    name = settings.owner_schema
+    return name if name and (SCHEMA_DIR / f"{name}.yaml").exists() else "default"
 
 
 def telegram_link(ctx: Ctx) -> str | None:

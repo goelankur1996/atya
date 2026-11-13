@@ -52,6 +52,24 @@ def sync_owner_timezone(store: Store, settings) -> None:
         t = tx.tenant_by_telegram(settings.owner_telegram_user_id)
         if t and t["timezone"] != settings.owner_timezone:
             tx.set_timezone(t["id"], settings.owner_timezone)
+
+
+def sync_owner_schema(store: Store, settings) -> None:
+    """The owner's account uses their own schema (with personal trackers), if the file exists."""
+    if not settings.owner_telegram_user_id or not settings.owner_schema:
+        return
+    try:
+        load_schema(settings.owner_schema)
+    except Exception as e:
+        log.error("owner schema %r can't be loaded (%s); leaving it as is", settings.owner_schema, e)
+        return
+    with store.tx(system=True) as tx:
+        t = tx.tenant_by_telegram(settings.owner_telegram_user_id)
+        if t and t["schema_name"] != settings.owner_schema:
+            tx.conn.execute("UPDATE tenants SET schema_name = %s WHERE id = %s", (settings.owner_schema, t["id"]))
+            tx.audit(t["id"], actor="system", action="update", target_table="tenants", target_id=t["id"],
+                     summary=f"schema set to {settings.owner_schema}")
+            log.info("owner account now uses schema %s", settings.owner_schema)
             log.info("owner timezone set to %s", settings.owner_timezone)
 
 
@@ -66,6 +84,7 @@ def main() -> None:
 
     store = Store(settings.database_url)
     sync_owner_timezone(store, settings)
+    sync_owner_schema(store, settings)
     tg = Telegram(settings.telegram_bot_token)
     if settings.llm_provider == "bedrock":
         if not (settings.bedrock_fast_model and settings.bedrock_main_model):

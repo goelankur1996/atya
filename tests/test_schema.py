@@ -6,7 +6,7 @@ import pytest
 
 from atya.schema import SchemaError, load_schema, parse_schema
 
-S = load_schema("default")
+S = load_schema("ankur")   # the owner's schema: default types plus his trackers
 
 
 def test_all_notion_databases_present():
