@@ -1,43 +1,32 @@
 {% extends "base.html" %}
 {% block title %}ATYA · a memory that lives in your chats{% endblock %}
+{% block header %}
+<header class="site">
+  <a class="brand" href="{{ url_for('home') }}">atya</a>
+  <nav aria-label="Site">
+    <a href="{{ url_for('signin_page') }}">Log in</a>
+  </nav>
+</header>
+{% endblock %}
 {% block page %}
 <main class="landing">
-  <section class="hero">
-    <h1>A memory that lives in your chats.</h1>
-    <p class="lead">Message ATYA anything: tasks, people, ideas, voice notes, PDFs. Ask it anything later. It reminds you on time, briefs you every morning, and keeps it all private to you.</p>
-    <div class="cta">
-      <a class="btn primary" href="{{ url_for('signin_page') }}">Sign in</a>
-      <span class="muted">Invite-only for now.</span>
-    </div>
-  </section>
+  <p class="statement">ATYA is a memory that lives in your chats. Tell it what's going on, in a message or a voice note, and it keeps track of the rest.</p>
 
-  <section class="features">
-    <div class="feature">
-      <h2>Just message it</h2>
-      <p>On WhatsApp or Telegram, the way you'd message yourself. "Send Meera the deck by Friday" becomes a task with a date. A voice note works too.</p>
-    </div>
-    <div class="feature">
-      <h2>Ask it anything later</h2>
-      <p>"What did I promise Rahul?" "When's my call with Meera?" It answers from what you told it, and says so when it doesn't know.</p>
-    </div>
-    <div class="feature">
-      <h2>It reminds you</h2>
-      <p>"Remind me to call Jim at 5" works. Every morning, a short brief of what's due and what's on your calendar. Birthdays don't slip.</p>
-    </div>
-    <div class="feature">
-      <h2>It looks things up</h2>
-      <p>"Research good physios near me." It asks what matters, searches, and keeps what it found with the rest of your notes.</p>
-    </div>
-  </section>
+  <p class="prose">There's nothing new to learn: you use it on WhatsApp or Telegram, the way you'd message a friend. It files what you say into tasks, people and notes, and answers when you ask.</p>
 
-  <section class="how">
-    <h2>Private by design</h2>
-    <p>Your records are yours alone, separated from everyone else's by the database itself. See and edit everything here on the web, export it any time, or delete your account with one command. <a href="{{ url_for('privacy') }}">Privacy policy</a>.</p>
-  </section>
+  <p class="prose">It can <span class="eg">remember what you promised Rahul</span>, <span class="eg">remind you to call Jim at five</span>, <span class="eg">send you a short brief every morning</span>, <span class="eg">wish your sister on her birthday</span>, or <span class="eg">find a good physio near you</span>.</p>
 
-  <footer class="page-foot">
-    <span>ATYA</span>
-    <span><a href="{{ url_for('signin_page') }}">Sign in</a> · <a href="{{ url_for('privacy') }}">Privacy</a></span>
-  </footer>
+  <p class="prose">Your records are yours alone. See and edit everything on the web, export it any time, or delete it with one command.</p>
+
+  <p class="cta">
+    <a class="cta-link" href="{{ url_for('signin_page') }}">Log in</a>
+    {% if invite_email %}<a class="cta-quiet" href="mailto:{{ invite_email }}?subject=ATYA%20invite">Ask for an invite</a>
+    {% else %}<span class="cta-quiet">Invite-only for now.</span>{% endif %}
+  </p>
 </main>
+<footer class="site-foot">
+  <span>&copy; 2026 ATYA</span>
+  <a href="{{ url_for('privacy') }}">Privacy policy</a>
+  <a href="{{ url_for('terms') }}">Terms of service</a>
+</footer>
 {% endblock %}

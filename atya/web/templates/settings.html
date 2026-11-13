@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}Settings · ATYA{% endblock %}
+{% block main_class %} class="settings"{% endblock %}
+{% block body %}
+<h1>Settings</h1>
+{% if error %}<p class="notice">{{ error }}</p>{% endif %}
+{% if saved %}<p class="notice ok">{{ saved }}</p>{% endif %}
+
+<section id="contact">
+  <h2>Contact ATYA</h2>
+  <p class="muted flush">Message ATYA from either app. Both reach the same records.</p>
+  <div class="box">
+    <div class="row static">
+      <span class="grow"><b>WhatsApp</b><br><span class="muted small">
+        {% if me.whatsapp_phone %}Linked to +{{ me.whatsapp_phone }}{% else %}Not linked{% endif %}</span></span>
+      <span class="side actions">
+        {% if wa_number and me.whatsapp_phone %}<a class="btn" href="https://wa.me/{{ wa_number }}">Open WhatsApp</a>{% endif %}
+      </span>
+    </div>
+    <div class="row static">
+      <span class="grow"><b>Telegram</b><br><span class="muted small">
+        {% if me.telegram_user_id %}Linked{% if me.telegram_username %} to @{{ me.telegram_username }}{% endif %}{% else %}Not linked{% endif %}</span></span>
+      <span class="side actions">
+        {% if tg_bot and me.telegram_user_id %}<a class="btn" href="https://t.me/{{ tg_bot }}">Open Telegram</a>{% endif %}
+      </span>
+    </div>
+  </div>
+  {% if link %}
+    <p class="notice">Open <a href="{{ link.url }}">this link</a> on your phone and send the message it fills in. It links {{ link.to }} to this account and works for 15 minutes.</p>
+  {% elif (not me.whatsapp_phone and wa_number) or (not me.telegram_user_id and tg_bot) %}
+    <form action="{{ url_for('settings_link') }}" method="post">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="btn" type="submit">Link {{ "WhatsApp" if not me.whatsapp_phone and wa_number else "Telegram" }}</button>
+    </form>
+  {% endif %}
+</section>
+
+<section id="account">
+  <h2>Account</h2>
+  <div class="box">
+    <form class="row static setting" action="{{ url_for('settings_name') }}" method="post">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label class="grow" for="name"><b>Name</b><br><span class="muted small">What ATYA calls you.</span></label>
+      <input class="field" id="name" name="name" value="{{ me.display_name or '' }}" maxlength="80" required>
+      <button class="btn" type="submit">Save</button>
+    </form>
+    <form class="row static setting" action="{{ url_for('settings_timezone') }}" method="post">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label class="grow" for="timezone"><b>Timezone</b><br><span class="muted small">Used for reminders and the brief.</span></label>
+      <select class="field" id="timezone" name="timezone">
+        {% if me.timezone not in zones %}<option selected>{{ me.timezone }}</option>{% endif %}
+        {% for z in zones %}<option{% if z == me.timezone %} selected{% endif %}>{{ z }}</option>{% endfor %}
+      </select>
+      <button class="btn" type="submit">Save</button>
+    </form>
+    <form class="row static setting" action="{{ url_for('settings_brief') }}" method="post">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label class="grow" for="brief"><b>Morning brief</b><br><span class="muted small">
+        {% if me.brief_time %}Every day at {{ brief_label }}.{% else %}Off.{% endif %} A short note of what's due and coming up.</span></label>
+      <input class="field" id="brief" name="brief" type="time" value="{{ me.brief_time.strftime('%H:%M') if me.brief_time else '09:00' }}">
+      <button class="btn" type="submit">{{ "Save" if me.brief_time else "Turn on" }}</button>
+      {% if me.brief_time %}<button class="linkbtn" type="submit" name="off" value="1">Turn off</button>{% endif %}
+    </form>
+  </div>
+</section>
+
+<section id="connectors">
+  <h2>Connectors</h2>
+  <div class="box">
+    <div class="row static">
+      <span class="grow">
+        <b>Google Calendar and birthdays</b><br>
+        <span class="muted small">Read-only. Events from yesterday to 30 days ahead, synced every 15 minutes, and birthdays from your contacts as reminders.</span>
+        {% if conn %}<br><span class="small">
+          {% if conn.status == "active" %}Connected{% else %}<b>Stopped working</b>{% endif %}{% if conn.account %} as {{ conn.account }}{% endif %}
+          · {{ events }} events
+          · {% if conn.last_sync_at %}last synced {{ fmt_time(conn.last_sync_at) }}{% else %}first sync within a minute{% endif %}
+          {% if conn.error and conn.status != "active" %}<br><span class="muted">{{ conn.error }}</span>{% endif %}
+        </span>{% endif %}
+      </span>
+      <span class="side actions">
+        {% if not google_on %}<span class="muted small">Not available yet</span>
+        {% elif conn and conn.status == "active" %}
+          <form action="{{ url_for('connect_google_sync') }}" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn" type="submit">Sync now</button></form>
+          <form action="{{ url_for('connect_google_disconnect') }}" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="linkbtn" type="submit">Disconnect</button></form>
+        {% else %}
+          <form action="{{ url_for('connect_google') }}" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn primary" type="submit">{{ "Reconnect" if conn else "Connect" }}</button></form>
+        {% endif %}
+      </span>
+    </div>
+    <div class="row static">
+      <span class="grow"><b>Gmail, Notion and others</b><br><span class="muted small">Not yet. Tell ATYA which one you'd use.</span></span>
+    </div>
+  </div>
+</section>
+
+<section id="data">
+  <h2>Data controls</h2>
+  <div class="box">
+    <div class="row static">
+      <span class="grow"><b>Never used to train AI models</b><br><span class="muted small">Your messages and records are processed to answer you and are never used to train any model, ours or anyone's. <a href="{{ url_for('privacy') }}">Privacy policy</a></span></span>
+    </div>
+    <div class="row static">
+      <span class="grow"><b>Export everything</b><br><span class="muted small">Every record, message and change, as a ZIP of CSV and JSON files.</span></span>
+      <span class="side actions"><form action="{{ url_for('export') }}" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn" type="submit">Download</button></form></span>
+    </div>
+    {% if events %}
+    <div class="row static">
+      <span class="grow"><b>Delete synced calendar events</b><br><span class="muted small">Removes the {{ events }} events copied from Google. Disconnect first, or the next sync brings them back.</span></span>
+      <span class="side actions"><form action="{{ url_for('settings_google_clear') }}" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn" type="submit">Delete events</button></form></span>
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+<section id="manage">
+  <h2>Account management</h2>
+  <div class="box">
+    <div class="row static">
+      <span class="grow"><b>Delete account</b><br><span class="muted small">Erases your account, records, messages and connections. This can't be undone.</span></span>
+      <span class="side actions"><a class="btn danger" href="{{ url_for('settings_delete_page') }}">Delete account</a></span>
+    </div>
+  </div>
+</section>
+{% endblock %}

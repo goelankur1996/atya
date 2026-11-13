@@ -1,18 +1,21 @@
 {% extends "base.html" %}
 {% block title %}Enter code · ATYA{% endblock %}
+{% block header %}
+<header class="site"><a class="brand" href="{{ url_for('home') }}">atya</a></header>
+{% endblock %}
 {% block page %}
-<div class="center">
+<main class="auth">
   <h1>Check {{ via or "your chats" }}</h1>
-  <p>If that account exists, a 6-digit code is on its way to you on {{ via or "WhatsApp or Telegram" }}. It works for 10 minutes.</p>
+  <p class="muted">If that account exists, a 6-digit code is on its way on {{ via or "WhatsApp or Telegram" }}. It works for 10 minutes.</p>
   {% if error %}<p class="notice">{{ error }}</p>{% endif %}
-  <form action="{{ url_for('signin_code_check') }}" method="post" class="stack">
+  <form action="{{ url_for('signin_code_check') }}" method="post" class="authform">
     <input type="hidden" name="h" value="{{ handle }}">
     <input type="hidden" name="via" value="{{ via }}">
-    <label for="code">Code</label>
-    <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}"
-           maxlength="7" required autofocus>
-    <button class="btn primary" type="submit">Sign in</button>
+    <label class="sr-only" for="code">Code</label>
+    <input class="code" id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code"
+           pattern="[0-9 ]{6,7}" maxlength="7" placeholder="000000" required autofocus>
+    <button class="btn primary wide" type="submit">Log in</button>
   </form>
-  <p class="muted small">No code? <a href="{{ url_for('signin_page') }}">Start again</a>, or send <code>/web</code> to the bot.</p>
-</div>
+  <p class="fine">No code? <a href="{{ url_for('signin_page') }}">Start again</a>, or send <code>/web</code> to ATYA.</p>
+</main>
 {% endblock %}

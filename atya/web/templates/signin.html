@@ -1,16 +1,39 @@
 {% extends "base.html" %}
-{% block title %}Sign in · ATYA{% endblock %}
+{% block title %}Log in · ATYA{% endblock %}
+{% block header %}
+<header class="site"><a class="brand" href="{{ url_for('home') }}">atya</a></header>
+{% endblock %}
 {% block page %}
-<div class="center">
-  <h1>Sign in</h1>
-  <p>Enter the WhatsApp number or Telegram username you use with ATYA. We'll send a 6-digit code there.</p>
+<main class="auth">
+  <h1>Log in to ATYA</h1>
+  <p class="muted">We'll send a code to the chat app you use with ATYA.</p>
   {% if error %}<p class="notice">{{ error }}</p>{% endif %}
-  <form action="{{ url_for('signin_request') }}" method="post" class="stack">
-    <label for="who">WhatsApp number or Telegram @username</label>
-    <input id="who" name="who" type="text" autocomplete="username" inputmode="text" required
-           placeholder="+91 98xxx xxxxx  or  @yourname" value="{{ who|default('') }}">
-    <button class="btn primary" type="submit">Send code</button>
+  <form action="{{ url_for('signin_request') }}" method="post" class="authform">
+    <fieldset class="tabs">
+      <legend class="sr-only">Where should we send the code?</legend>
+      <input type="radio" name="via" id="via-wa" value="whatsapp" {% if via != "telegram" %}checked{% endif %}>
+      <label for="via-wa">WhatsApp</label>
+      <input type="radio" name="via" id="via-tg" value="telegram" {% if via == "telegram" %}checked{% endif %}>
+      <label for="via-tg">Telegram</label>
+
+      <div class="pane pane-wa">
+        <div class="phone">
+          <label class="sr-only" for="cc">Country code</label>
+          <select id="cc" name="cc">
+            {% for code, country in codes %}<option value="{{ code }}">{{ code }} {{ country }}</option>{% endfor %}
+          </select>
+          <label class="sr-only" for="phone">WhatsApp number</label>
+          <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel-national" placeholder="98765 43210">
+        </div>
+      </div>
+      <div class="pane pane-tg">
+        <label class="sr-only" for="username">Telegram username</label>
+        <div class="handle"><span>@</span><input id="username" name="username" type="text" autocomplete="username" placeholder="yourname"></div>
+      </div>
+    </fieldset>
+    <button class="btn primary wide" type="submit">Send code</button>
   </form>
-  <p class="muted small">Or send <code>/web</code> to the bot for a one-tap sign-in link.</p>
-</div>
+  <p class="fine">By continuing you agree to ATYA's <a href="{{ url_for('terms') }}">Terms of service</a> and acknowledge the <a href="{{ url_for('privacy') }}">Privacy policy</a>.</p>
+  <p class="fine">Or send <code>/web</code> to ATYA for a one-tap sign-in link.</p>
+</main>
 {% endblock %}

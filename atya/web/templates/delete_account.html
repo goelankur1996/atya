@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Delete account · ATYA{% endblock %}
+{% block page %}
+<div class="center">
+  <h1>Delete your account?</h1>
+  <p>This erases your account and everything in it: records, messages, voice notes, documents, and your Google connection. It can't be undone. If you want a copy, <a href="{{ url_for('settings_page') }}#data">export first</a>.</p>
+  {% if error %}<p class="notice">{{ error }}</p>{% endif %}
+  <form action="{{ url_for('settings_delete') }}" method="post" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="confirm">Type <b>delete</b> to confirm</label>
+    <input id="confirm" name="confirm" type="text" autocomplete="off" required>
+    <div class="button-row">
+      <a class="btn" href="{{ url_for('settings_page') }}">Keep my account</a>
+      <button class="btn danger" type="submit">Delete forever</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Terms · ATYA{% endblock %}
+{% block main_class %} class="narrow prose"{% endblock %}
+{% block body %}
+<h1>Terms of service</h1>
+<p class="muted">Effective 14 November 2026</p>
+
+<p>These terms cover your use of ATYA, a personal memory assistant you use on WhatsApp, Telegram and the web. By using it you agree to them. If you don't agree, don't use ATYA.</p>
+
+<h2>The service</h2>
+<ul>
+  <li>ATYA is invite-only and in early access. Features may change, pause or stop, and there may be bugs or downtime.</li>
+  <li>ATYA uses AI models. Its replies, summaries, research and reminders can be wrong or incomplete. Check anything important, and don't rely on ATYA alone for medical, legal, financial or safety decisions, or for deadlines you can't afford to miss.</li>
+  <li>To keep costs fair, each account has daily limits on messages, voice minutes, documents and research. ATYA tells you when you reach one.</li>
+</ul>
+
+<h2>Your account</h2>
+<ul>
+  <li>You must be at least 18, or the age of majority where you live.</li>
+  <li>Your account is tied to your WhatsApp number or Telegram account. Keep access to them secure; anyone who can message from them can use your ATYA.</li>
+  <li>You can delete your account at any time from Settings, or by sending <code>/delete</code>.</li>
+</ul>
+
+<h2>Your content</h2>
+<ul>
+  <li>What you send, and the records made from it, are yours. You give us permission to store and process them only to run ATYA for you, as described in the <a href="{{ url_for('privacy') }}">privacy policy</a>.</li>
+  <li>We don't use your content to train AI models, and we don't sell it.</li>
+  <li>You can export or delete your content at any time.</li>
+</ul>
+
+<h2>Acceptable use</h2>
+<p>Don't use ATYA to break the law, to harass or harm anyone, to store material you have no right to, to send spam, or to try to get at other people's data or overload the service. We may suspend accounts that do.</p>
+
+<h2>Connected accounts</h2>
+<p>If you connect Google, ATYA reads your calendar and contacts' birthdays, read-only, and never changes or sends anything there. You can disconnect at any time from Settings or from your Google account.</p>
+
+<h2>No warranty, limited liability</h2>
+<p>ATYA is provided "as is", without warranties of any kind. To the extent the law allows, we are not liable for indirect or consequential losses, or for losses from missed reminders, wrong answers, or data loss. Export your data if it matters to you.</p>
+
+<h2>Changes and ending</h2>
+<p>We may update these terms; the effective date above will change, and for significant changes we'll tell you in the app. You can stop using ATYA whenever you like. We may end the service with reasonable notice, and you'll be able to export your data before it closes.</p>
+
+<h2>Contact</h2>
+<p>{% if email %}Questions: <a href="mailto:{{ email }}">{{ email }}</a>.{% else %}Questions: see the contact details in the <a href="{{ url_for('privacy') }}">privacy policy</a>.{% endif %}</p>
+{% endblock %}

@@ -181,7 +181,7 @@ def handle(ctx: Ctx, text: str) -> str:
         if not ctx.settings.google_on:
             ctx.reply("Connecting your calendar isn't available yet.")
             return "connect:off"
-        return web_link(ctx, "/connect", "Open this to connect your Google Calendar")
+        return web_link(ctx, "/settings", "Open this to connect your Google Calendar")
     if cmd == "/setup":
         with ctx.store.tx(ctx.tenant["id"]) as tx:
             opening = interview.begin(tx, ctx.tenant["id"])
@@ -286,10 +286,7 @@ def link(ctx: Ctx) -> str:
     if other == "Telegram" and ctx.tenant.get("telegram_user_id"):
         ctx.reply("Telegram is already connected to this account.")
         return "link:already"
-    code = secrets.token_hex(4).upper()
-    expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=LINK_CODE_MINUTES)
-    with ctx.store.tx(system=True) as tx:
-        tx.set_state(f"link:{code}", {"tenant_id": str(ctx.tenant["id"]), "expires": expires.isoformat()})
+    code = new_link_code(ctx.store, ctx.tenant["id"])
     if other == "WhatsApp":
         how = f"Open {whatsapp_link(ctx.settings, f'/start {code}')} and send the message it fills in."
     else:
@@ -299,6 +296,15 @@ def link(ctx: Ctx) -> str:
            f"{{}}\n\nDon't share it: it connects that {other} account to all your records.")
     ctx.reply(msg.format(how.strip()), preview=False, log_text=msg.format("[link hidden]"))
     return "link:code-sent"
+
+
+def new_link_code(store: Store, tenant_id) -> str:
+    """A short-lived code that attaches another channel to this account (/start <code> there)."""
+    code = secrets.token_hex(4).upper()
+    expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=LINK_CODE_MINUTES)
+    with store.tx(system=True) as tx:
+        tx.set_state(f"link:{code}", {"tenant_id": str(tenant_id), "expires": expires.isoformat()})
+    return code
 
 
 def use_link_code(ctx: Ctx, code: str) -> str | None:

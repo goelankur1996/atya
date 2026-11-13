@@ -21,11 +21,12 @@ import json
 import logging
 import re
 import secrets
+import time
 import uuid
 import zoneinfo
 from typing import Any
 
-from flask import Flask, Response, abort, g, redirect, render_template, request, send_file, url_for
+from flask import Flask, Response, abort, make_response, g, redirect, render_template, request, send_file, url_for
 
 from ..config import Settings
 from .. import connections as gsync, documents, google, whatsapp
@@ -180,7 +181,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
     @app.get("/")
     def home():
         if g.tenant is None:
-            return render_template("landing.html", wa_number=settings.whatsapp_number if settings.whatsapp_on else None)
+            return render_template("landing.html", invite_email=settings.privacy_email)
         tid = g.tenant["id"]
         now = local_now()
         due: list[dict] = []
@@ -260,23 +261,30 @@ def create_app(store: Store, settings: Settings) -> Flask:
     def signin_page():
         if g.tenant is not None:
             return redirect(url_for("home"))
-        return render_template("signin.html", error=request.args.get("error"))
+        return render_template("signin.html", error=request.args.get("error"), via="whatsapp", codes=COUNTRY_CODES)
 
     @app.post("/signin")
     def signin_request():
         same_origin_only()
-        raw = request.form.get("who", "").strip()
+        if request.form.get("via") == "telegram":
+            raw = "@" + request.form.get("username", "").strip().lstrip("@")
+        elif request.form.get("via") == "whatsapp":
+            phone = request.form.get("phone", "").strip()
+            raw = phone if phone.startswith("+") else request.form.get("cc", "+91").strip() + " " + phone
+        else:
+            raw = request.form.get("who", "").strip()
         kind, ident = parse_signin_identity(raw)
         if kind is None:
-            return render_template("signin.html", error="Enter your WhatsApp number (with country code) "
-                                                        "or your Telegram @username.", who=raw), 400
+            return render_template("signin.html", error="Enter your WhatsApp number, or your Telegram username.",
+                                   via=request.form.get("via", "whatsapp"), codes=COUNTRY_CODES), 400
         ip = client_ip()
         with store.tx(system=True) as t:
             tenant = t.find_signin_tenant(**{kind: ident})
             per_account, per_ip = t.signin_counts(tenant_id=tenant["id"] if tenant else None, ip=ip)
             t.purge_signin_codes()
             if per_ip >= SIGNIN_PER_IP_HOUR:
-                return render_template("signin.html", error="Too many tries from here. Wait an hour and try again."), 429
+                return render_template("signin.html", error="Too many tries from here. Wait an hour and try again.",
+                                       via="whatsapp", codes=COUNTRY_CODES), 429
             code = f"{secrets.randbelow(10**6):06d}"
             send = tenant is not None and per_account < SIGNIN_PER_ACCOUNT_HOUR and (
                 (kind == "whatsapp" and settings.whatsapp_on) or (kind == "telegram" and tenant["telegram_chat_id"]))
@@ -316,6 +324,10 @@ def create_app(store: Store, settings: Settings) -> Flask:
             return render_template("signin_code.html", handle=str(handle), via=request.form.get("via", ""),
                                    error="That code didn't work. Check it, or start again for a new one."), 400
         return start_session(tenant_id, url_for("home"))
+
+    @app.get("/terms")
+    def terms():
+        return render_template("terms.html", email=settings.privacy_email)
 
     @app.get("/privacy")
     def privacy():
@@ -593,12 +605,149 @@ def create_app(store: Store, settings: Settings) -> Flask:
     @app.get("/connect")
     def connect_page():
         need_login()
+        err = request.args.get("error")
+        return redirect(url_for("settings_page", **({"error": err} if err else {})) + "#connectors")
+
+    # --- settings -------------------------------------------------------------
+
+    bot_name: dict = app.extensions.setdefault("atya_bot", {})     # tests can preset "name"
+
+    def telegram_bot() -> str | None:
+        """The bot's @username, looked up once; a failed lookup is retried after 10 minutes."""
+        if "name" in bot_name:
+            return bot_name["name"]
+        if time.monotonic() < bot_name.get("retry_at", 0):
+            return None
+        try:
+            from ..telegram import Telegram
+            bot_name["name"] = Telegram(settings.telegram_bot_token).bot_username() or None
+            return bot_name["name"]
+        except Exception:
+            bot_name["retry_at"] = time.monotonic() + 600
+            return None
+
+    @app.get("/settings")
+    def settings_page():
+        need_login()
+        from ..briefs import fmt_time as brief_fmt
+        tid = g.tenant["id"]
         with tx() as t:
-            conn = t.connection(g.tenant["id"])
-            events = t._one("SELECT count(*) AS n FROM records WHERE tenant_id = %s AND type = 'event'",
-                            (g.tenant["id"],))["n"]
-        return render_template("connect.html", active="connect", conn=conn, events=events,
-                               google_on=settings.google_on, error=request.args.get("error"))
+            me = t.tenant(tid)
+            conn = t.connection(tid)
+            events = t._one("SELECT count(*) AS n FROM records WHERE tenant_id = %s AND type = 'event'", (tid,))["n"]
+        link = None
+        if request.args.get("link"):
+            code = request.args["link"]
+            if me.get("whatsapp_phone") is None and settings.whatsapp_on and settings.whatsapp_number:
+                link = {"to": "WhatsApp", "url": f"https://wa.me/{settings.whatsapp_number}?text=%2Fstart%20{code}"}
+            elif me.get("telegram_user_id") is None and telegram_bot():
+                link = {"to": "Telegram", "url": f"https://t.me/{telegram_bot()}?start={code}"}
+        return render_template("settings.html", active="settings", me=me, conn=conn, events=events,
+                               google_on=settings.google_on, error=request.args.get("error"),
+                               saved=request.args.get("saved"), link=link,
+                               wa_number=settings.whatsapp_number if settings.whatsapp_on else None,
+                               tg_bot=telegram_bot(), zones=COMMON_ZONES,
+                               brief_label=brief_fmt(me["brief_time"]) if me.get("brief_time") else None)
+
+    def back_to_settings(saved: str | None = None, error: str | None = None, anchor: str = ""):
+        args = {k: v for k, v in (("saved", saved), ("error", error)) if v}
+        return redirect(url_for("settings_page", **args) + anchor)
+
+    @app.post("/settings/name")
+    def settings_name():
+        need_login()
+        check_csrf()
+        name = " ".join(request.form.get("name", "").split())[:80]
+        if not name:
+            return back_to_settings(error="Your name can't be empty.", anchor="#account")
+        with tx() as t:
+            t.conn.execute("UPDATE tenants SET display_name = %s WHERE id = %s", (name, g.tenant["id"]))
+            t.audit(g.tenant["id"], actor="web", action="update", target_table="tenants", target_id=g.tenant["id"],
+                    summary="name changed")
+        return back_to_settings(saved="Name saved.", anchor="#account")
+
+    @app.post("/settings/timezone")
+    def settings_timezone():
+        need_login()
+        check_csrf()
+        zone = request.form.get("timezone", "").strip()
+        try:
+            zoneinfo.ZoneInfo(zone)
+        except Exception:
+            return back_to_settings(error=f"\u201c{zone}\u201d isn't a timezone I know. Try one like Asia/Kolkata.",
+                                    anchor="#account")
+        with tx() as t:
+            t.set_timezone(g.tenant["id"], zone, actor="web")
+        return back_to_settings(saved=f"Timezone set to {zone}.", anchor="#account")
+
+    @app.post("/settings/brief")
+    def settings_brief():
+        need_login()
+        check_csrf()
+        from ..briefs import fmt_time as brief_clock, parse_time
+        raw = request.form.get("brief", "").strip()
+        tid = g.tenant["id"]
+        if request.form.get("off") or not raw:
+            with tx() as t:
+                t.set_brief(tid, None)
+            return back_to_settings(saved="Morning brief turned off.", anchor="#account")
+        at = parse_time(raw)
+        if at is None:
+            return back_to_settings(error="Pick a time for the brief.", anchor="#account")
+        now = local_now()
+        with tx() as t:
+            t.set_brief(tid, at, skip_until=now.date() if now.time() >= at else None)
+        return back_to_settings(saved=f"Morning brief set for {brief_clock(at)} every day.", anchor="#account")
+
+    @app.post("/settings/link")
+    def settings_link():
+        need_login()
+        check_csrf()
+        from ..commands import new_link_code
+        code = new_link_code(store, g.tenant["id"])
+        return redirect(url_for("settings_page", link=code) + "#contact")
+
+    @app.post("/settings/google/clear")
+    def settings_google_clear():
+        need_login()
+        check_csrf()
+        tid = g.tenant["id"]
+        with tx() as t:
+            n = t._one("WITH d AS (DELETE FROM records WHERE tenant_id = %s AND external_id LIKE 'gcal:%%' "
+                       "RETURNING 1) SELECT count(*) AS n FROM d", (tid,))["n"]
+            t.audit(tid, actor="web", action="delete", target_table="records", target_id=None,
+                    summary=f"deleted {n} calendar events copied from Google")
+        return back_to_settings(saved=f"Deleted {n} calendar events copied from Google.", anchor="#data")
+
+    @app.get("/settings/delete")
+    def settings_delete_page():
+        need_login()
+        return render_template("delete_account.html", active="settings")
+
+    @app.post("/settings/delete")
+    def settings_delete():
+        need_login()
+        check_csrf()
+        if request.form.get("confirm", "").strip().lower() != "delete":
+            return render_template("delete_account.html", active="settings",
+                                   error="Type delete to confirm."), 400
+        tid = g.tenant["id"]
+        if settings.google_on:
+            with tx() as t:
+                conn = t.connection(tid)
+            if conn:
+                try:
+                    google.GoogleOAuth(settings.google_client_id, settings.google_client_secret).revoke(
+                        google.Vault(settings.connections_key).open(conn["refresh_token"]))
+                except google.GoogleError:
+                    pass
+        with store.tx(system=True) as t:
+            t.delete_tenant(tid)
+        log.info("account %s deleted from the web", str(tid)[:4])
+        resp = make_response(render_template("message.html", title="Account deleted",
+                                             text="Your account and everything in it have been erased."))
+        resp.delete_cookie(COOKIE)
+        return resp
 
     @app.post("/connect/google")
     def connect_google():
@@ -898,6 +1047,12 @@ def create_app(store: Store, settings: Settings) -> Flask:
 
 # --- form <-> field values ----------------------------------------------------
 
+COUNTRY_CODES = [("+91", "India"), ("+1", "US / Canada"), ("+44", "UK"), ("+971", "UAE"), ("+65", "Singapore"),
+                 ("+61", "Australia"), ("+49", "Germany"), ("+33", "France"), ("+31", "Netherlands"),
+                 ("+966", "Saudi Arabia"), ("+974", "Qatar"), ("+60", "Malaysia"), ("+81", "Japan"),
+                 ("+880", "Bangladesh"), ("+977", "Nepal"), ("+94", "Sri Lanka")]
+COMMON_ZONES = ["Asia/Kolkata", "Asia/Dubai", "Asia/Singapore", "Asia/Tokyo", "Europe/London", "Europe/Berlin",
+                "Europe/Paris", "America/New_York", "America/Chicago", "America/Los_Angeles", "Australia/Sydney", "UTC"]
 SIGNIN_CODE_MINUTES = 10
 SIGNIN_MAX_TRIES = 5
 SIGNIN_PER_ACCOUNT_HOUR = 5

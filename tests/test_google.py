@@ -195,9 +195,9 @@ def test_messages_never_create_events(store, settings, user):
 def test_connect_flow_on_the_web(store, settings, user, monkeypatch):
     app = web.create_app(store, settings)
     c, _ = sign_in(app, store, settings, user)
-    page = c.get("/connect").get_data(as_text=True)
-    assert "Connect Google" in page and "style=" not in page
-    r = c.post("/connect/google", data={"csrf": csrf(c, "/connect")})
+    page = c.get("/settings").get_data(as_text=True)
+    assert "Google Calendar and birthdays" in page and "style=" not in page
+    r = c.post("/connect/google", data={"csrf": csrf(c, "/settings")})
     assert r.status_code == 302 and r.location.startswith("https://accounts.google.com/")
     state = urllib.parse.parse_qs(urllib.parse.urlparse(r.location).query)["state"][0]
 
@@ -221,9 +221,9 @@ def test_connect_flow_on_the_web(store, settings, user, monkeypatch):
     assert google.Vault(KEY).open(conn["refresh_token"]) == "refresh-1"
     assert c.get(f"/connect/google/callback?state={state}&code=abc").location.endswith(
         "/connect?error=That+sign-in+link+expired.+Try+connecting+again.")          # state is single use
-    assert "Connected as ira@gmail.com" in c.get("/connect").get_data(as_text=True)
+    assert "Connected as ira@gmail.com" in c.get("/settings").get_data(as_text=True)
 
-    c.post("/connect/google/disconnect", data={"csrf": csrf(c, "/connect")})
+    c.post("/connect/google/disconnect", data={"csrf": csrf(c, "/settings")})
     with store.tx(user["id"]) as tx:
         assert tx.connection(user["id"]) is None
     assert revoked == ["refresh-1"]
@@ -232,7 +232,7 @@ def test_connect_flow_on_the_web(store, settings, user, monkeypatch):
 def test_calendar_scope_refused_connects_nothing(store, settings, user, monkeypatch):
     app = web.create_app(store, settings)
     c, _ = sign_in(app, store, settings, user)
-    r = c.post("/connect/google", data={"csrf": csrf(c, "/connect")})
+    r = c.post("/connect/google", data={"csrf": csrf(c, "/settings")})
     state = urllib.parse.parse_qs(urllib.parse.urlparse(r.location).query)["state"][0]
     monkeypatch.setattr(google.GoogleOAuth, "exchange", lambda self, **k: {
         "access_token": "a", "refresh_token": "r", "scope": "openid email"})
@@ -249,14 +249,14 @@ def test_connect_command_link_lands_on_connect_page(store, settings, user):
     ctx = commands.Ctx(store=store, tg=tg, settings=settings, user_id=880005, chat_id=880005, name=None, tenant=user)
     assert commands.handle(ctx, "/connect") == "web:link-sent"
     path = re.search(r"https://atya\.test(/login/\S+)", tg.sent[-1][1]).group(1)
-    assert path.endswith("?next=/connect")
+    assert path.endswith("?next=/settings")
     app = web.create_app(store, settings)
     c = app.test_client()
     form = c.get(path).get_data(as_text=True)
     token = re.search(r'name="token" value="([^"]+)"', form).group(1)
     nxt = re.search(r'name="next" value="([^"]+)"', form).group(1)
     r = c.post("/login", data={"token": token, "next": nxt})
-    assert r.location.endswith("/connect")
+    assert r.location.endswith("/settings")
     assert c.post("/login", data={"token": "x", "next": "https://evil.example"}).status_code == 400
     off = replace(settings, google_client_id=None)
     ctx.settings = off
@@ -268,5 +268,5 @@ def test_csp_lets_the_connect_form_reach_google(store, settings, user):
     # listed, pressing Connect silently does nothing.
     app = web.create_app(store, settings)
     c, _ = sign_in(app, store, settings, user)
-    csp = c.get("/connect").headers["Content-Security-Policy"]
+    csp = c.get("/settings").headers["Content-Security-Policy"]
     assert "form-action 'self' https://accounts.google.com;" in csp
