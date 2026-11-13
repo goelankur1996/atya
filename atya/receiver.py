@@ -129,6 +129,7 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
             tx.add_attachment(tenant["id"], inbox_id=inbox_id, filename=doc.get("file_name") or "file.pdf",
                               mime_type="application/pdf", data=file_data,
                               sha256=documents.sha256(file_data))
+        tx.note_inbound(tenant["id"], "telegram")
         if tenant["telegram_chat_id"] != chat_id:
             tx.conn.execute("UPDATE tenants SET telegram_chat_id = %s WHERE id = %s",
                             (chat_id, tenant["id"]))
@@ -145,14 +146,14 @@ def handle_callback(store: Store, tg: TelegramAPI, settings: Settings, cq: dict)
         tg.answer_callback(cq["id"])
     except Exception:
         log.warning("answerCallbackQuery failed", exc_info=True)
-    if data.startswith("save:"):
-        return save_as_task(store, tg, user_id, chat_id, data[5:])
-    if data.startswith("rem:"):
-        return reminder_button(store, user_id, chat_id, data)
-    if not data.startswith("tz:"):
-        return "ignored:callback"
     with store.tx(system=True) as tx:
         tenant = tx.tenant_by_telegram(user_id)
+    if data.startswith("save:"):
+        return save_as_task(store, tenant, chat_id, data[5:], channel="telegram")
+    if data.startswith("rem:"):
+        return reminder_button(store, tenant, chat_id, data, channel="telegram")
+    if not data.startswith("tz:"):
+        return "ignored:callback"
     if tenant is None or tenant["status"] not in ("invited", "active"):
         return "ignored:callback-no-tenant"
     zone = commands.match_timezone(data[3:])
@@ -164,25 +165,23 @@ def handle_callback(store: Store, tg: TelegramAPI, settings: Settings, cq: dict)
     return "onboarded"
 
 
-def save_as_task(store: Store, tg: TelegramAPI, user_id: int, chat_id: int, inbox_id: str) -> str:
+def save_as_task(store: Store, tenant: dict | None, chat_id: int, inbox_id: str, *, channel: str) -> str:
     """'Save as task' tapped under an answer that found nothing."""
     try:
         iid = uuid.UUID(inbox_id)
     except ValueError:
         return "ignored:bad-save"
-    with store.tx(system=True) as tx:
-        tenant = tx.tenant_by_telegram(user_id)
     if tenant is None or tenant["status"] != "active":
         return "ignored:callback-no-tenant"
     with store.tx(tenant["id"]) as tx:              # row-level security: only their own message
         if not tx.refile_as_capture(tenant["id"], iid):
             return "ignored:already-saved"
         tx.add_outbox(tenant["id"], chat_id=chat_id, body="Saving it as a task…", inbox_id=iid,
-                      actor="receiver")
+                      actor="receiver", channel=channel)
     return "refiled"
 
 
-def reminder_button(store: Store, user_id: int, chat_id: int, data: str) -> str:
+def reminder_button(store: Store, tenant: dict | None, chat_id: int, data: str, *, channel: str) -> str:
     """Done / In 1 hour / Tomorrow 9am under a reminder."""
     _, choice, rid = (data.split(":", 2) + ["", ""])[:3]
     try:
@@ -191,8 +190,6 @@ def reminder_button(store: Store, user_id: int, chat_id: int, data: str) -> str:
         return "ignored:bad-reminder"
     if choice not in ("done", "1h", "tmrw"):
         return "ignored:bad-reminder"
-    with store.tx(system=True) as tx:
-        tenant = tx.tenant_by_telegram(user_id)
     if tenant is None or tenant["status"] != "active":
         return "ignored:callback-no-tenant"
     schema = load_schema(tenant["schema_name"])
@@ -216,7 +213,7 @@ def reminder_button(store: Store, user_id: int, chat_id: int, data: str) -> str:
                              by_user=True)
             at = reminders.parse_at(new_at, tz)
             body = f"OK, I'll remind you again at {reminders.human(at, dt.datetime.now(tz))}: {rec['title']} ({ref})"
-        tx.add_outbox(tenant["id"], chat_id=chat_id, body=body, actor="receiver")
+        tx.add_outbox(tenant["id"], chat_id=chat_id, body=body, actor="receiver", channel=channel)
     return f"reminder:{choice}"
 
 

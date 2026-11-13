@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
-from . import briefs, embeddings, processor, receiver, reminders, sender, web
+from . import briefs, embeddings, processor, receiver, reminders, sender, web, whatsapp
 from .config import load_settings
 from .llm import ClaudeLLM
 from .migrate import migrate
@@ -80,6 +80,13 @@ def main() -> None:
         ("briefs", briefs.run, (store, settings)),
         ("reminders", reminders.run, (store, settings)),
     ]
+    if settings.whatsapp_on:
+        wa = whatsapp.WhatsApp(settings.whatsapp_token, settings.whatsapp_phone_number_id)
+        workers += [("whatsapp", whatsapp.run, (store, wa, settings, tg)),
+                    ("whatsapp-sender", whatsapp.run_sender, (store, wa, settings))]
+    else:
+        log.warning("WhatsApp is off (needs WHATSAPP_TOKEN, WHATSAPP_APP_SECRET, "
+                    "WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN)")
     if embedder is not None:
         workers.append(("embedder", embeddings.run, (store, embedder, settings)))
     for name, target, args in workers:

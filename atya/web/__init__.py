@@ -27,7 +27,7 @@ from typing import Any
 from flask import Flask, Response, abort, g, redirect, render_template, request, url_for
 
 from ..config import Settings
-from .. import documents
+from .. import documents, whatsapp
 from ..export import build_export
 from ..schema import CLOSED_STATUSES, FieldDef, TypeDef, load_schema
 from ..store import Store
@@ -236,6 +236,38 @@ def create_app(store: Store, settings: Settings) -> Flask:
         resp.set_cookie(COOKIE, session, max_age=SESSION_DAYS * 86400, httponly=True,
                         secure=secure_cookie, samesite="Lax")
         return resp
+
+    # --- WhatsApp webhook (Meta calls this; no session, no CSRF: the signature is the check) ---
+
+    @app.get("/whatsapp/webhook")
+    def whatsapp_verify():
+        if not settings.whatsapp_on:
+            abort(404)
+        token = request.args.get("hub.verify_token", "")
+        challenge = request.args.get("hub.challenge", "")
+        if (request.args.get("hub.mode") == "subscribe" and challenge.isalnum()
+                and hmac.compare_digest(token.encode(), settings.whatsapp_verify_token.encode())):
+            return Response(challenge, mimetype="text/plain")
+        abort(403)
+
+    @app.post("/whatsapp/webhook")
+    def whatsapp_webhook():
+        if not settings.whatsapp_on:
+            abort(404)
+        body = request.get_data(cache=False)
+        if not whatsapp.valid_signature(settings.whatsapp_app_secret, body,
+                                        request.headers.get("X-Hub-Signature-256")):
+            log.warning("whatsapp webhook: bad signature")
+            abort(403)
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            abort(400)
+        if not isinstance(payload, dict):
+            abort(400)
+        with store.tx(system=True) as tx:
+            tx.add_whatsapp_event(payload)
+        return Response("", status=200)
 
     @app.post("/logout")
     def logout():

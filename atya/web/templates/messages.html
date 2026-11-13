@@ -41,7 +41,7 @@
 {% if more %}<p class="pager center-text"><a href="{{ url_for('messages', kind=kind if kind != 'all' else None, q=q or None, page=page+1) }}">Older messages</a></p>{% endif %}
 <ol class="thread" id="thread" data-pending="{{ pending_ids|join(',') }}">
   {% if items and not more %}<li class="thread-start">This is where your messages begin.</li>{% endif %}
-  {% if not items %}<li class="thread-start">{% if q or kind != "all" %}No messages match.{% else %}Nothing here yet. Write below, or send something to the bot on Telegram.{% endif %}</li>{% endif %}
+  {% if not items %}<li class="thread-start">{% if q or kind != "all" %}No messages match.{% else %}Nothing here yet. Write below, or send something to the bot on Telegram or WhatsApp.{% endif %}</li>{% endif %}
 {% for it in items %}
   {% if it.day %}<li class="day">{{ it.day }}</li>{% endif %}
   <li class="turn">
@@ -106,7 +106,7 @@
 
 <form class="composer" action="{{ url_for('message_send') }}" method="post" id="composer" enctype="multipart/form-data">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  {% if note == "commands" %}<p class="composer-note">Commands like /brief and /export work in Telegram for now. Send them to the bot there.</p>{% endif %}
+  {% if note == "commands" %}<p class="composer-note">Commands like /brief and /export work in Telegram or WhatsApp. Send them to the bot there.</p>{% endif %}
   {% if note == "file" %}<p class="composer-note">{{ why or "That file couldn't be saved." }}</p>{% endif %}
   <p class="composer-file" id="file-chip" hidden><span id="file-name"></span> <button type="button" class="linkbtn" id="file-clear">Remove</button></p>
   <label class="attachbtn" title="Attach a PDF (up to 20 MB)">

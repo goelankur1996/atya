@@ -30,3 +30,24 @@ Only one program may read a Telegram bot at a time. Stop the local copy
 The files the server runs from (`/opt/atya/docker-compose.yml`, `Caddyfile`,
 `update.sh`) are kept in `deploy/server/`. `user-data.sh` embeds copies for a
 fresh server; `enable-web.sh` installs them on the existing one.
+
+## WhatsApp
+
+WhatsApp runs next to Telegram once these are in SSM (then `deploy/deploy.sh`):
+
+| Parameter | What |
+| --- | --- |
+| `WHATSAPP_TOKEN` | Permanent token (Meta app → WhatsApp → API Setup → Generate token) |
+| `WHATSAPP_APP_SECRET` | App settings → Basic → App secret (checks webhook signatures) |
+| `WHATSAPP_PHONE_NUMBER_ID` | API Setup → Phone number ID |
+| `WHATSAPP_VERIFY_TOKEN` | Any random string; also pasted into the Meta webhook setup |
+| `WHATSAPP_NUMBER` | The business number in digits, for wa.me links in invites |
+
+Webhook in the Meta app (WhatsApp → Configuration): callback URL
+`https://<WEB_DOMAIN>/whatsapp/webhook`, the verify token above, and subscribe
+to the `messages` field. The web view must be on.
+
+Users join with an invite (`/invite` gives a wa.me link) or connect WhatsApp to
+an existing Telegram account with `/link`. WhatsApp only allows free-form
+messages within 24 hours of the user's last message; reminders and briefs
+outside that window are marked failed until message templates are added.

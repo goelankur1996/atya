@@ -37,6 +37,18 @@ class Settings:
     # Public address of the web view, e.g. https://atya.example.com. Unset: /web is off.
     web_base_url: str | None = None
     web_port: int = 8080
+    # WhatsApp Cloud API. All four must be set, or WhatsApp stays off.
+    whatsapp_token: str | None = None
+    whatsapp_app_secret: str | None = None
+    whatsapp_phone_number_id: str | None = None
+    whatsapp_verify_token: str | None = None
+    # The business number in digits (918920396095), for wa.me links in invites.
+    whatsapp_number: str | None = None
+
+    @property
+    def whatsapp_on(self) -> bool:
+        return bool(self.whatsapp_token and self.whatsapp_app_secret and self.whatsapp_phone_number_id
+                    and self.whatsapp_verify_token)
 
 
 def load_settings() -> Settings:
@@ -46,6 +58,9 @@ def load_settings() -> Settings:
             print(f"FATAL: {name} is not set", file=sys.stderr)
             sys.exit(1)
         return v
+
+    def opt(name: str) -> str | None:
+        return os.environ.get(name, "").strip() or None
 
     owner = os.environ.get("OWNER_TELEGRAM_USER_ID", "").strip()
     return Settings(
@@ -60,4 +75,9 @@ def load_settings() -> Settings:
         max_attempts=int(os.environ.get("MAX_ATTEMPTS", "3")),
         web_base_url=os.environ.get("WEB_BASE_URL", "").strip().rstrip("/") or None,
         web_port=int(os.environ.get("WEB_PORT", "8080")),
+        whatsapp_token=opt("WHATSAPP_TOKEN"),
+        whatsapp_app_secret=opt("WHATSAPP_APP_SECRET"),
+        whatsapp_phone_number_id=opt("WHATSAPP_PHONE_NUMBER_ID"),
+        whatsapp_verify_token=opt("WHATSAPP_VERIFY_TOKEN"),
+        whatsapp_number="".join(c for c in os.environ.get("WHATSAPP_NUMBER", "") if c.isdigit()) or None,
     )

@@ -107,11 +107,12 @@ class Tx:
     def create_tenant(self, *, telegram_user_id: int | None, telegram_chat_id: int | None,
                       display_name: str | None = None, timezone: str = "UTC",
                       schema_name: str = "default", actor: str = "system",
-                      status: str = "active") -> dict:
+                      status: str = "active", whatsapp_phone: str | None = None) -> dict:
         row = self._one(
-            "INSERT INTO tenants (telegram_user_id, telegram_chat_id, display_name, timezone, schema_name, status) "
-            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
-            (telegram_user_id, telegram_chat_id, display_name, timezone, schema_name, status))
+            "INSERT INTO tenants (telegram_user_id, telegram_chat_id, display_name, timezone, schema_name, status, "
+            "whatsapp_phone, channel) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+            (telegram_user_id, telegram_chat_id, display_name, timezone, schema_name, status,
+             whatsapp_phone, "whatsapp" if whatsapp_phone and not telegram_user_id else "telegram"))
         assert row is not None
         self.audit(row["id"], actor=actor, action="create", target_table="tenants",
                    target_id=row["id"], summary=f"tenant created ({display_name or telegram_user_id})")
@@ -119,6 +120,27 @@ class Tx:
 
     def tenant_by_telegram(self, telegram_user_id: int) -> dict | None:
         return self._one("SELECT * FROM tenants WHERE telegram_user_id = %s", (telegram_user_id,))
+
+    def tenant_by_whatsapp(self, phone: str) -> dict | None:
+        return self._one("SELECT * FROM tenants WHERE whatsapp_phone = %s", (phone,))
+
+    def link_whatsapp(self, tenant_id: uuid.UUID, phone: str, *, actor: str = "whatsapp") -> None:
+        self.conn.execute("UPDATE tenants SET whatsapp_phone = %s WHERE id = %s", (phone, tenant_id))
+        self.audit(tenant_id, actor=actor, action="update", target_table="tenants", target_id=tenant_id,
+                   summary="WhatsApp connected")
+
+    def link_telegram(self, tenant_id: uuid.UUID, user_id: int, chat_id: int, *, actor: str = "commands") -> None:
+        self.conn.execute("UPDATE tenants SET telegram_user_id = %s, telegram_chat_id = %s WHERE id = %s",
+                          (user_id, chat_id, tenant_id))
+        self.audit(tenant_id, actor=actor, action="update", target_table="tenants", target_id=tenant_id,
+                   summary="Telegram connected")
+
+    def note_inbound(self, tenant_id: uuid.UUID, channel: str) -> None:
+        """The user just wrote on this channel: unprompted messages go there, and
+        on WhatsApp it opens the 24-hour window for free-form replies."""
+        self.conn.execute(
+            "UPDATE tenants SET channel = %s, whatsapp_last_inbound = CASE WHEN %s = 'whatsapp' "
+            "THEN now() ELSE whatsapp_last_inbound END WHERE id = %s", (channel, channel, tenant_id))
 
     def set_tenant_status(self, tenant_id: uuid.UUID, status: str, *, actor: str = "system") -> None:
         self.conn.execute("UPDATE tenants SET status = %s WHERE id = %s", (status, tenant_id))
@@ -506,15 +528,26 @@ class Tx:
     def add_outbox(self, tenant_id: uuid.UUID, *, chat_id: int, body: str,
                    inbox_id: uuid.UUID | None = None, reply_to_message_id: int | None = None,
                    priority: str = "routine", actor: str = "processor",
-                   buttons: list[list[tuple[str, str]]] | None = None) -> uuid.UUID:
-        """Queue a reply. A reply to a message sent from the web view stays in
-        the web view (channel 'web', marked sent at once; the Telegram sender
-        never sees it)."""
-        channel = "telegram"
-        if inbox_id is not None:
+                   buttons: list[list[tuple[str, str]]] | None = None,
+                   channel: str | None = None) -> uuid.UUID:
+        """Queue a reply. It goes back where the message came from: a message
+        sent from the web view is answered there (channel 'web', marked sent at
+        once; no sender sees it), a WhatsApp message on WhatsApp. Without a
+        message to answer, it goes to the channel the user last wrote from."""
+        if channel is None and inbox_id is not None:
             src = self._one("SELECT source FROM inbox WHERE id = %s", (inbox_id,))
-            if src and src["source"] == "web":
-                channel = "web"
+            if src and src["source"] in ("web", "whatsapp", "telegram"):
+                channel = src["source"]
+        if channel in (None, "whatsapp", "telegram"):
+            t = self._one("SELECT channel, whatsapp_phone, telegram_chat_id FROM tenants WHERE id = %s",
+                          (tenant_id,))
+            if t:
+                channel = channel or t["channel"]
+                if channel == "whatsapp" and t["whatsapp_phone"]:
+                    chat_id = int(t["whatsapp_phone"])
+                elif channel == "telegram" and not chat_id:
+                    chat_id = t["telegram_chat_id"]
+        channel = channel or "telegram"
         row = self._one(
             "INSERT INTO outbox (tenant_id, inbox_id, channel, chat_id, reply_to_message_id, body, priority, "
             "buttons, status, sent_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
@@ -529,12 +562,13 @@ class Tx:
         return row["id"]
 
     def log_sent(self, tenant_id: uuid.UUID, *, chat_id: int, body: str,
-                 inbox_id: uuid.UUID | None = None, actor: str = "commands") -> uuid.UUID:
+                 inbox_id: uuid.UUID | None = None, actor: str = "commands",
+                 channel: str = "telegram") -> uuid.UUID:
         """Record a message the bot already sent directly (command replies)."""
         row = self._one(
-            "INSERT INTO outbox (tenant_id, inbox_id, chat_id, body, status, sent_at) "
-            "VALUES (%s, %s, %s, %s, 'sent', now()) RETURNING id",
-            (tenant_id, inbox_id, chat_id, body))
+            "INSERT INTO outbox (tenant_id, inbox_id, channel, chat_id, body, status, sent_at) "
+            "VALUES (%s, %s, %s, %s, %s, 'sent', now()) RETURNING id",
+            (tenant_id, inbox_id, channel, chat_id, body))
         assert row is not None
         self.audit(tenant_id, actor=actor, action="send", target_table="outbox",
                    target_id=row["id"], summary="command reply sent",
@@ -653,7 +687,8 @@ class Tx:
             "SELECT r.id, r.tenant_id, r.seq, r.title, r.fields->>'Remind At' AS remind_at, "
             "       t.timezone, t.telegram_chat_id, t.schema_name "
             "FROM records r JOIN tenants t ON t.id = r.tenant_id "
-            "WHERE t.status = 'active' AND t.telegram_chat_id IS NOT NULL AND r.type = 'task' "
+            "WHERE t.status = 'active' AND (t.telegram_chat_id IS NOT NULL OR t.whatsapp_phone IS NOT NULL) "
+            "  AND r.type = 'task' "
             "  AND r.fields ? 'Remind At' AND coalesce(r.fields->>'Remind At', '') <> '' "
             "  AND NOT (coalesce(r.fields->>'Status', '') = ANY(%s)) "
             "  AND NOT EXISTS (SELECT 1 FROM reminders_sent s "
@@ -693,7 +728,7 @@ class Tx:
         """Active users with a brief time (system scope; the caller checks the clock)."""
         return self._all("SELECT id, timezone, brief_time, brief_last_date, telegram_chat_id, schema_name "
                          "FROM tenants WHERE status = 'active' AND brief_time IS NOT NULL "
-                         "AND telegram_chat_id IS NOT NULL")
+                         "AND (telegram_chat_id IS NOT NULL OR whatsapp_phone IS NOT NULL)")
 
     def claim_brief(self, tenant_id: uuid.UUID, local_day: dt.date) -> bool:
         """Mark today's brief as sent; False if it already was (exactly once per day)."""
@@ -737,26 +772,56 @@ class Tx:
             "AND (%s::timestamptz IS NULL OR created_at < %s) ORDER BY created_at DESC",
             (tenant_id, after, after, before, before))
 
-    def claim_outbox(self, *, limit: int = 10, reclaim_after_minutes: int = 5) -> list[dict]:
+    def claim_outbox(self, *, limit: int = 10, reclaim_after_minutes: int = 5,
+                     channel: str = "telegram") -> list[dict]:
         rows = self._all(
             "UPDATE outbox SET status = 'sending', attempts = attempts + 1 "
             "WHERE id IN ("
-            "  SELECT id FROM outbox WHERE (status = 'pending' AND channel = 'telegram' "
+            "  SELECT id FROM outbox WHERE (status = 'pending' AND channel = %s "
             "    AND (scheduled_for IS NULL OR scheduled_for <= now())) "
-            "  ORDER BY created_at LIMIT %s FOR UPDATE SKIP LOCKED) RETURNING *", (limit,))
+            "  ORDER BY created_at LIMIT %s FOR UPDATE SKIP LOCKED) RETURNING *", (channel, limit))
         return sorted(rows, key=lambda r: r["created_at"])
 
     def finish_outbox(self, outbox_id: uuid.UUID, *, ok: bool, error: str | None = None,
-                      actor: str = "sender") -> None:
+                      actor: str = "sender", channel_message_id: str | None = None) -> None:
         row = self._one(
-            "UPDATE outbox SET status = %s, sent_at = CASE WHEN %s THEN now() END, error = %s "
-            "WHERE id = %s RETURNING tenant_id",
-            ("sent" if ok else "failed", ok, error, outbox_id))
+            "UPDATE outbox SET status = %s, sent_at = CASE WHEN %s THEN now() END, error = %s, "
+            "channel_message_id = coalesce(%s, channel_message_id) WHERE id = %s RETURNING tenant_id",
+            ("sent" if ok else "failed", ok, error, channel_message_id, outbox_id))
         if row is None:
             raise StoreError(f"outbox row {outbox_id} not found")
         self.audit(row["tenant_id"], actor=actor, action="send" if ok else "reject",
                    target_table="outbox", target_id=outbox_id,
                    summary="delivered" if ok else f"delivery failed: {(error or '')[:200]}")
+
+    def fail_outbox_by_channel_id(self, channel_message_id: str, error: str) -> bool:
+        """A message reported failed after it was accepted (WhatsApp status webhook)."""
+        row = self._one("UPDATE outbox SET status = 'failed', error = %s WHERE channel_message_id = %s "
+                        "RETURNING id, tenant_id", (error, channel_message_id))
+        if row is None:
+            return False
+        self.audit(row["tenant_id"], actor="whatsapp", action="reject", target_table="outbox",
+                   target_id=row["id"], summary=f"delivery failed: {error[:200]}")
+        return True
+
+    # --- WhatsApp webhook queue ---------------------------------------------
+
+    def add_whatsapp_event(self, payload: dict) -> int:
+        row = self._one("INSERT INTO whatsapp_events (payload) VALUES (%s) RETURNING id", (Jsonb(payload),))
+        assert row is not None
+        return row["id"]
+
+    def claim_whatsapp_events(self, *, limit: int = 20, max_attempts: int = 5) -> list[dict]:
+        return self._all(
+            "UPDATE whatsapp_events SET attempts = attempts + 1 WHERE id IN ("
+            "  SELECT id FROM whatsapp_events WHERE attempts < %s ORDER BY id LIMIT %s "
+            "  FOR UPDATE SKIP LOCKED) RETURNING *", (max_attempts, limit))
+
+    def finish_whatsapp_event(self, event_id: int, *, error: str | None = None) -> None:
+        if error is None:
+            self.conn.execute("DELETE FROM whatsapp_events WHERE id = %s", (event_id,))
+        else:
+            self.conn.execute("UPDATE whatsapp_events SET error = %s WHERE id = %s", (error[:2000], event_id))
 
     # --- service state -------------------------------------------------------
 

@@ -111,7 +111,9 @@ def test_turning_on_after_the_time_starts_tomorrow(store, settings, tenant):
         pytest.skip("too close to midnight")
     commands.handle(ctx, f"/brief {earlier.strftime('%H:%M')}")
     assert "First one tomorrow" in ctx.tg.sent[-1][1]
-    assert briefs.send_due_briefs(store) == 0
+    briefs.send_due_briefs(store)          # other tests' users may be due; this one must not be
+    with store.tx(system=True) as tx:
+        assert tx._all("SELECT id FROM outbox WHERE tenant_id = %s", (tenant["id"],)) == []
 
 
 def test_inactive_or_off_users_get_nothing(store, tenant):
