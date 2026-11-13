@@ -17,7 +17,7 @@ import uuid
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import documents, interview, limits, reminders, transcribe
+from . import documents, interview, limits, reminders, research, transcribe
 from .config import Settings
 from .embeddings import Embedder, EmbeddingError
 from .llm import LLM
@@ -587,7 +587,8 @@ def hold(store: Store, row: dict, tenant: dict, day: dt.date, reason: str, setti
 
 def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                 embedder: Embedder | None = None,
-                transcriber: transcribe.Transcriber | None = None) -> str:
+                transcriber: transcribe.Transcriber | None = None,
+                researcher: research.Researcher | None = None) -> str:
     """Process one claimed inbox row within the spending caps. Returns the final status."""
     with store.tx(row["tenant_id"]) as tx:
         tenant = tx.tenant(row["tenant_id"])
@@ -604,9 +605,10 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
             reason = limits.ALL
         if reason:
             return hold(store, row, tenant, day, reason, settings)
-    before = limits.tokens_used(llm)
-    status = _process_row(store, llm, row, settings, embedder, transcriber)
-    after = limits.tokens_used(llm)
+    before = [limits.tokens_used(x) for x in (llm, researcher)]
+    status = _process_row(store, llm, row, settings, embedder, transcriber, researcher)
+    after = [limits.tokens_used(x) for x in (llm, researcher)]
+    spent = (sum(a[0] - b[0] for a, b in zip(after, before)), sum(a[1] - b[1] for a, b in zip(after, before)))
     counted = status != "retry"
     voice_seconds = pdf_pages = 0
     if counted and files:
@@ -615,13 +617,14 @@ def process_row(store: Store, llm: LLM, row: dict, settings: Settings,
         voice_seconds = sum(f["seconds"] or 0 for f in files if is_audio(f) and f["transcript"] is not None)
         pdf_pages = sum(f["pages"] or 0 for f in files if not is_audio(f))
     limits.record(store, tenant["id"], day, messages=1 if counted else 0, voice_seconds=voice_seconds,
-                  pdf_pages=pdf_pages, tokens=(after[0] - before[0], after[1] - before[1]))
+                  pdf_pages=pdf_pages, tokens=spent)
     return status
 
 
 def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                  embedder: Embedder | None = None,
-                 transcriber: transcribe.Transcriber | None = None) -> str:
+                 transcriber: transcribe.Transcriber | None = None,
+                 researcher: research.Researcher | None = None) -> str:
     """Process one claimed inbox row. Returns the final status."""
     raw = row["raw_content"]
     with store.tx(row["tenant_id"]) as tx:
@@ -654,11 +657,17 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
         if setup is not None and row.get("forced_intent") is None:
             return interview_turn(store, llm, row, tenant, schema, tz, raw, heard, setup)
 
+        topic = research.explicit(raw) if row.get("forced_intent") is None else None
+        if topic:                                     # "research <topic>"
+            return research_turn(store, row, tenant, schema, tz, topic, heard, researcher, settings)
+
         if row.get("forced_intent") == "log":       # the user tapped "Save as task"
             cls = {"intent": "log", "reply": ""}
         else:
             cls = llm.classify(raw)
         intent = cls["intent"]
+        if intent == "research":
+            return research_turn(store, row, tenant, schema, tz, raw, heard, researcher, settings)
         if intent == "chat":
             with store.tx(row["tenant_id"]) as tx:
                 tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=with_heard(heard, cls["reply"]),
@@ -800,22 +809,75 @@ def interview_turn(store: Store, llm: LLM, row: dict, tenant: dict, schema: Sche
     return "processed"
 
 
+RESEARCH_ACK = "Looking into it. I'll send what I find in a minute or two."
+
+
+def research_turn(store: Store, row: dict, tenant: dict, schema: Schema, tz, topic: str, heard: str | None,
+                  researcher: research.Researcher | None, settings: Settings) -> str:
+    """Research on the web, reply with the findings and keep them as a report."""
+    tid = tenant["id"]
+    reply_to = _reply_target(row["source_message_id"])
+
+    def done(body: str, notes: str) -> str:
+        with store.tx(tid) as tx:
+            tx.add_outbox(tid, chat_id=tenant["telegram_chat_id"], body=with_heard(heard, body), inbox_id=row["id"],
+                          reply_to_message_id=reply_to)
+            tx.finish_inbox(row["id"], status="responded", intent="research", notes=notes)
+        return "responded"
+
+    if researcher is None:
+        return done("I can't search the web yet: research isn't switched on. I've kept your message.",
+                    "research requested; research is off")
+    local = dt.datetime.now(dt.timezone.utc).astimezone(tz)
+    if not limits.is_owner(tenant, settings) and settings.daily_research:
+        with store.tx(tid) as tx:
+            used = tx.usage_on(tid, local.date()).get("research", 0)
+        if used >= settings.daily_research:
+            return done(f"You've used today's {settings.daily_research} research requests. Ask again tomorrow.",
+                        "research requested; over the daily research limit")
+    if row["attempts"] == 1:                          # it takes a while: say so (once, not on retries)
+        with store.tx(tid) as tx:
+            tx.add_outbox(tid, chat_id=tenant["telegram_chat_id"], body=with_heard(heard, RESEARCH_ACK),
+                          inbox_id=row["id"], reply_to_message_id=reply_to)
+        heard = None                                   # already shown
+    found = researcher.research(topic, timezone=tenant.get("timezone") or "UTC",
+                                today=f"{local:%A} {local.day} {local:%B %Y}")
+    text = found.get("text") or ""
+    if not text:
+        return done("I couldn't find anything useful on that. Try wording it differently?",
+                    "research: nothing found")
+    full = research.with_sources(text, found.get("sources", []))
+    with store.tx(tid) as tx:
+        ref = ""
+        if "document" in schema.types:
+            fields = {"Kind": "report", "Date": local.date().isoformat(), "From": "ATYA web research",
+                      "Summary": text[:600]}
+            rec, _ = tx.create_record(tid, schema, "document", title=f"Research: {topic[:90]}", fields=fields,
+                                      body=full, source_inbox_id=row["id"])
+            ref = record_ref(schema, rec)
+        tx.add_usage(tid, local.date(), research=1)
+    shown = research.with_sources(text, found.get("sources", [])[:4])
+    return done(shown + (f"\n\nSaved as {ref}." if ref else ""), f"research: {topic[:200]}" + (f"; saved {ref}" if ref else ""))
+
+
 def process_once(store: Store, llm: LLM, settings: Settings,
                  embedder: Embedder | None = None,
-                 transcriber: transcribe.Transcriber | None = None) -> int:
+                 transcriber: transcribe.Transcriber | None = None,
+                 researcher: research.Researcher | None = None) -> int:
     with store.tx(system=True) as tx:
         rows = tx.claim_inbox(limit=10, reclaim_after_minutes=settings.reclaim_minutes)
     for row in rows:
-        process_row(store, llm, row, settings, embedder, transcriber)
+        process_row(store, llm, row, settings, embedder, transcriber, researcher)
     return len(rows)
 
 
 def run(store: Store, llm: LLM, settings: Settings, embedder: Embedder | None = None,
-        transcriber: transcribe.Transcriber | None = None) -> None:
+        transcriber: transcribe.Transcriber | None = None,
+        researcher: research.Researcher | None = None) -> None:
     log.info("processor started (search: %s)", "full text + vectors" if embedder else "full text only")
     while True:
         try:
-            if process_once(store, llm, settings, embedder, transcriber) == 0:
+            if process_once(store, llm, settings, embedder, transcriber, researcher) == 0:
                 time.sleep(settings.poll_interval)
         except Exception:
             log.exception("processor loop error")

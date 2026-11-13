@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
-from . import health, transcribe, briefs, embeddings, processor, receiver, reminders, sender, web, whatsapp
+from . import health, research, transcribe, briefs, embeddings, processor, receiver, reminders, sender, web, whatsapp
 from .config import load_settings
 from .llm import BedrockLLM, ClaudeLLM
 from .migrate import migrate
@@ -100,13 +100,17 @@ def main() -> None:
         log.info("voice notes on (Amazon Transcribe)")
     else:
         log.warning("voice notes off (needs VOICE_NOTES=on and a bucket)")
+    researcher = None
+    if settings.research:
+        researcher = research.NovaResearcher(model=settings.research_model, region=settings.aws_region)
+        log.info("web research on (%s)", settings.research_model)
     embedder = embeddings.VoyageEmbedder(settings.voyage_api_key) if settings.voyage_api_key else None
     if embedder is None:
         log.warning("VOYAGE_API_KEY not set: embeddings off, search uses full text only")
 
     workers = [
         ("receiver", receiver.run, (store, tg, settings)),
-        ("processor", processor.run, (store, llm, settings, embedder, transcriber)),
+        ("processor", processor.run, (store, llm, settings, embedder, transcriber, researcher)),
         ("sender", sender.run, (store, tg, settings)),
         ("web", web.run, (store, settings)),
         ("briefs", briefs.run, (store, settings)),

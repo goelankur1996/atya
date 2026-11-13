@@ -100,3 +100,11 @@ day) when they pass a daily cap. Defaults, changed with SSM parameters then
 
 `/usage` shows today's numbers. For a dollar alarm from AWS itself:
 `deploy/budget-alert.sh <monthly USD> <email>`.
+
+## Web research
+
+`deploy/enable-research.sh` then `deploy/deploy.sh`. Messages like "research the
+best physios in Noida" (or that the classifier reads as a request to look
+something up on the web) are answered by Amazon Nova 2 Lite with web search,
+with sources, and saved as a report (document, Kind: report). Capped per user
+per day by `LIMIT_DAILY_RESEARCH` (default 10).

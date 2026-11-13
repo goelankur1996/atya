@@ -48,15 +48,16 @@ class LLM(Protocol):
 
 # --- prompts -------------------------------------------------------------------
 
-CLASSIFY_SYSTEM = """You classify a single message sent to a personal memory bot as "log", "query" or "chat".
+CLASSIFY_SYSTEM = """You classify a single message sent to a personal memory bot as "log", "query", "research" or "chat".
 
 - log = a capture: a declarative statement, observation, event, link, person mention, commitment, decision, journal entry, reading material, training log, meal log, etc.
 - query = a question or request for information ("what / who / when / where / why / how / can / should / is / are / show me / list / how many", or any other request to retrieve known data).
+- research = the owner asks the bot itself to find something out on the web now: "research X", "find me 3 good physios in Noida", "look up the visa rules for Japan for me", "compare the Kindle and the Kobo", "what are the best budget hotels in Goa?". Only when the answer has to come from the internet, not from what they saved, and they want it now.
 - chat = pure small talk addressed to the bot with nothing to save and nothing to look up: greetings, thanks, "ok", "are you there?", "test".
 
 Instructions to self are captures, not questions. A message that tells the owner (or the bot) to do something later is "log", because it should become a task: "check on the Costa Rica product", "follow up with Meera", "remind me to renew the passport", "need to call the bank", "buy batteries", "book flights to Goa", "look into Voyage pricing". Only a message that asks for information already saved is "query": "what's the status of the Costa Rica product?", "did I follow up with Meera?", "check what I owe Rahul" (asks to look something up).
 
-Tie-breakers: a message with any real information in it is "log", even if it starts with a greeting ("hi, met Rahul today" = log). An imperative about a future action is "log". If it is still genuinely ambiguous between log and query, output "query".
+Tie-breakers: a message with any real information in it is "log", even if it starts with a greeting ("hi, met Rahul today" = log). An imperative about a future action is "log": "look into Voyage pricing" is a note to self (log); "look up Voyage pricing for me" asks the bot (research). If it is still genuinely ambiguous between log and query, output "query".
 
 For chat only, also write a reply: one short, friendly line. If it is a greeting, mention that they can send anything to remember or ask about what they saved. No emoji.
 
@@ -64,6 +65,8 @@ Output exactly one JSON object, no prose, no markdown fences:
 {"intent": "log"}
 OR
 {"intent": "query"}
+OR
+{"intent": "research"}
 OR
 {"intent": "chat", "reply": "<one short line>"}"""
 
@@ -281,7 +284,7 @@ class PromptLLM:
                          user=text or "(empty)", max_tokens=120, cache=False)
         obj = parse_json(raw)
         intent = str(obj.get("intent", "")).lower().strip()
-        if intent not in ("log", "query", "chat"):
+        if intent not in ("log", "query", "chat", "research"):
             raise LLMError(f"unexpected intent {intent!r}")
         reply = str(obj.get("reply") or "").strip()
         if intent == "chat" and not reply:

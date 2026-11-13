@@ -49,7 +49,7 @@ Ask me questions about it: "what do I owe Rahul?", "what did I decide about pric
 
 Progress counts too: "sent the deck to Meera" closes that task.
 
-Reminders: "remind me to call Jim at 2pm" and I'll message you at 2pm. PDFs: send the file and I'll file and summarise it. Voice notes work too: I'll write down what you said and file it like a message.
+Reminders: "remind me to call Jim at 2pm" and I'll message you at 2pm. PDFs: send the file and I'll file and summarise it. Voice notes work too: I'll write down what you said and file it like a message. Research: "research the best physios in Noida" and I'll search the web and keep what I find.
 
 Commands:
 /brief 9am - a morning list of what's due, every day at that time (/brief off to stop)
@@ -447,6 +447,7 @@ def usage(ctx: Ctx) -> str:
              line("Messages", u["messages"], st.daily_messages),
              line("Voice notes", u["voice_seconds"] // 60, st.daily_voice_minutes, " min"),
              line("PDF pages", u["pdf_pages"], st.daily_pdf_pages),
+             line("Web research", u.get("research", 0), st.daily_research),
              line("Processing", u["tokens_in"] + u["tokens_out"], st.daily_tokens, " tokens")]
     if u["held"]:
         lines.append(f"Held (over a limit): {u['held']}")

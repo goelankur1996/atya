@@ -865,20 +865,22 @@ class Tx:
     def usage_on(self, tenant_id: uuid.UUID, day: dt.date) -> dict:
         row = self._one("SELECT * FROM usage_daily WHERE tenant_id = %s AND day = %s", (tenant_id, day))
         return row or {"messages": 0, "voice_seconds": 0, "pdf_pages": 0, "tokens_in": 0, "tokens_out": 0,
-                       "held": 0, "told_at": None}
+                       "held": 0, "research": 0, "told_at": None}
 
     def add_usage(self, tenant_id: uuid.UUID, day: dt.date, *, messages: int = 0, voice_seconds: int = 0,
-                  pdf_pages: int = 0, tokens_in: int = 0, tokens_out: int = 0, held: int = 0) -> None:
+                  pdf_pages: int = 0, tokens_in: int = 0, tokens_out: int = 0, held: int = 0,
+                  research: int = 0) -> None:
         self.conn.execute(
-            "INSERT INTO usage_daily (tenant_id, day, messages, voice_seconds, pdf_pages, tokens_in, tokens_out, held) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (tenant_id, day) DO UPDATE SET "
+            "INSERT INTO usage_daily (tenant_id, day, messages, voice_seconds, pdf_pages, tokens_in, tokens_out, held, "
+            "research) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (tenant_id, day) DO UPDATE SET "
+            "research = usage_daily.research + EXCLUDED.research, "
             "messages = usage_daily.messages + EXCLUDED.messages, "
             "voice_seconds = usage_daily.voice_seconds + EXCLUDED.voice_seconds, "
             "pdf_pages = usage_daily.pdf_pages + EXCLUDED.pdf_pages, "
             "tokens_in = usage_daily.tokens_in + EXCLUDED.tokens_in, "
             "tokens_out = usage_daily.tokens_out + EXCLUDED.tokens_out, "
             "held = usage_daily.held + EXCLUDED.held",
-            (tenant_id, day, messages, voice_seconds, pdf_pages, tokens_in, tokens_out, held))
+            (tenant_id, day, messages, voice_seconds, pdf_pages, tokens_in, tokens_out, held, research))
 
     def mark_told(self, tenant_id: uuid.UUID, day: dt.date) -> bool:
         """Note that the user was told about a limit today. False if already told."""

@@ -59,6 +59,10 @@ class Settings:
     daily_voice_minutes: int = 30
     daily_pdf_pages: int = 300
     daily_tokens: int = 1_500_000
+    daily_research: int = 10
+    # Web research (Nova web grounding): on when RESEARCH=on.
+    research: bool = False
+    research_model: str = "us.amazon.nova-2-lite-v1:0"
     # All users together, per UTC day.
     daily_tokens_all: int = 20_000_000
     # The owner's own schema file (schema/<name>.yaml); everyone else gets "default".
@@ -121,6 +125,9 @@ def load_settings() -> Settings:
         daily_pdf_pages=num("LIMIT_DAILY_PDF_PAGES", 300),
         daily_tokens=num("LIMIT_DAILY_TOKENS", 1_500_000),
         daily_tokens_all=num("LIMIT_DAILY_TOKENS_ALL", 20_000_000),
+        daily_research=num("LIMIT_DAILY_RESEARCH", 10),
+        research=(os.environ.get("RESEARCH", "").strip().lower() in ("on", "1", "true", "yes")),
+        research_model=os.environ.get("RESEARCH_MODEL", "").strip() or "us.amazon.nova-2-lite-v1:0",
         voice_notes=(os.environ.get("VOICE_NOTES", "").strip().lower() in ("on", "1", "true", "yes")),
         transcribe_bucket=opt("TRANSCRIBE_BUCKET") or opt("BACKUP_BUCKET"),
         whatsapp_number="".join(c for c in os.environ.get("WHATSAPP_NUMBER", "") if c.isdigit()) or None,
