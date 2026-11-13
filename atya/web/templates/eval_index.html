@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Model tests · ATYA{% endblock %}
+{% block body %}
+<section>
+  <h1>Model tests</h1>
+  <p class="muted flush">Other models replaying your past messages, compared with what was actually done. Nothing was changed by these runs.</p>
+</section>
+<div class="box">
+  {% for r in runs %}
+  <a class="row" href="{{ url_for('eval_report', run_id=r.id) }}">
+    <span class="ref">{{ r.started[:16].replace('T', ' ') }}</span>
+    <span class="grow">{{ r.fast }} · {{ r.main }}</span>
+    <span class="side">{{ r.status }}</span>
+  </a>
+  {% else %}
+  <p class="muted pad">No runs yet.</p>
+  {% endfor %}
+</div>
+{% endblock %}

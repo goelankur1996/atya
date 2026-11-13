@@ -44,6 +44,11 @@ class Settings:
     whatsapp_verify_token: str | None = None
     # The business number in digits (918920396095), for wa.me links in invites.
     whatsapp_number: str | None = None
+    # Which models: "anthropic" (Claude API) or "bedrock" (models on Amazon Bedrock).
+    llm_provider: str = "anthropic"
+    bedrock_fast_model: str | None = None
+    bedrock_main_model: str | None = None
+    aws_region: str = "us-east-1"
     # Contact address shown on /privacy.
     privacy_email: str | None = None
 
@@ -64,11 +69,20 @@ def load_settings() -> Settings:
     def opt(name: str) -> str | None:
         return os.environ.get(name, "").strip() or None
 
+    provider = (os.environ.get("LLM_PROVIDER", "").strip() or "anthropic").lower()
+    if provider not in ("anthropic", "bedrock"):
+        raise RuntimeError(f"LLM_PROVIDER must be anthropic or bedrock, not {provider!r}")
+
     owner = os.environ.get("OWNER_TELEGRAM_USER_ID", "").strip()
     return Settings(
         database_url=need("DATABASE_URL"),
         telegram_bot_token=need("TELEGRAM_BOT_TOKEN"),
-        anthropic_api_key=need("ANTHROPIC_API_KEY"),
+        anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip() if provider == "bedrock"
+        else need("ANTHROPIC_API_KEY"),
+        llm_provider=provider,
+        bedrock_fast_model=opt("BEDROCK_FAST_MODEL"),
+        bedrock_main_model=opt("BEDROCK_MAIN_MODEL"),
+        aws_region=os.environ.get("AWS_REGION", "").strip() or "us-east-1",
         owner_telegram_user_id=int(owner) if owner.isdigit() else None,
         owner_timezone=os.environ.get("OWNER_TIMEZONE", "UTC").strip() or "UTC",
         voyage_api_key=os.environ.get("VOYAGE_API_KEY", "").strip() or None,

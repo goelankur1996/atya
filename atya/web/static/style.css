@@ -343,3 +343,16 @@ main.prose { gap: 12px; line-height: 1.6; color: var(--text-2); }
 main.prose h2 { margin-top: 20px; }
 main.prose p, main.prose ul { margin: 0; }
 main.prose ul { padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+
+/* Model test report */
+.evalrow { display: block; }
+.evalrow summary { display: flex; gap: 12px; align-items: center; cursor: pointer; list-style: none; }
+.evalrow summary::-webkit-details-marker { display: none; }
+.evalbody { padding: 12px 0 4px; display: flex; flex-direction: column; gap: 10px; font-size: 14px; }
+.evalbody h3 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.evalbody ul { margin: 0; padding-left: 18px; }
+.evalbody p { margin: 0; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 640px) { .cols { grid-template-columns: 1fr; } }
+.pre { white-space: pre-wrap; }
+.pad { padding: 16px; margin: 0; }

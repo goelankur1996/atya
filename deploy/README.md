@@ -51,3 +51,17 @@ Users join with an invite (`/invite` gives a wa.me link) or connect WhatsApp to
 an existing Telegram account with `/link`. WhatsApp only allows free-form
 messages within 24 hours of the user's last message; reminders and briefs
 outside that window are marked failed until message templates are added.
+
+## Trying other models (Amazon Bedrock)
+
+`deploy/enable-bedrock.sh` (once) lets the server call Bedrock models. Then:
+
+```bash
+deploy/run.sh "cd /opt/atya && docker compose exec -T app python -m atya.eval --list"            # model IDs
+deploy/run.sh "cd /opt/atya && docker compose exec -T app python -m atya.eval --ping ID1 ID2"     # quick check
+deploy/run.sh "cd /opt/atya && docker compose exec -T app python -m atya.eval --fast FAST_ID --main MAIN_ID"
+```
+
+The last one replays your recent messages (read-only) and saves a report at
+`/eval` on the web view (owner only). To switch models for real, set
+`LLM_PROVIDER=bedrock`, `BEDROCK_FAST_MODEL` and `BEDROCK_MAIN_MODEL` in SSM and deploy.

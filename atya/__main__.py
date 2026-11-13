@@ -17,7 +17,7 @@ import psycopg
 
 from . import briefs, embeddings, processor, receiver, reminders, sender, web, whatsapp
 from .config import load_settings
-from .llm import ClaudeLLM
+from .llm import BedrockLLM, ClaudeLLM
 from .migrate import migrate
 from .schema import load_schema
 from .store import Store
@@ -67,7 +67,14 @@ def main() -> None:
     store = Store(settings.database_url)
     sync_owner_timezone(store, settings)
     tg = Telegram(settings.telegram_bot_token)
-    llm = ClaudeLLM(settings.anthropic_api_key)
+    if settings.llm_provider == "bedrock":
+        if not (settings.bedrock_fast_model and settings.bedrock_main_model):
+            raise RuntimeError("LLM_PROVIDER=bedrock needs BEDROCK_FAST_MODEL and BEDROCK_MAIN_MODEL")
+        llm = BedrockLLM(fast_model=settings.bedrock_fast_model, main_model=settings.bedrock_main_model,
+                         region=settings.aws_region)
+        log.info("models: Bedrock %s (fast), %s (main)", settings.bedrock_fast_model, settings.bedrock_main_model)
+    else:
+        llm = ClaudeLLM(settings.anthropic_api_key)
     embedder = embeddings.VoyageEmbedder(settings.voyage_api_key) if settings.voyage_api_key else None
     if embedder is None:
         log.warning("VOYAGE_API_KEY not set: embeddings off, search uses full text only")

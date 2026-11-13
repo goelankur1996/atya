@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Model test · ATYA{% endblock %}
+{% macro pct(a, b) %}{{ a }}/{{ b }}{% if b %} ({{ (100 * a / b)|round|int }}%){% endif %}{% endmacro %}
+{% block body %}
+{% set s = r.summary %}
+<section>
+  <p class="crumbs"><a href="{{ url_for('eval_index') }}">Model tests</a></p>
+  <h1>{{ r.main }}</h1>
+  <p class="muted flush">Fast model: {{ r.fast }} · started {{ r.started[:16].replace('T', ' ') }} UTC · {{ r.status }}</p>
+</section>
+{% if s %}
+<section class="cards">
+  <div class="card"><span class="n">{{ pct(s.intent_agree, s.intent_total) }}</span><span class="t">Same intent (log / question / chat)</span></div>
+  <div class="card"><span class="n">{{ pct(s.records_matched, s.records_original) }}</span><span class="t">Original records matched · {{ s.records_extra }} extra</span></div>
+  <div class="card"><span class="n">{{ pct(s.found_agree, s.queries) }}</span><span class="t">Questions: same found / not found</span></div>
+  <div class="card"><span class="n">{{ s.errors }}</span><span class="t">Failures (bad format or errors) of {{ s.messages }}</span></div>
+  <div class="card"><span class="n">{{ s.secs_median }}s</span><span class="t">Median per message · p90 {{ s.secs_p90 }}s</span></div>
+  {% if s.files %}<div class="card"><span class="n">{{ s.kind_agree }}/{{ s.files }}</span><span class="t">PDFs: same kind · {{ s.file_errors }} failed</span></div>{% endif %}
+</section>
+<section>
+  <h2>Intent mix-ups</h2>
+  <div class="chips">
+    {% for k, v in s.confusion.items() if v and k.split('->')[0] != k.split('->')[1] %}<span class="chip">{{ k.replace('->', ' → ') }}: {{ v }}</span>{% else %}<span class="muted">None.</span>{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section>
+  <h2>Messages</h2>
+  <div class="box">
+  {% for i in r['items'] %}
+    <details class="row evalrow">
+      <summary>
+        {% if i.error %}<span class="pill dark">failed</span>
+        {% elif i.intent != i.original_intent %}<span class="pill dark">{{ i.original_intent }} → {{ i.intent }}</span>
+        {% elif i.original_intent == 'log' and (i.match.missed or i.match.extra) %}<span class="pill">differs</span>
+        {% elif i.original_intent == 'query' and i.found != i.original_found %}<span class="pill">differs</span>
+        {% else %}<span class="pill blue">same</span>{% endif %}
+        <span class="grow">{{ i.text[:140] }}</span>
+        <span class="side">{{ i.when }}</span>
+      </summary>
+      <div class="evalbody">
+        <p class="pre">{{ i.text }}</p>
+        {% if i.error %}<p class="muted">{{ i.error }}</p>{% endif %}
+        {% if i.original_intent == 'log' and not i.error %}
+          <div class="cols">
+            <div><h3>Was saved</h3><ul>{% for w in i.original_writes %}<li>{{ w.type }}: {{ w.title }}</li>{% else %}<li class="muted">nothing</li>{% endfor %}</ul></div>
+            <div><h3>{{ r.main }} would save</h3><ul>{% for w in i.writes %}<li>{{ w.type }}: {{ w.title }}</li>{% else %}<li class="muted">nothing</li>{% endfor %}</ul>
+              {% if i.updates %}<p class="muted">and {{ i.updates }} update(s) to existing records</p>{% endif %}</div>
+          </div>
+        {% elif i.original_intent == 'query' and not i.error %}
+          <div class="cols">
+            <div><h3>Was answered</h3><p class="pre">{{ i.original_answer }}</p></div>
+            <div><h3>{{ r.main }}</h3><p class="pre">{{ i.answer }}</p><p class="muted">searched {{ i.search }}</p></div>
+          </div>
+        {% elif i.reply %}<p class="muted">Reply: {{ i.reply }}</p>{% endif %}
+        <p class="muted">{{ i.secs }}s</p>
+      </div>
+    </details>
+  {% endfor %}
+  </div>
+</section>
+
+{% if r.files %}
+<section>
+  <h2>PDFs</h2>
+  <div class="box">
+  {% for f in r.files %}
+    <details class="row evalrow">
+      <summary><span class="pill {{ 'dark' if f.error else 'blue' }}">{{ f.how }}</span><span class="grow">{{ f.filename }}</span><span class="side">{{ f.secs }}s</span></summary>
+      <div class="evalbody cols">
+        <div><h3>Was saved</h3>{% if f.original %}<p><b>{{ f.original.title }}</b> · {{ f.original.kind }}</p><p class="pre">{{ f.original.summary }}</p>{% endif %}</div>
+        <div><h3>{{ r.fast }}</h3>{% if f.error %}<p class="muted">{{ f.error }}</p>{% else %}<p><b>{{ f.candidate.title }}</b> · {{ f.candidate.kind }}</p><p class="pre">{{ f.candidate.summary }}</p>{% endif %}</div>
+      </div>
+    </details>
+  {% endfor %}
+  </div>
+</section>
+{% endif %}
+{% endblock %}

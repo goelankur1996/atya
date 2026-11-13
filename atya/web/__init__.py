@@ -498,6 +498,31 @@ def create_app(store: Store, settings: Settings) -> Flask:
             t.retry_inbox(g.tenant["id"], iid)
         return redirect(url_for("messages", kind=request.form.get("kind") or None))
 
+    # --- model tests (owner only) ---------------------------------------------
+
+    def need_owner():
+        need_login()
+        if not settings.owner_telegram_user_id or g.tenant.get("telegram_user_id") != settings.owner_telegram_user_id:
+            abort(404)
+
+    @app.get("/eval")
+    def eval_index():
+        need_owner()
+        with store.tx(system=True) as t:
+            runs = t.get_state("eval:index") or []
+        return render_template("eval_index.html", runs=runs)
+
+    @app.get("/eval/<run_id>")
+    def eval_report(run_id: str):
+        need_owner()
+        if not re.fullmatch(r"\d{8}-\d{6}", run_id):
+            abort(404)
+        with store.tx(system=True) as t:
+            r = t.get_state(f"eval:{run_id}")
+        if not r:
+            abort(404)
+        return render_template("eval_report.html", r=r)
+
     # --- raw database ----------------------------------------------------------
 
     @app.get("/db")

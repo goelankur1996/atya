@@ -1,7 +1,12 @@
-"""Claude calls: classify, plan the fan-out, plan the search, answer.
+"""Model calls: classify, plan the fan-out, plan the search, answer, read files.
 
 Prompts are ported from v1 (assistant_bot/claude.py) with Notion wording
 replaced. The `LLM` protocol lets tests swap in a fake.
+
+`PromptLLM` holds the prompts and parsing; a transport sends them. Two
+transports: `ClaudeLLM` (Anthropic API) and `BedrockLLM` (any model on Amazon
+Bedrock, through the Converse API). Each uses two models: a fast one
+(classify, broaden, read files) and a main one (plan, answer).
 """
 
 from __future__ import annotations
@@ -9,6 +14,8 @@ from __future__ import annotations
 import base64
 import json
 import re
+import threading
+import time
 from typing import Any, Protocol
 
 from anthropic import Anthropic
@@ -223,21 +230,36 @@ Exactly one JSON object, no prose around it, no markdown fences:
 
 # --- implementation ------------------------------------------------------------
 
-class ClaudeLLM:
-    def __init__(self, api_key: str) -> None:
-        self.client = Anthropic(api_key=api_key)
+class PromptLLM:
+    """The prompts. Subclasses implement _call and _call_pdf."""
+
+    fast_model: str
+    main_model: str
+
+    def __init__(self) -> None:
+        # Per-model usage, for the evaluation report: {model: {"calls", "in", "out", "secs"}}.
+        self.usage: dict[str, dict[str, float]] = {}
+        self._usage_lock = threading.Lock()
+
+    def _note(self, model: str, tokens_in: int, tokens_out: int, secs: float) -> None:
+        with self._usage_lock:
+            self._note_locked(model, tokens_in, tokens_out, secs)
+
+    def _note_locked(self, model: str, tokens_in: int, tokens_out: int, secs: float) -> None:
+        u = self.usage.setdefault(model, {"calls": 0, "in": 0, "out": 0, "secs": 0.0})
+        u["calls"] += 1
+        u["in"] += tokens_in
+        u["out"] += tokens_out
+        u["secs"] += secs
 
     def _call(self, *, model: str, system: str, user: str, max_tokens: int, cache: bool = True) -> str:
-        sys_block: list[dict[str, Any]] = [{"type": "text", "text": system}]
-        if cache:
-            sys_block[0]["cache_control"] = {"type": "ephemeral"}
-        resp = self.client.messages.create(
-            model=model, max_tokens=max_tokens, system=sys_block,
-            messages=[{"role": "user", "content": user}])
-        return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+        raise NotImplementedError
+
+    def _call_pdf(self, *, model: str, system: str, intro: str, pdf: bytes, max_tokens: int) -> str:
+        raise NotImplementedError
 
     def classify(self, text: str) -> dict:
-        raw = self._call(model=CLASSIFIER_MODEL, system=CLASSIFY_SYSTEM,
+        raw = self._call(model=self.fast_model, system=CLASSIFY_SYSTEM,
                          user=text or "(empty)", max_tokens=120, cache=False)
         obj = parse_json(raw)
         intent = str(obj.get("intent", "")).lower().strip()
@@ -258,7 +280,7 @@ class ClaudeLLM:
                                   raw_content=raw_content[:8000])
         if hint:
             user += f"\n\nNote from the owner: {hint}"
-        plan = parse_json(self._call(model=MODEL, system=system, user=user, max_tokens=2048))
+        plan = parse_json(self._call(model=self.main_model, system=system, user=user, max_tokens=2048))
         if not isinstance(plan.get("writes", []), list):
             raise LLMError("plan.writes is not a list")
         plan.setdefault("writes", [])
@@ -271,7 +293,7 @@ class ClaudeLLM:
     def plan_query(self, *, schema: Schema, question: str, now: str) -> dict:
         system = PLAN_SYSTEM.format(types=schema.render_types(), lenses=schema.rules_lenses,
                                     max_types=MAX_TYPES_TO_SEARCH)
-        plan = parse_json(self._call(model=MODEL, system=system,
+        plan = parse_json(self._call(model=self.main_model, system=system,
                                      user=f"Now: {now}\nQuestion: {question}", max_tokens=300))
         types = [t for t in plan.get("types", []) if isinstance(t, str)][:MAX_TYPES_TO_SEARCH]
         return {"types": types, "search": str(plan.get("search", "")),
@@ -281,7 +303,7 @@ class ClaudeLLM:
         """Second attempt when the first keyword search came back thin."""
         user = (f"Question: {question}\nWords already tried: {tried}\n"
                 f"Titles found so far: {'; '.join(found[:10]) if found else '(nothing)'}")
-        obj = parse_json(self._call(model=CLASSIFIER_MODEL, system=BROADEN_SYSTEM, user=user,
+        obj = parse_json(self._call(model=self.fast_model, system=BROADEN_SYSTEM, user=user,
                                     max_tokens=150, cache=False))
         return str(obj.get("search", "")).strip()
 
@@ -293,7 +315,7 @@ class ClaudeLLM:
         if len(data) > 60000:
             data = data[:60000] + " ...[truncated]"
         user = f"Question:\n{question}\n\nRecords:\n{data if records else '(none found)'}"
-        raw = self._call(model=MODEL, system=system, user=user, max_tokens=2048)
+        raw = self._call(model=self.main_model, system=system, user=user, max_tokens=2048)
         return parse_answer(raw, had_records=bool(records))
 
     def read_document(self, *, filename: str, caption: str, text: str | None = None,
@@ -302,21 +324,90 @@ class ClaudeLLM:
         bytes (a scan): the model reads the pages and also transcribes them."""
         intro = f"File name: {filename}\nThe owner's message with it: {caption or '(none)'}\n"
         if text is not None:
-            content: Any = intro + "\nDocument text:\n" + text[:120_000]
-            system, max_tokens = READ_DOCUMENT_SYSTEM, 1500
+            raw = self._call(model=self.fast_model, system=READ_DOCUMENT_SYSTEM,
+                             user=intro + "\nDocument text:\n" + text[:120_000], max_tokens=1500, cache=False)
         else:
             assert pdf is not None
-            content = [
-                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
-                                                "data": base64.b64encode(pdf).decode()}},
-                {"type": "text", "text": intro},
-            ]
-            system, max_tokens = READ_DOCUMENT_SYSTEM + READ_SCAN_EXTRA, 16000
-        resp = self.client.messages.create(
-            model=CLASSIFIER_MODEL, max_tokens=max_tokens, system=system,
-            messages=[{"role": "user", "content": content}])
-        raw = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+            raw = self._call_pdf(model=self.fast_model, system=READ_DOCUMENT_SYSTEM + READ_SCAN_EXTRA,
+                                 intro=intro, pdf=pdf, max_tokens=16000)
         return parse_reading(raw)
+
+
+class ClaudeLLM(PromptLLM):
+    def __init__(self, api_key: str, *, fast_model: str = CLASSIFIER_MODEL, main_model: str = MODEL) -> None:
+        super().__init__()
+        self.client = Anthropic(api_key=api_key)
+        self.fast_model, self.main_model = fast_model, main_model
+
+    def _send(self, *, model: str, system: Any, content: Any, max_tokens: int) -> str:
+        t0 = time.monotonic()
+        resp = self.client.messages.create(model=model, max_tokens=max_tokens, system=system,
+                                           messages=[{"role": "user", "content": content}])
+        u = getattr(resp, "usage", None)
+        self._note(model, getattr(u, "input_tokens", 0) or 0, getattr(u, "output_tokens", 0) or 0,
+                   time.monotonic() - t0)
+        return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+
+    def _call(self, *, model: str, system: str, user: str, max_tokens: int, cache: bool = True) -> str:
+        sys_block: list[dict[str, Any]] = [{"type": "text", "text": system}]
+        if cache:
+            sys_block[0]["cache_control"] = {"type": "ephemeral"}
+        return self._send(model=model, system=sys_block, content=user, max_tokens=max_tokens)
+
+    def _call_pdf(self, *, model: str, system: str, intro: str, pdf: bytes, max_tokens: int) -> str:
+        content = [
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                            "data": base64.b64encode(pdf).decode()}},
+            {"type": "text", "text": intro},
+        ]
+        return self._send(model=model, system=system, content=content, max_tokens=max_tokens)
+
+
+THINK = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
+
+
+class BedrockLLM(PromptLLM):
+    """Any Bedrock model through the Converse API, which is the same for all of
+    them. Credentials come from the server's IAM role."""
+
+    def __init__(self, *, fast_model: str, main_model: str, region: str = "us-east-1",
+                 client: Any = None) -> None:
+        super().__init__()
+        if client is None:
+            import boto3
+            from botocore.config import Config
+            client = boto3.client("bedrock-runtime", region_name=region,
+                                  config=Config(read_timeout=300, retries={"max_attempts": 4, "mode": "adaptive"}))
+        self.client = client
+        self.fast_model, self.main_model = fast_model, main_model
+        self._no_system: set[str] = set()      # models that reject a system prompt
+
+    def _converse(self, *, model: str, system: str, content: list[dict], max_tokens: int) -> str:
+        kwargs: dict[str, Any] = {"modelId": model, "inferenceConfig": {"maxTokens": max_tokens, "temperature": 0.2}}
+        if model in self._no_system:
+            content = [{"text": system + "\n\n---\n\n"}] + content
+        else:
+            kwargs["system"] = [{"text": system}]
+        t0 = time.monotonic()
+        try:
+            resp = self.client.converse(messages=[{"role": "user", "content": content}], **kwargs)
+        except Exception as e:
+            if "system" in str(e).lower() and model not in self._no_system and "ValidationException" in type(e).__name__ + str(e):
+                self._no_system.add(model)
+                return self._converse(model=model, system=system, content=content, max_tokens=max_tokens)
+            raise LLMError(f"{model}: {e}") from e
+        u = resp.get("usage") or {}
+        self._note(model, u.get("inputTokens", 0), u.get("outputTokens", 0), time.monotonic() - t0)
+        parts = (resp.get("output") or {}).get("message", {}).get("content", [])
+        text = "".join(p["text"] for p in parts if isinstance(p, dict) and "text" in p)
+        return THINK.sub("", text).strip()
+
+    def _call(self, *, model: str, system: str, user: str, max_tokens: int, cache: bool = True) -> str:
+        return self._converse(model=model, system=system, content=[{"text": user}], max_tokens=max_tokens)
+
+    def _call_pdf(self, *, model: str, system: str, intro: str, pdf: bytes, max_tokens: int) -> str:
+        doc = {"document": {"format": "pdf", "name": "document", "source": {"bytes": pdf}}}
+        return self._converse(model=model, system=system, content=[doc, {"text": intro}], max_tokens=max_tokens)
 
 
 def parse_reading(raw: str) -> dict:
