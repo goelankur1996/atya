@@ -50,7 +50,7 @@ def ask(client, who):
 def test_homepage_and_signin_pages(store, settings):
     c = web.create_app(store, settings).test_client()
     home = c.get("/").get_data(as_text=True)
-    assert "ATYA is a memory that lives in your chats." in home and 'href="/signin"' in home
+    assert "ATYA is a personal assistant that lives in your chats." in home and 'href="/signin"' in home
     assert 'href="/terms"' in home and 'href="/privacy"' in home and "style=" not in home
     page = c.get("/signin").get_data(as_text=True)
     assert "Send code" in page and 'value="+91"' in page and 'href="/terms"' in page and "style=" not in page

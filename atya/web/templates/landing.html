@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}ATYA · a memory that lives in your chats{% endblock %}
+{% block title %}ATYA · a personal assistant that lives in your chats{% endblock %}
 {% block header %}
 <header class="site">
   <a class="brand" href="{{ url_for('home') }}">atya</a>
@@ -10,13 +10,15 @@
 {% endblock %}
 {% block page %}
 <main class="landing">
-  <p class="statement">ATYA is a memory that lives in your chats. Tell it what's going on, in a message or a voice note, and it keeps track of the rest.</p>
+  <p class="statement">ATYA is a personal assistant that lives in your chats. Tell it what's going on, and it helps you plan, keep track, remember and find things.</p>
 
-  <p class="prose">There's nothing new to learn: you use it on WhatsApp or Telegram, the way you'd message a friend. It files what you say into tasks, people and notes, and answers when you ask.</p>
+  <p class="prose">You talk to it on WhatsApp or Telegram, in a message or a voice note. On the web, you see everything it keeps, and fix or add to it.</p>
 
-  <p class="prose">It can <span class="eg">remember what you promised Rahul</span>, <span class="eg">remind you to call Jim at five</span>, <span class="eg">send you a short brief every morning</span>, <span class="eg">wish your sister on her birthday</span>, or <span class="eg">find a good physio near you</span>.</p>
+  <p class="prose">It can <span class="eg">plan your week around your calendar</span>, <span class="eg">track your workouts or a project</span>, <span class="eg">remember what you promised Rahul</span>, <span class="eg">find that note from March</span>, <span class="eg">wish your sister on her birthday</span>, or <span class="eg">research a good physio near you</span>.</p>
 
-  <p class="prose">Your records are yours alone. See and edit everything on the web, export it any time, or delete it with one command.</p>
+  <p class="prose">Soon you'll teach it your way: how it organises your things, how it researches for you, what it asks you and what it shows you. Then it starts doing things for you, not just keeping track.</p>
+
+  <p class="prose">Your records are yours alone. Export them any time, or delete everything with one command.</p>
 
   <p class="cta">
     <a class="cta-link" href="{{ url_for('signin_page') }}">Log in</a>
