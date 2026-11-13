@@ -657,9 +657,17 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
         if setup is not None and row.get("forced_intent") is None:
             return interview_turn(store, llm, row, tenant, schema, tz, raw, heard, setup)
 
+        with store.tx(row["tenant_id"]) as tx:
+            waiting = tx.get_state(research.pending_key(tenant["id"]))
+            if waiting:
+                tx.set_state(research.pending_key(tenant["id"]), None)
+        if waiting and dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(waiting["asked"]) \
+                < dt.timedelta(hours=research.PENDING_FOR_HOURS) and row.get("forced_intent") is None:
+            return research_turn(store, row, tenant, schema, tz, waiting["request"], heard, researcher, settings,
+                                 llm, answers="" if research.is_skip(raw) else raw, asked_already=True)
         topic = research.explicit(raw) if row.get("forced_intent") is None else None
         if topic:                                     # "research <topic>"
-            return research_turn(store, row, tenant, schema, tz, topic, heard, researcher, settings)
+            return research_turn(store, row, tenant, schema, tz, topic, heard, researcher, settings, llm)
 
         if row.get("forced_intent") == "log":       # the user tapped "Save as task"
             cls = {"intent": "log", "reply": ""}
@@ -667,7 +675,7 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
             cls = llm.classify(raw)
         intent = cls["intent"]
         if intent == "research":
-            return research_turn(store, row, tenant, schema, tz, raw, heard, researcher, settings)
+            return research_turn(store, row, tenant, schema, tz, raw, heard, researcher, settings, llm)
         if intent == "chat":
             with store.tx(row["tenant_id"]) as tx:
                 tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=with_heard(heard, cls["reply"]),
@@ -813,8 +821,10 @@ RESEARCH_ACK = "Looking into it. I'll send what I find in a minute or two."
 
 
 def research_turn(store: Store, row: dict, tenant: dict, schema: Schema, tz, topic: str, heard: str | None,
-                  researcher: research.Researcher | None, settings: Settings) -> str:
-    """Research on the web, reply with the findings and keep them as a report."""
+                  researcher: research.Researcher | None, settings: Settings, llm: LLM | None = None,
+                  answers: str | None = None, asked_already: bool = False) -> str:
+    """Research on the web: ask what's missing first if needed, then search from a few
+    angles, write it up, reply, and keep the full report."""
     tid = tenant["id"]
     reply_to = _reply_target(row["source_message_id"])
 
@@ -835,29 +845,66 @@ def research_turn(store: Store, row: dict, tenant: dict, schema: Schema, tz, top
         if used >= settings.daily_research:
             return done(f"You've used today's {settings.daily_research} research requests. Ask again tomorrow.",
                         "research requested; over the daily research limit")
+    zone, today = tenant.get("timezone") or "UTC", f"{local:%A} {local.day} {local:%B %Y}"
+
+    # 1. Plan: anything to ask first? Which searches?
+    plan = {"ask": [], "queries": [topic], "goal": ""}
+    if llm is not None and hasattr(llm, "research_plan"):
+        try:
+            plan = llm.research_plan(request=topic, answers=answers, allow_questions=not asked_already,
+                                     timezone=zone, today=today)
+        except Exception as e:  # planning is a nicety: search the request as asked
+            log.warning("research plan failed, searching as asked: %s", e)
+    if plan["ask"]:
+        with store.tx(tid) as tx:
+            tx.set_state(research.pending_key(tid), {"request": topic, "questions": plan["ask"],
+                                                     "asked": dt.datetime.now(dt.timezone.utc).isoformat()})
+        return done(research.ask_message(plan["ask"]), "research: asked what's missing first")
+
     if row["attempts"] == 1:                          # it takes a while: say so (once, not on retries)
         with store.tx(tid) as tx:
             tx.add_outbox(tid, chat_id=tenant["telegram_chat_id"], body=with_heard(heard, RESEARCH_ACK),
                           inbox_id=row["id"], reply_to_message_id=reply_to)
         heard = None                                   # already shown
-    found = researcher.research(topic, timezone=tenant.get("timezone") or "UTC",
-                                today=f"{local:%A} {local.day} {local:%B %Y}")
-    text = found.get("text") or ""
-    if not text:
-        return done("I couldn't find anything useful on that. Try wording it differently?",
-                    "research: nothing found")
-    full = research.with_sources(text, found.get("sources", []))
+
+    # 2. Search from each angle, at the same time.
+    request = topic if answers is None else f"{topic}\n(Details they added: {answers or 'none, just search'})"
+    from concurrent.futures import ThreadPoolExecutor
+    def one(q: str) -> dict:
+        try:
+            return {"query": q, **researcher.research(q, timezone=zone, today=today)}
+        except Exception as e:
+            log.warning("research search %r failed: %s", q, e)
+            return {"query": q, "error": str(e)}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(one, plan["queries"]))
+    findings = [f for f in results if f.get("text")]
+    if not findings:
+        if all("error" in f for f in results):
+            raise RuntimeError("every research search failed")   # retried, then the user is told
+        return done("I couldn't find anything useful on that. Try wording it differently?", "research: nothing found")
+
+    # 3. Write it up (or, if that fails, keep the findings as they are).
+    sources = research.merge_sources(findings)
+    written = {"reply": findings[0]["text"], "report": "\n\n".join(f["text"] for f in findings)}
+    if llm is not None and hasattr(llm, "research_write"):
+        try:
+            written = llm.research_write(request=request, goal=plan["goal"], findings=findings)
+        except Exception as e:  # keep the raw findings rather than fail
+            log.warning("research write-up failed, sending the findings: %s", e)
+    full = research.with_sources(written["report"], sources)
     with store.tx(tid) as tx:
         ref = ""
         if "document" in schema.types:
             fields = {"Kind": "report", "Date": local.date().isoformat(), "From": "ATYA web research",
-                      "Summary": text[:600]}
+                      "Summary": written["reply"][:600]}
             rec, _ = tx.create_record(tid, schema, "document", title=f"Research: {topic[:90]}", fields=fields,
-                                      body=full, source_inbox_id=row["id"])
+                                      body=f"Request: {request}\n\n{full}", source_inbox_id=row["id"])
             ref = record_ref(schema, rec)
         tx.add_usage(tid, local.date(), research=1)
-    shown = research.with_sources(text, found.get("sources", [])[:4])
-    return done(shown + (f"\n\nSaved as {ref}." if ref else ""), f"research: {topic[:200]}" + (f"; saved {ref}" if ref else ""))
+    shown = research.with_sources(written["reply"], sources[:4])
+    tail = f"\n\nSaved as {ref}" + (" with the full write-up." if written["report"] != written["reply"] else ".") if ref else ""
+    return done(shown + tail, f"research ({len(findings)} searches): {topic[:200]}" + (f"; saved {ref}" if ref else ""))
 
 
 def process_once(store: Store, llm: LLM, settings: Settings,

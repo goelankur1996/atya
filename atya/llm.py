@@ -42,6 +42,9 @@ class LLM(Protocol):
     def answer(self, *, schema: Schema, question: str, records: list[dict], now: str) -> dict: ...
     def interview_next(self, *, transcript: list[dict], areas: dict[str, str], still_open: list[str],
                        saved: int, target: int) -> dict: ...
+    def research_plan(self, *, request: str, answers: str | None, allow_questions: bool,
+                      timezone: str, today: str) -> dict: ...
+    def research_write(self, *, request: str, goal: str, findings: list[dict]) -> dict: ...
     def read_document(self, *, filename: str, caption: str, text: str | None = None,
                       pdf: bytes | None = None) -> dict: ...
 
@@ -217,6 +220,26 @@ How to ask:
 Reply with JSON only:
 {{"covered": ["<keys of all areas the conversation has now covered or the user said have nothing>"], "question": "<the next question>", "done": <true only if every area is covered and there is nothing useful left to ask>, "suggest": "<one question they could ask the assistant later about their own answers, e.g. What do I owe Rahul?>"}}"""
 
+RESEARCH_PLAN_SYSTEM = """You plan a web research task for one person, who asked for it in a chat app.
+
+First decide whether the request is specific enough to research well. If a good answer depends on things only they know and didn't say (budget, area or city, dates, who it's for, must-haves, what they already tried), ask for them: up to 3 short questions, in one message. Don't ask when a sensible default is obvious (their timezone tells you their country and likely city), or when the request is already specific, or when they've already answered your questions (then plan with what you have; never ask twice).
+
+Then plan the searches: 2 to 4 web search queries that together cover the request from different angles (options, prices, reviews or comparisons, recent changes or rules). Specific queries beat broad ones.
+
+The person's timezone: {timezone}. Today: {today}.
+
+Reply with JSON only:
+{{"ask": ["<question>", ...] or [], "queries": ["<search query>", ...], "goal": "<one line: what a great answer must contain>"}}"""
+
+RESEARCH_WRITE_SYSTEM = """You write up web research for one person, from findings gathered by several searches (each with its sources). Use only what the findings say; when they disagree or something wasn't found, say so plainly. Don't invent prices, names, numbers or links.
+
+Write two things:
+- "reply": for a chat message, under 220 words. Lead with the answer or recommendation. For options, 3 to 5, each in one line with the specifics that matter (price, place, why it fits). End with one line on what to check or do next if useful. Plain text, "- " bullets, no headings, no tables.
+- "report": the fuller write-up to keep, under 700 words: answer, options with details, trade-offs, caveats, and what's uncertain. Plain text, "- " bullets allowed.
+
+Reply with JSON only:
+{{"reply": "...", "report": "..."}}"""
+
 ANSWER_SYSTEM = """You answer questions from the owner of a personal memory system.
 
 You may ONLY use the records provided in the user message. Do not guess, do not invent figures, do not refer to data you weren't shown.
@@ -352,6 +375,33 @@ class PromptLLM:
         covered = [str(c) for c in (obj.get("covered") or []) if str(c) in areas]
         return {"done": bool(obj.get("done")) or not q, "question": q, "covered": covered,
                 "suggest": str(obj.get("suggest") or "").strip()}
+
+    def research_plan(self, *, request: str, answers: str | None, allow_questions: bool,
+                      timezone: str, today: str) -> dict:
+        """Clarifying questions (if needed and allowed) and the searches to run."""
+        user = f"Request: {request}"
+        if answers is not None:
+            user += f"\n\nTheir answers to your questions: {answers or '(they said to just go ahead)'}"
+        if not allow_questions:
+            user += "\n\nDo not ask anything; plan the searches."
+        obj = parse_json(self._call(model=self.main_model,
+                                    system=RESEARCH_PLAN_SYSTEM.format(timezone=timezone, today=today),
+                                    user=user, max_tokens=500, cache=False))
+        ask = [str(q).strip() for q in (obj.get("ask") or []) if str(q).strip()][:3] if allow_questions else []
+        queries = [str(q).strip() for q in (obj.get("queries") or []) if str(q).strip()][:4]
+        return {"ask": ask, "queries": queries or [request], "goal": str(obj.get("goal") or "").strip()}
+
+    def research_write(self, *, request: str, goal: str, findings: list[dict]) -> dict:
+        """Turn the findings of several searches into a chat reply and a report to keep."""
+        body = "\n\n".join(f"Search {i}: {f['query']}\nFindings:\n{f['text']}\nSources: {', '.join(f['sources'][:6]) or '(none)'}"
+                            for i, f in enumerate(findings, 1))
+        obj = parse_json(self._call(model=self.main_model, system=RESEARCH_WRITE_SYSTEM,
+                                    user=f"Request: {request}\nA great answer must: {goal or '(answer it well)'}\n\n{body[:40000]}",
+                                    max_tokens=2500, cache=False))
+        reply = str(obj.get("reply") or "").strip()
+        if not reply:
+            raise LLMError("research write-up came back empty")
+        return {"reply": reply, "report": str(obj.get("report") or reply).strip()}
 
     def read_document(self, *, filename: str, caption: str, text: str | None = None,
                       pdf: bytes | None = None) -> dict:

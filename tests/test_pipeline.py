@@ -121,6 +121,21 @@ class FakeLLM:
             return script.pop(0)
         return {"done": True, "question": "", "suggest": "What's due this week?"}
 
+    def research_plan(self, *, request, answers, allow_questions, timezone, today):
+        self.plan_calls = [*getattr(self, "plan_calls", []), {"request": request, "answers": answers,
+                                                               "allow_questions": allow_questions}]
+        plans = getattr(self, "research_plans", None)
+        if plans:
+            p = dict(plans.pop(0))
+            if not allow_questions:
+                p["ask"] = []
+            return p
+        return {"ask": [], "queries": [request], "goal": ""}
+
+    def research_write(self, *, request, goal, findings):
+        return {"reply": "Written: " + findings[0]["text"],
+                "report": "Report:\n" + "\n".join(f["text"] for f in findings)}
+
     def answer(self, *, schema, question, records, now):
         self.seen_records = records
         found = self.found.get(question, bool(records))

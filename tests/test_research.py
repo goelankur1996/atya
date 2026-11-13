@@ -61,14 +61,14 @@ def test_explicit_research_replies_and_saves_a_report(store, settings, clean):
     assert rs.calls[0][0] == "good physios in Noida" and rs.calls[0][1] == "Asia/Kolkata"
     out = mine(tg)
     assert out[-2] == processor.RESEARCH_ACK
-    assert out[-1].startswith("Try Physio One") and "Sources:\n- https://a.example/physio" in out[-1]
-    assert out[-1].endswith("Saved as DOC-1.")
+    assert out[-1].startswith("Written: Try Physio One") and "Sources:\n- https://a.example/physio" in out[-1]
+    assert out[-1].endswith("Saved as DOC-1 with the full write-up.")
     t = owner_tenant(store)
     with store.tx(t["id"]) as tx:
         doc = tx._one("SELECT * FROM records WHERE type = 'document'")
         inbox = tx._one("SELECT * FROM inbox WHERE raw_content LIKE 'Research:%%'")
     assert doc["title"] == "Research: good physios in Noida" and doc["fields"]["Kind"] == "report"
-    assert "https://b.example/flexi" in doc["body"]
+    assert "https://b.example/flexi" in doc["body"] and doc["body"].startswith("Request: good physios in Noida")
     assert inbox["intent"] == "research" and inbox["status"] == "responded"
 
 
@@ -123,3 +123,74 @@ def test_classifier_accepts_research():
         def converse(self, **kw):
             return {"output": {"message": {"content": [{"text": '{"intent": "research"}'}]}}, "usage": {}}
     assert L.BedrockLLM(fast_model="f", main_model="m", client=C()).classify("find me a physio")["intent"] == "research"
+
+
+def test_asks_first_when_details_are_missing_then_searches_from_several_angles(store, settings, clean):
+    tg, llm, rs = FakeTelegram(), FakeLLM(), FakeResearcher()
+    llm.research_plans = [{"ask": ["What's your budget per night?", "Which dates?"],
+                           "queries": ["budget hotels Goa", "Goa hotels reviews December", "Goa hostels prices"],
+                           "goal": "3 hotels with prices"}] * 2
+    tg.push("/start")
+    tg.push("research hotels in Goa")
+    run(store, tg, llm, settings, rs)
+    out = mine(tg)
+    assert out[-1].startswith("Before I search") and "1. What's your budget per night?" in out[-1]
+    assert rs.calls == []                                     # nothing searched yet, nothing counted
+
+    tg.push("Under 4000 a night, 20 to 23 Dec")
+    run(store, tg, llm, settings, rs)
+    assert sorted(c[0] for c in rs.calls) == ["Goa hostels prices", "Goa hotels reviews December", "budget hotels Goa"]
+    last = llm.plan_calls[-1]
+    assert last["answers"] == "Under 4000 a night, 20 to 23 Dec" and last["allow_questions"] is False
+    assert mine(tg)[-1].startswith("Written: ")
+    t = owner_tenant(store)
+    with store.tx(t["id"]) as tx:
+        doc = tx._one("SELECT * FROM records WHERE type = 'document'")
+        assert tx.get_state(research.pending_key(t["id"])) is None
+    assert "Under 4000 a night" in doc["body"] and doc["body"].count("Try Physio One") == 3
+
+
+def test_just_search_skips_the_questions(store, settings, clean):
+    tg, llm, rs = FakeTelegram(), FakeLLM(), FakeResearcher()
+    llm.research_plans = [{"ask": ["Which city?"], "queries": ["physios"], "goal": ""}] * 2
+    tg.push("/start")
+    tg.push("research physios")
+    run(store, tg, llm, settings, rs)
+    tg.push("just search")
+    run(store, tg, llm, settings, rs)
+    assert len(rs.calls) == 1 and llm.plan_calls[-1]["answers"] == ""
+
+
+def test_all_searches_failing_is_retried_then_reported(store, settings, clean):
+    class Down(FakeResearcher):
+        def research(self, topic, **kw):
+            raise RuntimeError("throttled")
+    tg, llm = FakeTelegram(), FakeLLM()
+    tg.push("/start")
+    tg.push("research flights to Goa")
+    for _ in range(3):
+        run(store, tg, llm, settings, Down())
+        with store.tx(system=True) as tx:
+            tx.conn.execute("UPDATE inbox SET claimed_at = now() - interval '1 hour'")
+    assert mine(tg)[-1] == processor.FAILED_REPLY
+    assert mine(tg).count(processor.RESEARCH_ACK) == 1          # the "looking into it" isn't repeated
+
+
+def test_plan_and_write_prompts():
+    class C:
+        def __init__(self, reply):
+            self.reply, self.kw = reply, None
+
+        def converse(self, **kw):
+            self.kw = kw
+            return {"output": {"message": {"content": [{"text": self.reply}]}}, "usage": {}}
+    c = C('{"ask": ["a?", "b?", "c?", "d?"], "queries": ["q1", "q2", "q3", "q4", "q5"], "goal": "g"}')
+    b = L.BedrockLLM(fast_model="f", main_model="m", client=c)
+    p = b.research_plan(request="hotels", answers=None, allow_questions=True, timezone="Asia/Kolkata", today="x")
+    assert p == {"ask": ["a?", "b?", "c?"], "queries": ["q1", "q2", "q3", "q4"], "goal": "g"}
+    p = b.research_plan(request="hotels", answers="cheap", allow_questions=False, timezone="Asia/Kolkata", today="x")
+    assert p["ask"] == [] and "Do not ask anything" in c.kw["messages"][0]["content"][0]["text"]
+    c.reply = '{"reply": "short", "report": "long"}'
+    w = b.research_write(request="r", goal="g", findings=[{"query": "q", "text": "t", "sources": ["https://s"]}])
+    assert w == {"reply": "short", "report": "long"}
+    assert "Sources: https://s" in c.kw["messages"][0]["content"][0]["text"]

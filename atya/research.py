@@ -18,14 +18,40 @@ log = logging.getLogger("research")
 MODEL = "us.amazon.nova-2-lite-v1:0"      # web grounding needs a US inference profile
 MAX_SOURCES = 6
 
-SYSTEM = """You are a research assistant for one person. Search the web and answer their request with current, specific, checkable information.
+SYSTEM = """You are one step of a research task: search the web for the query and report what you find, so it can be combined with other searches.
 
-- Lead with the answer. Then the specifics: names, prices, dates, addresses, phone numbers or links where they help.
-- When they ask for options, give 3 to 5, each in one or two lines with why it fits.
-- Prefer sources from the last year. Say plainly when something could not be found or sources disagree.
-- Location and dates: the person is in the timezone {timezone}; today is {today}. Use that for "near me", "this weekend", prices and currency, unless they say otherwise.
-- Plain text for a chat app: short paragraphs or "- " bullets, no markdown headings, no tables, under 250 words.
-- Don't list sources in the text; they are added separately."""
+- Report specifics: names, prices, dates, addresses, ratings, phone numbers, rules, numbers, with how recent they are.
+- Prefer sources from the last year. Note when sources disagree or something could not be found.
+- Location and dates: the person is in the timezone {timezone}; today is {today}. Use that for "near me", "this weekend", prices and currency, unless the query says otherwise.
+- Plain text, "- " bullets, under 350 words. Don't list sources in the text; they are collected separately."""
+
+PENDING_FOR_HOURS = 6
+SKIP_WORDS = {"skip", "just search", "go ahead", "no", "none", "doesn't matter", "dont care", "don't care",
+              "anything", "whatever", "just do it", "any"}
+
+
+def pending_key(tenant_id) -> str:
+    return f"research:pending:{tenant_id}"
+
+
+def is_skip(text: str) -> bool:
+    return text.strip().lower().strip(".!? ") in SKIP_WORDS
+
+
+def ask_message(questions: list[str]) -> str:
+    lines = ["Before I search, a couple of quick questions so the results fit:"]
+    lines += [f"{i}. {q}" for i, q in enumerate(questions, 1)] if len(questions) > 1 else [questions[0]]
+    lines.append('Answer in one message (voice is fine), or say "just search".')
+    return "\n".join(lines)
+
+
+def merge_sources(findings: list[dict]) -> list[str]:
+    out: list[str] = []
+    for f in findings:
+        for u in f.get("sources", []):
+            if u not in out:
+                out.append(u)
+    return out
 
 PREFIX = re.compile(r"^\s*(?:/?research|look\s+up|find\s+out)\b[\s:,-]*", re.IGNORECASE)
 
