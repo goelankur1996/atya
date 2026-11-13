@@ -261,3 +261,12 @@ def test_connect_command_link_lands_on_connect_page(store, settings, user):
     off = replace(settings, google_client_id=None)
     ctx.settings = off
     assert commands.handle(ctx, "/connect") == "connect:off"
+
+
+def test_csp_lets_the_connect_form_reach_google(store, settings, user):
+    # Browsers apply form-action to the redirect after a form post: without Google
+    # listed, pressing Connect silently does nothing.
+    app = web.create_app(store, settings)
+    c, _ = sign_in(app, store, settings, user)
+    csp = c.get("/connect").headers["Content-Security-Policy"]
+    assert "form-action 'self' https://accounts.google.com;" in csp

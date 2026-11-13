@@ -148,6 +148,9 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
             tx.add_attachment(tenant["id"], inbox_id=inbox_id, filename=audio["filename"], mime_type=audio["mime"],
                               data=audio["data"], sha256=documents.sha256(audio["data"]), seconds=audio["seconds"])
         tx.note_inbound(tenant["id"], "telegram")
+        uname = (sender.get("username") or "").lower() or None
+        if tenant.get("telegram_username") != uname:          # for signing in on the web by @username
+            tx.conn.execute("UPDATE tenants SET telegram_username = %s WHERE id = %s", (uname, tenant["id"]))
         if tenant["telegram_chat_id"] != chat_id:
             tx.conn.execute("UPDATE tenants SET telegram_chat_id = %s WHERE id = %s",
                             (chat_id, tenant["id"]))

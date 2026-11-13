@@ -53,6 +53,13 @@ TEMPLATES = [
         {"type": "BUTTONS", "buttons": [{"type": "QUICK_REPLY", "text": "Show"}]}]},
 ]
 
+# Web sign-in codes. Authentication templates have fixed wording set by Meta
+# ("<code> is your verification code."), with a copy-code button.
+TEMPLATES.append({"name": "atya_login_code", "category": "AUTHENTICATION", "language": LANG, "components": [
+    {"type": "BODY", "add_security_recommendation": True},
+    {"type": "FOOTER", "code_expiration_minutes": 10},
+    {"type": "BUTTONS", "buttons": [{"type": "OTP", "otp_type": "COPY_CODE", "text": "Copy code"}]}]})
+
 # Not approved (yet) or missing: send the older template instead.
 NOT_USABLE_CODES = {132000, 132001, 132005, 132007, 132012, 132015, 132016}
 
@@ -84,6 +91,13 @@ def brief_ready(to: str, day_label: str) -> dict:
 
 def update_waiting(to: str, count: int) -> dict:
     return payload("atya_update", to, [f"{count} new message{'s' if count != 1 else ''}"], [SHOW])
+
+
+def login_code(to: str, code: str) -> dict:
+    return {"messaging_product": "whatsapp", "recipient_type": "individual", "to": to, "type": "template",
+            "template": {"name": "atya_login_code", "language": {"code": LANG}, "components": [
+                {"type": "body", "parameters": [{"type": "text", "text": code}]},
+                {"type": "button", "sub_type": "url", "index": "0", "parameters": [{"type": "text", "text": code}]}]}}
 
 
 def brief_summary(to: str, day_label: str, due_today: int, overdue: int) -> dict:

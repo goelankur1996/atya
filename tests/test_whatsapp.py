@@ -442,6 +442,8 @@ def test_privacy_page_is_public(store, settings):
 def test_template_definitions():
     from atya import wa_templates as W
     for t in W.TEMPLATES:
+        if t["category"] == "AUTHENTICATION":                   # fixed wording, set by Meta
+            continue
         body = next(c for c in t["components"] if c["type"] == "BODY")["text"]
         assert not body.startswith("{{") and not body.rstrip(".").endswith("}}")   # Meta rejects these
         assert t["category"] == "UTILITY"

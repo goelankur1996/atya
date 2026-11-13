@@ -65,7 +65,7 @@ def page_form(client, path):
 
 def test_signed_out_and_bad_links(app):
     c = app.test_client()
-    assert "Send <code>/web</code>" in c.get("/").get_data(as_text=True)
+    assert "A memory that lives in your chats." in c.get("/").get_data(as_text=True)
     assert c.get("/t/task").status_code == 302
     assert c.post("/login", data={"token": "nope"}).status_code == 400
 

@@ -391,7 +391,9 @@ def send_once(store: Store, wa) -> int:
         seen = t.get("whatsapp_last_inbound")
         wamid, ok, err = None, True, None
         try:
-            if seen is not None and now - seen <= WINDOW:
+            if row.get("kind") == "otp":
+                wamid = send_code(wa, row, inside=seen is not None and now - seen <= WINDOW)
+            elif seen is not None and now - seen <= WINDOW:
                 buttons = [[tuple(b) for b in r] for r in row["buttons"]] if row.get("buttons") else None
                 wamid = wa.send_message(row["chat_id"], row["body"], buttons=buttons, preview=False).get("message_id")
             elif row.get("kind") == "reminder":
@@ -412,6 +414,21 @@ def send_once(store: Store, wa) -> int:
         with store.tx(system=True) as tx:
             tx.finish_outbox(row["id"], ok=ok, error=err, channel_message_id=wamid or None)
     return len(rows)
+
+
+def send_code(wa, row: dict, *, inside: bool) -> str | None:
+    """A web sign-in code: the authentication template (works any time); free text
+    inside the 24-hour window if the template isn't approved yet."""
+    import re
+    m = re.search(r"\b(\d{6})\b", row["body"])
+    if not m:
+        raise WhatsAppError("sign-in message without a code")
+    try:
+        return wa.send_template(wa_templates.login_code(str(row["chat_id"]), m.group(1))).get("message_id")
+    except WhatsAppError as e:
+        if getattr(e, "code", None) not in wa_templates.NOT_USABLE_CODES or not inside:
+            raise
+        return wa.send_message(row["chat_id"], row["body"], preview=False).get("message_id")
 
 
 def send_nudge(store: Store, wa, row: dict, tenant: dict, now: dt.datetime, waiting: int) -> None:

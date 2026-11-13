@@ -12,6 +12,7 @@ its audit entry either both exist or neither does.
 from __future__ import annotations
 
 import datetime as dt
+import hmac
 import uuid
 from contextlib import contextmanager
 from typing import Any, Iterator
@@ -991,6 +992,44 @@ class Tx:
             "VALUES (%s, %s, now() + make_interval(mins => %s))", (token_hash, tenant_id, minutes))
         self.audit(tenant_id, actor="commands", action="create", target_table="login_tokens",
                    target_id=None, summary="web login link sent")
+
+    # --- sign-in codes (system scope) ------------------------------------------
+
+    def find_signin_tenant(self, *, whatsapp: str | None = None, telegram: str | None = None) -> dict | None:
+        if whatsapp:
+            return self._one("SELECT * FROM tenants WHERE whatsapp_phone = %s AND status = 'active'", (whatsapp,))
+        if telegram:
+            return self._one("SELECT * FROM tenants WHERE telegram_username = %s AND status = 'active'",
+                             (telegram.lower(),))
+        return None
+
+    def signin_counts(self, *, tenant_id: uuid.UUID | None, ip: str) -> tuple[int, int]:
+        """Codes requested in the last hour: for this account, and from this address."""
+        row = self._one("SELECT count(*) FILTER (WHERE tenant_id = %s) AS t, count(*) FILTER (WHERE ip = %s) AS i "
+                        "FROM signin_codes WHERE created_at > now() - interval '1 hour'", (tenant_id, ip))
+        return (row["t"], row["i"]) if row else (0, 0)
+
+    def add_signin_code(self, *, tenant_id: uuid.UUID | None, code_hash: str | None, channel: str | None,
+                        ip: str, minutes: int) -> uuid.UUID:
+        row = self._one("INSERT INTO signin_codes (tenant_id, code_hash, channel, ip, expires_at) "
+                        "VALUES (%s, %s, %s, %s, now() + make_interval(mins => %s)) RETURNING id",
+                        (tenant_id, code_hash, channel, ip, minutes))
+        assert row is not None
+        return row["id"]
+
+    def try_signin_code(self, handle: uuid.UUID, code_hash: str, *, max_attempts: int) -> uuid.UUID | None:
+        """Check a code. Each try counts; a used, expired or exhausted handle never matches."""
+        row = self._one("UPDATE signin_codes SET attempts = attempts + 1 WHERE id = %s AND used_at IS NULL "
+                        "AND expires_at > now() AND attempts < %s RETURNING tenant_id, code_hash",
+                        (handle, max_attempts))
+        if not row or row["tenant_id"] is None or not row["code_hash"] \
+                or not hmac.compare_digest(row["code_hash"], code_hash):
+            return None
+        self.conn.execute("UPDATE signin_codes SET used_at = now() WHERE id = %s", (handle,))
+        return row["tenant_id"]
+
+    def purge_signin_codes(self) -> None:
+        self.conn.execute("DELETE FROM signin_codes WHERE created_at < now() - interval '2 days'")
 
     def use_login_token(self, token_hash: str) -> uuid.UUID | None:
         """Consume a one-time token. None if unknown, used or expired."""

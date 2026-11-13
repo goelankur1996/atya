@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Enter code · ATYA{% endblock %}
+{% block page %}
+<div class="center">
+  <h1>Check {{ via or "your chats" }}</h1>
+  <p>If that account exists, a 6-digit code is on its way to you on {{ via or "WhatsApp or Telegram" }}. It works for 10 minutes.</p>
+  {% if error %}<p class="notice">{{ error }}</p>{% endif %}
+  <form action="{{ url_for('signin_code_check') }}" method="post" class="stack">
+    <input type="hidden" name="h" value="{{ handle }}">
+    <input type="hidden" name="via" value="{{ via }}">
+    <label for="code">Code</label>
+    <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}"
+           maxlength="7" required autofocus>
+    <button class="btn primary" type="submit">Sign in</button>
+  </form>
+  <p class="muted small">No code? <a href="{{ url_for('signin_page') }}">Start again</a>, or send <code>/web</code> to the bot.</p>
+</div>
+{% endblock %}

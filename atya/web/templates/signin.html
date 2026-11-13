@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Sign in · ATYA{% endblock %}
+{% block page %}
+<div class="center">
+  <h1>Sign in</h1>
+  <p>Enter the WhatsApp number or Telegram username you use with ATYA. We'll send a 6-digit code there.</p>
+  {% if error %}<p class="notice">{{ error }}</p>{% endif %}
+  <form action="{{ url_for('signin_request') }}" method="post" class="stack">
+    <label for="who">WhatsApp number or Telegram @username</label>
+    <input id="who" name="who" type="text" autocomplete="username" inputmode="text" required
+           placeholder="+91 98xxx xxxxx  or  @yourname" value="{{ who|default('') }}">
+    <button class="btn primary" type="submit">Send code</button>
+  </form>
+  <p class="muted small">Or send <code>/web</code> to the bot for a one-tap sign-in link.</p>
+</div>
+{% endblock %}

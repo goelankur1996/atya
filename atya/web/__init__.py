@@ -102,7 +102,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
     def headers(resp: Response) -> Response:
         resp.headers["Content-Security-Policy"] = (
             "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; media-src 'self'; "
-            "form-action 'self'; connect-src 'self'; "
+            "form-action 'self' https://accounts.google.com; connect-src 'self'; "
             "frame-ancestors 'none'; base-uri 'none'")
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["Referrer-Policy"] = "no-referrer"
@@ -180,7 +180,7 @@ def create_app(store: Store, settings: Settings) -> Flask:
     @app.get("/")
     def home():
         if g.tenant is None:
-            return render_template("signed_out.html")
+            return render_template("landing.html", wa_number=settings.whatsapp_number if settings.whatsapp_on else None)
         tid = g.tenant["id"]
         now = local_now()
         due: list[dict] = []
@@ -239,6 +239,83 @@ def create_app(store: Store, settings: Settings) -> Flask:
         resp.set_cookie(COOKIE, session, max_age=SESSION_DAYS * 86400, httponly=True,
                         secure=secure_cookie, samesite="Lax")
         return resp
+
+    # --- sign in with a code sent to WhatsApp / Telegram ----------------------------
+
+    def client_ip() -> str:
+        # Caddy sets X-Forwarded-For; the last hop is the address Caddy saw.
+        fwd = request.headers.get("X-Forwarded-For", "")
+        return (fwd.split(",")[-1].strip() if fwd else request.remote_addr) or "?"
+
+    def start_session(tenant_id, target: str):
+        session = secrets.token_urlsafe(32)
+        with store.tx(tenant_id) as t:
+            t.create_session(tenant_id, _hash(session), SESSION_DAYS)
+        resp = redirect(target)
+        resp.set_cookie(COOKIE, session, max_age=SESSION_DAYS * 86400, httponly=True,
+                        secure=secure_cookie, samesite="Lax")
+        return resp
+
+    @app.get("/signin")
+    def signin_page():
+        if g.tenant is not None:
+            return redirect(url_for("home"))
+        return render_template("signin.html", error=request.args.get("error"))
+
+    @app.post("/signin")
+    def signin_request():
+        same_origin_only()
+        raw = request.form.get("who", "").strip()
+        kind, ident = parse_signin_identity(raw)
+        if kind is None:
+            return render_template("signin.html", error="Enter your WhatsApp number (with country code) "
+                                                        "or your Telegram @username.", who=raw), 400
+        ip = client_ip()
+        with store.tx(system=True) as t:
+            tenant = t.find_signin_tenant(**{kind: ident})
+            per_account, per_ip = t.signin_counts(tenant_id=tenant["id"] if tenant else None, ip=ip)
+            t.purge_signin_codes()
+            if per_ip >= SIGNIN_PER_IP_HOUR:
+                return render_template("signin.html", error="Too many tries from here. Wait an hour and try again."), 429
+            code = f"{secrets.randbelow(10**6):06d}"
+            send = tenant is not None and per_account < SIGNIN_PER_ACCOUNT_HOUR and (
+                (kind == "whatsapp" and settings.whatsapp_on) or (kind == "telegram" and tenant["telegram_chat_id"]))
+            handle = t.add_signin_code(tenant_id=tenant["id"] if send else None,
+                                       code_hash=_hash(code) if send else None,
+                                       channel=kind, ip=ip, minutes=SIGNIN_CODE_MINUTES)
+        if send:                                   # same page whether or not the account exists
+            body = (f"Your ATYA sign-in code: {code}\n\nIt works for {SIGNIN_CODE_MINUTES} minutes. If you "
+                    f"didn't just try to sign in at {settings.web_base_url or 'the ATYA website'}, ignore this "
+                    "and don't share the code with anyone.")
+            with store.tx(tenant["id"]) as t:
+                if kind == "whatsapp":
+                    t.add_outbox(tenant["id"], chat_id=int(tenant["whatsapp_phone"]), body=body, channel="whatsapp",
+                                 kind="otp", priority="alert", actor="web")
+                else:
+                    t.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=body, channel="telegram",
+                                 kind="otp", priority="alert", actor="web")
+        return redirect(url_for("signin_code", h=str(handle), via=kind))
+
+    @app.get("/signin/code")
+    def signin_code():
+        return render_template("signin_code.html", handle=request.args.get("h", ""),
+                               via="WhatsApp" if request.args.get("via") == "whatsapp" else "Telegram",
+                               error=request.args.get("error"))
+
+    @app.post("/signin/code")
+    def signin_code_check():
+        same_origin_only()
+        try:
+            handle = uuid.UUID(request.form.get("h", ""))
+        except ValueError:
+            return redirect(url_for("signin_page", error="That sign-in expired. Start again."))
+        code = "".join(c for c in request.form.get("code", "") if c.isdigit())
+        with store.tx(system=True) as t:
+            tenant_id = t.try_signin_code(handle, _hash(code), max_attempts=SIGNIN_MAX_TRIES) if len(code) == 6 else None
+        if tenant_id is None:
+            return render_template("signin_code.html", handle=str(handle), via=request.form.get("via", ""),
+                                   error="That code didn't work. Check it, or start again for a new one."), 400
+        return start_session(tenant_id, url_for("home"))
 
     @app.get("/privacy")
     def privacy():
@@ -820,6 +897,26 @@ def create_app(store: Store, settings: Settings) -> Flask:
 
 
 # --- form <-> field values ----------------------------------------------------
+
+SIGNIN_CODE_MINUTES = 10
+SIGNIN_MAX_TRIES = 5
+SIGNIN_PER_ACCOUNT_HOUR = 5
+SIGNIN_PER_IP_HOUR = 20
+
+
+def parse_signin_identity(raw: str) -> tuple[str | None, str | None]:
+    """'+91 97119 66131' -> ('whatsapp', '919711966131'); '@ankur' -> ('telegram', 'ankur')."""
+    t = raw.strip()
+    digits = "".join(c for c in t if c.isdigit())
+    if t and all(c.isdigit() or c in "+-() ." for c in t) and 10 <= len(digits) <= 15:
+        if len(digits) == 10 and digits[0] in "6789" and not t.startswith("+"):
+            digits = "91" + digits                  # an Indian mobile number without the country code
+        return "whatsapp", digits
+    name = t.lstrip("@").strip().lower()
+    if re.fullmatch(r"[a-z][a-z0-9_]{4,31}", name):          # Telegram: starts with a letter, 5-32 chars
+        return "telegram", name
+    return None, None
+
 
 def safe_back(target: str | None) -> str | None:
     """Only same-site relative paths, so a form can't redirect elsewhere."""

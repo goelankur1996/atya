@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}ATYA · a memory that lives in your chats{% endblock %}
+{% block page %}
+<main class="landing">
+  <section class="hero">
+    <h1>A memory that lives in your chats.</h1>
+    <p class="lead">Message ATYA anything: tasks, people, ideas, voice notes, PDFs. Ask it anything later. It reminds you on time, briefs you every morning, and keeps it all private to you.</p>
+    <div class="cta">
+      <a class="btn primary" href="{{ url_for('signin_page') }}">Sign in</a>
+      <span class="muted">Invite-only for now.</span>
+    </div>
+  </section>
+
+  <section class="features">
+    <div class="feature">
+      <h2>Just message it</h2>
+      <p>On WhatsApp or Telegram, the way you'd message yourself. "Send Meera the deck by Friday" becomes a task with a date. A voice note works too.</p>
+    </div>
+    <div class="feature">
+      <h2>Ask it anything later</h2>
+      <p>"What did I promise Rahul?" "When's my call with Meera?" It answers from what you told it, and says so when it doesn't know.</p>
+    </div>
+    <div class="feature">
+      <h2>It reminds you</h2>
+      <p>"Remind me to call Jim at 5" works. Every morning, a short brief of what's due and what's on your calendar. Birthdays don't slip.</p>
+    </div>
+    <div class="feature">
+      <h2>It looks things up</h2>
+      <p>"Research good physios near me." It asks what matters, searches, and keeps what it found with the rest of your notes.</p>
+    </div>
+  </section>
+
+  <section class="how">
+    <h2>Private by design</h2>
+    <p>Your records are yours alone, separated from everyone else's by the database itself. See and edit everything here on the web, export it any time, or delete your account with one command. <a href="{{ url_for('privacy') }}">Privacy policy</a>.</p>
+  </section>
+
+  <footer class="page-foot">
+    <span>ATYA</span>
+    <span><a href="{{ url_for('signin_page') }}">Sign in</a> · <a href="{{ url_for('privacy') }}">Privacy</a></span>
+  </footer>
+</main>
+{% endblock %}
