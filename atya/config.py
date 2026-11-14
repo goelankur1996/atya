@@ -77,6 +77,16 @@ class Settings:
         return bool(self.google_client_id and self.google_client_secret and self.connections_key
                     and self.web_base_url)
 
+    # Wake-up calls from a second Telegram account (owner only). All three set, or it stays off.
+    tg_caller_api_id: str | None = None
+    tg_caller_api_hash: str | None = None
+    tg_caller_session: str | None = None
+
+    @property
+    def tg_caller_on(self) -> bool:
+        return bool(self.tg_caller_api_id and self.tg_caller_api_hash and self.tg_caller_session
+                    and self.owner_telegram_user_id)
+
     # Contact address shown on /privacy.
     privacy_email: str | None = None
 
@@ -132,6 +142,9 @@ def load_settings() -> Settings:
         google_client_id=opt("GOOGLE_CLIENT_ID"),
         google_client_secret=opt("GOOGLE_CLIENT_SECRET"),
         connections_key=opt("CONNECTIONS_KEY"),
+        tg_caller_api_id=opt("TG_CALLER_API_ID"),
+        tg_caller_api_hash=opt("TG_CALLER_API_HASH"),
+        tg_caller_session=opt("TG_CALLER_SESSION"),
         owner_schema=os.environ.get("OWNER_SCHEMA", "ankur").strip() or None,
         daily_messages=num("LIMIT_DAILY_MESSAGES", 150),
         daily_voice_minutes=num("LIMIT_DAILY_VOICE_MINUTES", 30),
