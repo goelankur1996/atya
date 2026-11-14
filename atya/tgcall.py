@@ -106,6 +106,8 @@ class Caller:
         self.listening = False
         self.on_audio = None            # called with each incoming 48 kHz PCM chunk, if set
         self.last_heard = 0.0           # monotonic time of the last incoming audio frame
+        self.frames_in = 0              # incoming audio frames this call (diagnostics)
+        self.frames_out = 0             # outgoing audio frames this call
         self.out = bytearray()          # 48 kHz audio waiting to be played into the call
         self.ended = asyncio.Event()
 
@@ -121,6 +123,7 @@ class Caller:
         @self.calls.on_update(filters.stream_frame(Direction.INCOMING, Device.MICROPHONE))
         async def _heard(_, update: StreamFrames):
             self.last_heard = time.monotonic()
+            self.frames_in += len(update.frames)
             for f in update.frames:
                 if self.listening:
                     self.heard.extend(f.frame)
@@ -255,6 +258,19 @@ async def converse(caller: Caller, sonic, user_id: int, *, greeting: str | None,
         await sonic.say_first(greeting)
     out = caller.out
 
+    def logged(fn):
+        async def wrapper():
+            try:
+                await fn()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("call: %s failed", fn.__name__)
+                caller.ended.set()
+        wrapper.__name__ = fn.__name__
+        return wrapper
+
+    @logged
     async def play():
         from pytgcalls.types import Device
         start, n = time.monotonic(), 0
@@ -262,6 +278,7 @@ async def converse(caller: Caller, sonic, user_id: int, *, greeting: str | None,
             frame = bytes(out[:FRAME_BYTES]) if len(out) >= FRAME_BYTES else bytes(FRAME_BYTES)
             del out[:FRAME_BYTES]
             await caller.calls.send_frame(user_id, Device.MICROPHONE, frame)
+            caller.frames_out += 1
             n += 1
             ahead = start + n * FRAME_MS / 1000 - time.monotonic()
             if ahead > 0:
@@ -269,6 +286,7 @@ async def converse(caller: Caller, sonic, user_id: int, *, greeting: str | None,
             elif ahead < -0.2:                 # fell behind (e.g. a pause): don't rush to catch up
                 start, n = time.monotonic(), 0
 
+    @logged
     async def listen():
         pending = bytearray()
         while not caller.ended.is_set() and not sonic.done.is_set():
@@ -289,13 +307,25 @@ async def converse(caller: Caller, sonic, user_id: int, *, greeting: str | None,
                 log.info("no audio from the call for %ss: treating it as hung up", SILENT_HANGUP_SECONDS)
                 caller.ended.set()
 
-    tasks = [asyncio.create_task(play()), asyncio.create_task(listen()), asyncio.create_task(watchdog())]
+    async def report():
+        while True:
+            await asyncio.sleep(5)
+            log.info("call: sent %d frames, %d bytes waiting; heard %d frames; model: %d events, %.1f s speech%s",
+                     caller.frames_out, len(out), caller.frames_in, sonic.events, sonic.audio_out / 48000,
+                     f", error {sonic.error}" if sonic.error else "")
+
+    caller.frames_in = caller.frames_out = 0
+    tasks = [asyncio.create_task(play()), asyncio.create_task(listen()), asyncio.create_task(watchdog()),
+             asyncio.create_task(report())]
     ended = asyncio.create_task(caller.ended.wait())
     stopped = asyncio.create_task(sonic.done.wait())
     await asyncio.wait([ended, stopped], timeout=max_seconds, return_when=asyncio.FIRST_COMPLETED)
     for t in (*tasks, ended, stopped):
         t.cancel()
     caller.on_audio = None
+    log.info("call over: sent %d frames, heard %d frames; model: %d events, %.1f s speech, transcript %d lines%s",
+             caller.frames_out, caller.frames_in, sonic.events, sonic.audio_out / 48000, len(sonic.transcript),
+             f", error {sonic.error}" if sonic.error else "")
 
 
 async def talk(settings: Settings, *, voice: str | None = None, prompt: str | None = None, greeting: str | None =

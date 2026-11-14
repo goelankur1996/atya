@@ -227,6 +227,7 @@ class Sonic:
                 return
             role = ev["textOutput"].get("role") or self._role or "ASSISTANT"
             if role == "USER" or self._final:
+                log.info("Sonic %s: %s", role.lower(), text[:200])
                 self.transcript.append((role, text))
                 if self.on_text:
                     r = self.on_text(role, text)

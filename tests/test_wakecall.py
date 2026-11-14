@@ -207,3 +207,14 @@ def test_scheduled_call_for_a_friend(store, settings, owner):
 def tx_tenant(store, tid):
     with store.tx(system=True) as tx:
         return tx.tenant(tid)
+
+
+def test_call_runs_in_its_own_process(monkeypatch):
+    import sys
+    script = "import sys; print('hello from the call'); print('RESULT: missed')"
+    real = asyncio.create_subprocess_exec
+
+    async def fake_exec(*args, **kw):
+        return await real(sys.executable, "-c", script, **kw)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    assert asyncio.run(wakecall.call_in_own_process({"telegram_user_id": 1, "id": "abcd"})) == "missed"

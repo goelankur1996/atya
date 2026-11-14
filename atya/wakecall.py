@@ -292,11 +292,36 @@ def tick(store: Store, settings: Settings, call: CallFn, now: dt.datetime | None
     return None
 
 
+async def call_in_own_process(tenant: dict) -> str:
+    """Run one call as `python -m atya.wakecall call <id>`: the calling library and the voice stream get
+    a process of their own (as the terminal test does), and a crash can't touch the other workers."""
+    import sys
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-u", "-m", "atya.wakecall", "call", str(tenant["telegram_user_id"]),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    result = "failed"
+
+    async def relay():
+        nonlocal result
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace").rstrip()
+            if line.startswith("RESULT: "):
+                result = line.split(": ", 1)[1].strip()
+            elif line:
+                log.info("[call] %s", line)
+    try:
+        await asyncio.wait_for(asyncio.gather(relay(), proc.wait()), timeout=MAX_CALL_SECONDS + 180)
+    except asyncio.TimeoutError:
+        proc.kill()
+        log.error("call process for %s took too long; killed", str(tenant["id"])[:4])
+        return "failed"
+    return result
+
+
 def run(store: Store, settings: Settings, llm, embedder) -> None:
     log.info("wake-up calls started")
-
-    async def call(tenant: dict) -> str:
-        return await morning_call(store, settings, llm, embedder, tenant)
+    call = call_in_own_process
 
     while True:
         try:
@@ -306,3 +331,40 @@ def run(store: Store, settings: Settings, llm, embedder) -> None:
         except Exception:
             log.exception("wake-up call tick failed")
         time.sleep(CHECK_SECONDS)
+
+
+def main(argv: list[str]) -> int:
+    """python -m atya.wakecall call [telegram_user_id]: run one morning call now, in the foreground."""
+    import sys
+    from .config import load_settings
+    from .llm import BedrockLLM, ClaudeLLM
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    logging.getLogger("telethon").setLevel(logging.WARNING)
+    if argv[:1] != ["call"]:
+        print(main.__doc__)
+        return 2
+    settings = load_settings()
+    store = Store(settings.database_url)
+    llm = (BedrockLLM(fast_model=settings.bedrock_fast_model, main_model=settings.bedrock_main_model,
+                      region=settings.aws_region) if settings.llm_provider == "bedrock"
+           else ClaudeLLM(settings.anthropic_api_key))
+    from . import embeddings
+    embedder = embeddings.VoyageEmbedder(settings.voyage_api_key) if settings.voyage_api_key else None
+    uid = int(argv[1]) if len(argv) > 1 else settings.owner_telegram_user_id
+    with store.tx(system=True) as tx:
+        tenant = tx.tenant_by_telegram(uid)
+    if tenant is None:
+        print(f"No account for Telegram user {uid}")
+        return 1
+    try:
+        result = asyncio.run(morning_call(store, settings, llm, embedder, tenant))
+    except Exception:
+        logging.getLogger(__name__).exception("call failed")
+        result = "failed"
+    print(f"RESULT: {result}", flush=True)
+    return 0 if result == "answered" else 1
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main(sys.argv[1:]))
