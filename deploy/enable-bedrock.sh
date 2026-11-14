@@ -19,7 +19,7 @@ aws iam put-role-policy --role-name atya-ec2 --policy-name atya-bedrock --policy
   "Statement": [
     {"Effect": "Allow",
      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "bedrock:Converse",
-                "bedrock:ConverseStream", "bedrock:ListFoundationModels", "bedrock:ListInferenceProfiles",
+                "bedrock:ConverseStream", "bedrock:InvokeModelWithBidirectionalStream", "bedrock:ListFoundationModels", "bedrock:ListInferenceProfiles",
                 "bedrock:GetFoundationModel", "bedrock:GetInferenceProfile"],
      "Resource": "*"}
   ]}'

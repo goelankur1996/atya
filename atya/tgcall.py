@@ -9,6 +9,10 @@ Step 1 is a ring test that settles whether live audio flows both ways:
 
 It rings the owner, beeps, listens for 5 seconds, beeps twice, plays back what it
 heard, and hangs up. It prints how much audio it received and how loud it was.
+
+Step 2 is a live conversation with Nova 2 Sonic (hang up to end it):
+
+    docker compose exec -T app python -m atya.tgcall talk
 """
 from __future__ import annotations
 
@@ -61,6 +65,26 @@ def levels(pcm: bytes) -> tuple[float, float]:
     return peak, rms
 
 
+def down_to_16k(pcm48: bytes) -> bytes:
+    """48 kHz -> 16 kHz: average each group of three samples (a cheap low-pass) and keep one."""
+    a = array.array("h")
+    a.frombytes(pcm48[: len(pcm48) // 6 * 6])
+    return array.array("h", ((x + y + z) // 3 for x, y, z in zip(a[0::3], a[1::3], a[2::3]))).tobytes()
+
+
+def up_from_24k(pcm24: bytes) -> bytes:
+    """24 kHz -> 48 kHz: keep each sample and put the midpoint to the next one between them."""
+    a = array.array("h")
+    a.frombytes(pcm24[: len(pcm24) // 2 * 2])
+    if not a:
+        return b""
+    out = array.array("h", bytes(len(a) * 4))
+    out[0::2] = a
+    nxt = a[1:] + array.array("h", [a[-1]])
+    out[1::2] = array.array("h", ((x + y) // 2 for x, y in zip(a, nxt)))
+    return out.tobytes()
+
+
 class Caller:
     """One logged-in second account that can ring the owner and stream audio both ways."""
 
@@ -79,6 +103,7 @@ class Caller:
         self.calls = PyTgCalls(self.client)
         self.heard = bytearray()
         self.listening = False
+        self.on_audio = None            # called with each incoming 48 kHz PCM chunk, if set
         self.ended = asyncio.Event()
 
     async def start(self) -> None:
@@ -92,9 +117,11 @@ class Caller:
 
         @self.calls.on_update(filters.stream_frame(Direction.INCOMING, Device.MICROPHONE))
         async def _heard(_, update: StreamFrames):
-            if self.listening:
-                for f in update.frames:
+            for f in update.frames:
+                if self.listening:
                     self.heard.extend(f.frame)
+                if self.on_audio:
+                    self.on_audio(f.frame)
 
         @self.calls.on_update(filters.chat_update(ChatUpdate.Status.LEFT_CALL))
         async def _ended(_, update):
@@ -103,7 +130,7 @@ class Caller:
 
         await self.calls.start()
 
-    async def ring(self, user_id: int, timeout: int = 45) -> None:
+    async def ring(self, user_id: int, timeout: int = 60) -> None:
         """Returns once the call is answered; raises if declined or not answered."""
         from pytgcalls.types import CallConfig, ExternalMedia, MediaStream, RecordStream
         from pytgcalls.types.raw import AudioParameters
@@ -178,13 +205,93 @@ async def ring_test(settings: Settings) -> int:
         await caller.stop()
 
 
+TALK_PROMPT = (
+    "You are ATYA, Ankur's personal assistant, on a phone call with him. This is a test of the call. "
+    "Speak naturally and warmly, in one or two short sentences per turn. He may speak English, Hindi or a mix; "
+    "answer in the language he uses. If he says goodbye, say a short goodbye."
+)
+MAX_CALL_SECONDS = 5 * 60
+
+
+async def talk(settings: Settings, *, prompt: str = TALK_PROMPT, greeting: str | None =
+               "The call just connected. Greet Ankur in one short sentence and ask how he's doing.") -> list:
+    """Ring the owner and hold a live conversation with Nova 2 Sonic until someone hangs up."""
+    from .sonic import Sonic
+
+    user_id = settings.owner_telegram_user_id
+    caller = Caller(settings)
+    await caller.start()
+    out = bytearray()                       # 48 kHz audio waiting to be played
+    inq: asyncio.Queue[bytes] = asyncio.Queue()
+    sonic = Sonic(system_prompt=prompt, voice=settings.tg_call_voice, region=settings.aws_region,
+                  on_audio=lambda pcm: out.extend(up_from_24k(pcm)),
+                  on_interrupt=out.clear,
+                  on_text=lambda role, text: print(f"{'Ankur' if role == 'USER' else 'ATYA'}: {text}", flush=True))
+    try:
+        print(f"Ringing {user_id}...", flush=True)
+        try:
+            await caller.ring(user_id)
+        except Exception as e:
+            print(f"Call not answered or failed: {type(e).__name__}: {e}")
+            return []
+        await sonic.open()
+        caller.on_audio = inq.put_nowait
+        if greeting:
+            await sonic.say_first(greeting)
+        print("Connected. Talk; hang up to end.", flush=True)
+
+        async def play():
+            from pytgcalls.types import Device
+            start, n = time.monotonic(), 0
+            while not caller.ended.is_set() and not sonic.done.is_set():
+                frame = bytes(out[:FRAME_BYTES]) if len(out) >= FRAME_BYTES else bytes(FRAME_BYTES)
+                del out[:FRAME_BYTES]
+                await caller.calls.send_frame(user_id, Device.MICROPHONE, frame)
+                n += 1
+                ahead = start + n * FRAME_MS / 1000 - time.monotonic()
+                if ahead > 0:
+                    await asyncio.sleep(ahead)
+                elif ahead < -0.2:                 # fell behind (e.g. a pause): don't rush to catch up
+                    start, n = time.monotonic(), 0
+
+        async def listen():
+            pending = bytearray()
+            while not caller.ended.is_set() and not sonic.done.is_set():
+                try:
+                    pending.extend(await asyncio.wait_for(inq.get(), timeout=0.5))
+                except asyncio.TimeoutError:
+                    continue
+                if len(pending) >= 3072 * 3:          # ~32 ms of audio per event
+                    await sonic.send_audio(down_to_16k(bytes(pending)))
+                    pending.clear()
+
+        tasks = [asyncio.create_task(play()), asyncio.create_task(listen())]
+        ended = asyncio.create_task(caller.ended.wait())
+        stopped = asyncio.create_task(sonic.done.wait())
+        await asyncio.wait([ended, stopped], timeout=MAX_CALL_SECONDS, return_when=asyncio.FIRST_COMPLETED)
+        if sonic.error:
+            print(f"Voice model error: {sonic.error}")
+        for t in (*tasks, ended, stopped):
+            t.cancel()
+        caller.on_audio = None
+        await sonic.close()
+        await caller.hang_up(user_id)
+        return sonic.transcript
+    finally:
+        await caller.stop()
+
+
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("telethon").setLevel(logging.WARNING)
-    if argv[:1] != ["test"]:
-        print(__doc__)
-        return 2
-    return asyncio.run(ring_test(load_settings()))
+    if argv[:1] == ["test"]:
+        return asyncio.run(ring_test(load_settings()))
+    if argv[:1] == ["talk"]:
+        transcript = asyncio.run(talk(load_settings()))
+        print(f"\nCall over: {sum(1 for r, _ in transcript if r == 'USER')} things heard from you.")
+        return 0 if transcript else 1
+    print(__doc__)
+    return 2
 
 
 if __name__ == "__main__":

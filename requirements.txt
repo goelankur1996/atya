@@ -11,3 +11,4 @@ boto3>=1.35
 cryptography>=42
 telethon==1.45.0
 py-tgcalls==3.0.0
+aws-sdk-bedrock-runtime[awscrt]==0.12.0

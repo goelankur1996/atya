@@ -81,6 +81,7 @@ class Settings:
     tg_caller_api_id: str | None = None
     tg_caller_api_hash: str | None = None
     tg_caller_session: str | None = None
+    tg_call_voice: str = "matthew"          # Nova 2 Sonic voice id
 
     @property
     def tg_caller_on(self) -> bool:
@@ -145,6 +146,7 @@ def load_settings() -> Settings:
         tg_caller_api_id=opt("TG_CALLER_API_ID"),
         tg_caller_api_hash=opt("TG_CALLER_API_HASH"),
         tg_caller_session=opt("TG_CALLER_SESSION"),
+        tg_call_voice=os.environ.get("TG_CALL_VOICE", "").strip().lower() or "matthew",
         owner_schema=os.environ.get("OWNER_SCHEMA", "ankur").strip() or None,
         daily_messages=num("LIMIT_DAILY_MESSAGES", 150),
         daily_voice_minutes=num("LIMIT_DAILY_VOICE_MINUTES", 30),
