@@ -211,8 +211,9 @@ async def ring_test(settings: Settings) -> int:
 TALK_PROMPT = (
     "You are ATYA, Ankur's personal assistant, on a phone call with him. This is a test of the call. "
     "Speak naturally and calmly, like a capable assistant, not overly cheerful, in one or two short sentences "
-    "per turn. Speak English by default. Switch to Hindi only while he is speaking Hindi, and back to English "
-    "when he does. {gender} If he says goodbye, say a short goodbye."
+    "per turn. Always speak English. Only if he speaks to you in Hindi in two or more turns in a row, switch to "
+    "Hindi; switch back to English as soon as he speaks English again. A single Hindi word or phrase is not a "
+    "reason to switch. {gender} If he says goodbye, say a short goodbye."
 )
 FEMALE_VOICES = {"tiffany", "amy", "kiara", "lupe", "carolina", "ambre", "beatrice", "tina", "olivia"}
 
