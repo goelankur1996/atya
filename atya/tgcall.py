@@ -12,6 +12,7 @@ heard, and hangs up. It prints how much audio it received and how loud it was.
 
 Step 2 is a live conversation with Nova 2 Sonic (hang up to end it):
 
+    docker compose exec -T app python -m atya.tgcall check   # the voice model alone, no call
     docker compose exec -T app python -m atya.tgcall talk
 """
 from __future__ import annotations
@@ -104,6 +105,7 @@ class Caller:
         self.heard = bytearray()
         self.listening = False
         self.on_audio = None            # called with each incoming 48 kHz PCM chunk, if set
+        self.last_heard = 0.0           # monotonic time of the last incoming audio frame
         self.ended = asyncio.Event()
 
     async def start(self) -> None:
@@ -117,6 +119,7 @@ class Caller:
 
         @self.calls.on_update(filters.stream_frame(Direction.INCOMING, Device.MICROPHONE))
         async def _heard(_, update: StreamFrames):
+            self.last_heard = time.monotonic()
             for f in update.frames:
                 if self.listening:
                     self.heard.extend(f.frame)
@@ -211,6 +214,7 @@ TALK_PROMPT = (
     "answer in the language he uses. If he says goodbye, say a short goodbye."
 )
 MAX_CALL_SECONDS = 5 * 60
+SILENT_HANGUP_SECONDS = 10
 
 
 async def talk(settings: Settings, *, prompt: str = TALK_PROMPT, greeting: str | None =
@@ -234,7 +238,12 @@ async def talk(settings: Settings, *, prompt: str = TALK_PROMPT, greeting: str |
         except Exception as e:
             print(f"Call not answered or failed: {type(e).__name__}: {e}")
             return []
-        await sonic.open()
+        try:
+            await sonic.open()
+        except Exception as e:
+            print(f"Couldn't reach the voice model: {type(e).__name__}: {e}", flush=True)
+            await caller.hang_up(user_id)
+            return []
         caller.on_audio = inq.put_nowait
         if greeting:
             await sonic.say_first(greeting)
@@ -265,12 +274,22 @@ async def talk(settings: Settings, *, prompt: str = TALK_PROMPT, greeting: str |
                     await sonic.send_audio(down_to_16k(bytes(pending)))
                     pending.clear()
 
-        tasks = [asyncio.create_task(play()), asyncio.create_task(listen())]
+        async def watchdog():
+            # Telegram doesn't always tell us the other side hung up; their audio stopping does.
+            caller.last_heard = time.monotonic()
+            while not caller.ended.is_set():
+                await asyncio.sleep(1)
+                if time.monotonic() - caller.last_heard > SILENT_HANGUP_SECONDS:
+                    log.info("no audio from the call for %ss: treating it as hung up", SILENT_HANGUP_SECONDS)
+                    caller.ended.set()
+
+        tasks = [asyncio.create_task(play()), asyncio.create_task(listen()), asyncio.create_task(watchdog())]
         ended = asyncio.create_task(caller.ended.wait())
         stopped = asyncio.create_task(sonic.done.wait())
         await asyncio.wait([ended, stopped], timeout=MAX_CALL_SECONDS, return_when=asyncio.FIRST_COMPLETED)
         if sonic.error:
             print(f"Voice model error: {sonic.error}")
+        print(f"Model sent {sonic.events} events, {sonic.audio_out / 2 / 24000:.1f} s of speech.", flush=True)
         for t in (*tasks, ended, stopped):
             t.cancel()
         caller.on_audio = None
@@ -281,11 +300,36 @@ async def talk(settings: Settings, *, prompt: str = TALK_PROMPT, greeting: str |
         await caller.stop()
 
 
+async def sonic_check(settings: Settings) -> int:
+    """Talk to the voice model without a call: ask it to say hello and report what came back."""
+    from .sonic import Sonic
+
+    s = Sonic(system_prompt="You are a friendly assistant. Answer in one short sentence.",
+              voice=settings.tg_call_voice, region=settings.aws_region,
+              on_text=lambda role, text: print(f"{role}: {text}", flush=True))
+    try:
+        await s.open()
+    except Exception as e:
+        print(f"FAILED to open the voice model: {type(e).__name__}: {e}")
+        return 1
+    await s.say_first("Say hello and tell me today's weekday is a good day.")
+    for _ in range(40):                                   # up to 20 s, feeding silence like a quiet line
+        await s.send_audio(bytes(16000 * 2 // 2))         # 0.5 s of silence at 16 kHz
+        await asyncio.sleep(0.5)
+        if s.done.is_set() or (s.audio_out and any(r == "ASSISTANT" for r, _ in s.transcript)):
+            break
+    await s.close()
+    print(f"events: {s.events}, speech: {s.audio_out / 2 / 24000:.1f} s, error: {s.error or 'none'}")
+    return 0 if s.audio_out else 1
+
+
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("telethon").setLevel(logging.WARNING)
     if argv[:1] == ["test"]:
         return asyncio.run(ring_test(load_settings()))
+    if argv[:1] == ["check"]:
+        return asyncio.run(sonic_check(load_settings()))
     if argv[:1] == ["talk"]:
         transcript = asyncio.run(talk(load_settings()))
         print(f"\nCall over: {sum(1 for r, _ in transcript if r == 'USER')} things heard from you.")

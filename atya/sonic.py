@@ -54,6 +54,8 @@ class Sonic:
         self._role: str | None = None
         self._final = True
         self._closing = False
+        self.audio_out = 0              # bytes of speech received from the model
+        self.events = 0
 
     async def open(self) -> None:
         from aws_sdk_bedrock_runtime.client import AsyncBedrockRuntimeClient
@@ -61,10 +63,13 @@ class Sonic:
         from aws_sdk_bedrock_runtime.models import InvokeModelWithBidirectionalStreamOperationInput
         from smithy_http.aio.crt import AWSCRTHTTPClient
 
-        config = await AsyncBedrockRuntimeConfig.resolve(region=self.region, transport=AWSCRTHTTPClient())
+        log.info("Sonic: connecting to %s in %s", MODEL, self.region)
+        config = await asyncio.wait_for(
+            AsyncBedrockRuntimeConfig.resolve(region=self.region, transport=AWSCRTHTTPClient()), timeout=15)
         self._client = AsyncBedrockRuntimeClient(config=config)
-        self._stream = await self._client.invoke_model_with_bidirectional_stream(
-            InvokeModelWithBidirectionalStreamOperationInput(model_id=MODEL))
+        self._stream = await asyncio.wait_for(self._client.invoke_model_with_bidirectional_stream(
+            InvokeModelWithBidirectionalStreamOperationInput(model_id=MODEL)), timeout=15)
+        log.info("Sonic: stream open")
         system = str(uuid.uuid4())
         for e in (
             _event("sessionStart", {"inferenceConfiguration": {"maxTokens": 1024, "topP": 0.9, "temperature": 0.7}}),
@@ -111,7 +116,7 @@ class Sonic:
             await self._send(_event("contentEnd", {"promptName": self.prompt, "contentName": self.audio_content}))
             await self._send(_event("promptEnd", {"promptName": self.prompt}))
             await self._send(_event("sessionEnd", {}))
-            await self._stream.input_stream.close()
+            await asyncio.wait_for(self._stream.input_stream.close(), timeout=5)
         except Exception:
             log.debug("closing the Sonic stream failed", exc_info=True)
         if self._reader:
@@ -140,6 +145,7 @@ class Sonic:
                     break
                 if not item.value.bytes_:
                     continue
+                self.events += 1
                 await self._handle(json.loads(item.value.bytes_.decode()).get("event", {}))
                 if self.done.is_set():
                     break
@@ -174,7 +180,9 @@ class Sonic:
                     if asyncio.iscoroutine(r):
                         await r
         elif "audioOutput" in ev:
+            pcm = base64.b64decode(ev["audioOutput"]["content"])
+            self.audio_out += len(pcm)
             if self.on_audio:
-                self.on_audio(base64.b64decode(ev["audioOutput"]["content"]))
+                self.on_audio(pcm)
         elif "completionEnd" in ev:
             log.info("Sonic: completion ended (%s)", ev["completionEnd"].get("stopReason"))
