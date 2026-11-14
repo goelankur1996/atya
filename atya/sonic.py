@@ -28,6 +28,21 @@ IN_RATE = 16_000
 OUT_RATE = 24_000
 
 
+def _role_credentials():
+    """The server's IAM-role credentials, as boto3 finds them (this SDK's own lookup
+    doesn't see them inside Docker). Fresh for each session; calls are short."""
+    import boto3
+    from smithy_aws_core.identity import AWSCredentialsIdentity
+    from smithy_aws_core.identity.static import StaticCredentialsResolver
+
+    creds = boto3.Session().get_credentials()
+    if creds is None:
+        raise RuntimeError("No AWS credentials found for the voice model")
+    c = creds.get_frozen_credentials()
+    return StaticCredentialsResolver(AWSCredentialsIdentity(
+        access_key_id=c.access_key, secret_access_key=c.secret_key, session_token=c.token))
+
+
 def _event(name: str, body: dict) -> str:
     return json.dumps({"event": {name: body}})
 
@@ -65,7 +80,8 @@ class Sonic:
 
         log.info("Sonic: connecting to %s in %s", MODEL, self.region)
         config = await asyncio.wait_for(
-            AsyncBedrockRuntimeConfig.resolve(region=self.region, transport=AWSCRTHTTPClient()), timeout=15)
+            AsyncBedrockRuntimeConfig.resolve(region=self.region, transport=AWSCRTHTTPClient(),
+                                              aws_credentials_identity_resolver=_role_credentials()), timeout=15)
         self._client = AsyncBedrockRuntimeClient(config=config)
         self._stream = await asyncio.wait_for(self._client.invoke_model_with_bidirectional_stream(
             InvokeModelWithBidirectionalStreamOperationInput(model_id=MODEL)), timeout=15)
