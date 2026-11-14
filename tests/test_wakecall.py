@@ -27,6 +27,10 @@ def owner(store, settings):
             tx.delete_tenant(old["id"])
         tx.conn.execute("DELETE FROM service_state WHERE key LIKE 'wakecall:%%'")
         tx.set_state(receiver.OFFSET_KEY, None)
+        for u in (FRIEND, FRIEND2):
+            f = tx.tenant_by_telegram(u)
+            if f:
+                tx.delete_tenant(f["id"])
     tg = FakeTelegram()
     tg.push("/start")
     run_all(store, tg, FakeLLM(), settings)
@@ -36,6 +40,17 @@ def owner(store, settings):
     yield owner_tenant(store)
     with store.tx(system=True) as tx:
         tx.conn.execute("DELETE FROM service_state WHERE key LIKE 'wakecall:%%'")
+
+
+FRIEND, FRIEND2 = 777_000_501, 777_000_502
+
+
+def friend(store, uid, name="Meera", username="meera_k"):
+    with store.tx(system=True) as tx:
+        t = tx.create_tenant(telegram_user_id=uid, telegram_chat_id=uid, display_name=name, timezone="Asia/Kolkata")
+        tx.set_tenant_status(t["id"], "active", actor="test")
+        tx.conn.execute("UPDATE tenants SET telegram_username = %s WHERE id = %s", (username, t["id"]))
+        return tx.tenant(t["id"])
 
 
 def ist(h, m=0, day=16):
@@ -63,7 +78,7 @@ def test_off_by_default_and_on_request(store, settings, owner):
     phone = Phone("answered")
     assert wakecall.tick(store, settings, phone, now=ist(6, 1)) is None
     with store.tx(system=True) as tx:
-        tx.set_state(wakecall.NOW_KEY, "x")
+        tx.set_state(wakecall.now_key(owner["id"]), "x")
     assert wakecall.tick(store, settings, phone, now=ist(14)) == "on-request:answered"
     assert wakecall.tick(store, settings, phone, now=ist(14)) is None and phone.calls == 1
 
@@ -93,7 +108,7 @@ def test_commands(store, settings, owner):
     run_all(store, tg, FakeLLM(), settings)
     assert owner_tenant(store)["wakecall_time"] == dt.time(6, 30), tg.sent
     with store.tx(system=True) as tx:
-        assert tx.get_state(wakecall.NOW_KEY)
+        assert tx.get_state(wakecall.now_key(owner["id"]))
     tg.push("/wakecall off")
     run_all(store, tg, FakeLLM(), settings)
     assert owner_tenant(store)["wakecall_time"] is None
@@ -113,7 +128,7 @@ def test_transcript_is_filed_and_summarised(store, settings, owner):
     while processor.process_once(store, llm, settings):
         pass
     assert llm.last_hint == processor.CALL_HINT
-    assert "From this morning's call, saved:" in outbox(store, owner["id"])[-1]
+    assert "From our call, saved:" in outbox(store, owner["id"])[-1]
     assert "Call Rahul about the audit" in outbox(store, owner["id"])[-1]
 
 
@@ -140,3 +155,55 @@ def test_sonic_runs_tools_and_returns_results():
     assert sent[0]["contentStart"]["toolResultInputConfiguration"]["toolUseId"] == "t1"
     assert "two meetings" in json.loads(sent[1]["toolResult"]["content"])["result"]
     assert s.tool_calls[0][0] == "lookup"
+
+
+def test_others_opt_in_within_the_beta_cap(store, settings, owner):
+    from atya import commands
+    from dataclasses import replace
+    small = replace(settings, call_beta_users=1)
+    meera, ravi = friend(store, FRIEND), friend(store, FRIEND2, "Ravi", None)
+    with store.tx(system=True) as tx:
+        tx.set_state(wakecall.CALLER_KEY, {"username": "atya_caller", "name": "ATYA"})
+
+    def say(tenant, text):
+        tg = FakeTelegram()
+        ctx = commands.Ctx(store=store, tg=tg, settings=small, tenant=tenant, channel="telegram",
+                           user_id=tenant["telegram_user_id"], chat_id=tenant["telegram_chat_id"],
+                           name=tenant["display_name"])
+        return commands.handle(ctx, text), [t for _, t, _ in tg.sent]
+
+    out, r = say(meera, "/callme")
+    assert out == "wakecall:intro" and "@atya_caller" in r[0] and "/wakecall agree" in r[0]
+    assert say(meera, "/wakecall agree")[0] == "wakecall:agreed"
+    assert say(ravi, "/wakecall agree")[0] == "wakecall:full"               # cap of 1 (the owner doesn't count)
+    meera = tx_tenant(store, meera["id"])
+    assert say(meera, "/wakecall 7:15")[0] == "wakecall:set"
+    assert say(meera, "/callme")[0] == "wakecall:now"
+    with store.tx(system=True) as tx:
+        tx.set_state(wakecall.now_key(owner["id"]), None)
+    phone = Phone("unreachable")
+    assert wakecall.tick(store, small, phone, now=ist(14)) == "on-request:unreachable"
+    assert "@atya_caller" in outbox(store, meera["id"])[-1]
+
+
+def test_daily_call_minutes(store, settings, owner):
+    meera = friend(store, FRIEND)
+    assert wakecall.seconds_left(store, settings, meera) == wakecall.MAX_CALL_SECONDS
+    wakecall.record_call(store, meera, settings.daily_call_minutes * 60 - 30)
+    assert wakecall.seconds_left(store, settings, meera) == 30
+    wakecall.record_call(store, owner, 10_000)
+    assert wakecall.seconds_left(store, settings, owner) == wakecall.MAX_CALL_SECONDS     # owner exempt
+
+
+def test_scheduled_call_for_a_friend(store, settings, owner):
+    meera = friend(store, FRIEND)
+    with store.tx(meera["id"]) as tx:
+        tx.set_wakecall(meera["id"], dt.time(7, 0))
+    phone = Phone("answered")
+    assert wakecall.tick(store, settings, phone, now=ist(7, 1)) == "answered:1"
+    assert wakecall.tick(store, settings, phone, now=ist(7, 2)) is None
+
+
+def tx_tenant(store, tid):
+    with store.tx(system=True) as tx:
+        return tx.tenant(tid)

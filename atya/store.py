@@ -919,22 +919,24 @@ class Tx:
     def usage_on(self, tenant_id: uuid.UUID, day: dt.date) -> dict:
         row = self._one("SELECT * FROM usage_daily WHERE tenant_id = %s AND day = %s", (tenant_id, day))
         return row or {"messages": 0, "voice_seconds": 0, "pdf_pages": 0, "tokens_in": 0, "tokens_out": 0,
-                       "held": 0, "research": 0, "told_at": None}
+                       "held": 0, "research": 0, "call_seconds": 0, "told_at": None}
 
     def add_usage(self, tenant_id: uuid.UUID, day: dt.date, *, messages: int = 0, voice_seconds: int = 0,
                   pdf_pages: int = 0, tokens_in: int = 0, tokens_out: int = 0, held: int = 0,
-                  research: int = 0) -> None:
+                  research: int = 0, call_seconds: int = 0) -> None:
         self.conn.execute(
             "INSERT INTO usage_daily (tenant_id, day, messages, voice_seconds, pdf_pages, tokens_in, tokens_out, held, "
-            "research) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (tenant_id, day) DO UPDATE SET "
+            "research, call_seconds) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (tenant_id, day) DO UPDATE SET "
             "research = usage_daily.research + EXCLUDED.research, "
+            "call_seconds = usage_daily.call_seconds + EXCLUDED.call_seconds, "
             "messages = usage_daily.messages + EXCLUDED.messages, "
             "voice_seconds = usage_daily.voice_seconds + EXCLUDED.voice_seconds, "
             "pdf_pages = usage_daily.pdf_pages + EXCLUDED.pdf_pages, "
             "tokens_in = usage_daily.tokens_in + EXCLUDED.tokens_in, "
             "tokens_out = usage_daily.tokens_out + EXCLUDED.tokens_out, "
             "held = usage_daily.held + EXCLUDED.held",
-            (tenant_id, day, messages, voice_seconds, pdf_pages, tokens_in, tokens_out, held, research))
+            (tenant_id, day, messages, voice_seconds, pdf_pages, tokens_in, tokens_out, held, research, call_seconds))
 
     def mark_told(self, tenant_id: uuid.UUID, day: dt.date) -> bool:
         """Note that the user was told about a limit today. False if already told."""
@@ -1032,6 +1034,25 @@ class Tx:
         self.conn.execute("UPDATE tenants SET wakecall_time = %s WHERE id = %s", (at, tenant_id))
         self.audit(tenant_id, actor="commands", action="update", target_table="tenants", target_id=tenant_id,
                    summary=f"wake-up call {'at ' + at.strftime('%H:%M') if at else 'off'}")
+
+    def set_wakecall_consent(self, tenant_id: uuid.UUID) -> None:
+        self.conn.execute("UPDATE tenants SET wakecall_consent_at = now() WHERE id = %s", (tenant_id,))
+        self.audit(tenant_id, actor="commands", action="update", target_table="tenants", target_id=tenant_id,
+                   summary="agreed to wake-up calls (beta)")
+
+    def wakecall_tenants(self) -> list[dict]:
+        """Active accounts on Telegram with a morning call time set (system scope)."""
+        return self._all("SELECT * FROM tenants WHERE status = 'active' AND wakecall_time IS NOT NULL "
+                         "AND telegram_user_id IS NOT NULL ORDER BY wakecall_time, created_at")
+
+    def count_call_beta(self, exclude_telegram: int | None) -> int:
+        return self._one("SELECT count(*) AS n FROM tenants WHERE wakecall_consent_at IS NOT NULL "
+                         "AND telegram_user_id IS DISTINCT FROM %s", (exclude_telegram,))["n"]
+
+    def state_keys(self, prefix: str) -> list[str]:
+        return [r["key"] for r in self._all("SELECT key FROM service_state WHERE key LIKE %s AND value IS NOT NULL "
+                                            "AND value <> 'null'::jsonb ORDER BY updated_at",
+                                            (prefix.replace("%", r"\%") + "%",))]
 
     # --- waitlist (system scope) ---------------------------------------------
 

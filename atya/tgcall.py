@@ -134,8 +134,24 @@ class Caller:
 
         await self.calls.start()
 
-    async def ring(self, user_id: int, timeout: int = 60) -> None:
+    async def identity(self) -> dict:
+        me = await self.client.get_me()
+        return {"id": me.id, "username": me.username, "name": " ".join(filter(None, [me.first_name, me.last_name]))}
+
+    async def reach(self, user_id: int, username: str | None = None) -> None:
+        """Make sure this account can address the user: known from a past chat, or found by @username."""
+        try:
+            await self.client.get_input_entity(user_id)
+            return
+        except Exception:
+            pass
+        if not username:
+            raise LookupError("can't reach this user: they have no @username and haven't messaged the caller account")
+        await self.client.get_entity(username)
+
+    async def ring(self, user_id: int, timeout: int = 60, username: str | None = None) -> None:
         """Returns once the call is answered; raises if declined or not answered."""
+        await self.reach(user_id, username)
         from pytgcalls.types import CallConfig, ExternalMedia, MediaStream, RecordStream
         from pytgcalls.types.raw import AudioParameters
 

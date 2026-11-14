@@ -54,6 +54,7 @@ Reminders: "remind me to call Jim at 2pm" and I'll message you at 2pm. PDFs: sen
 
 Commands:
 /brief 9am - a morning list of what's due, every day at that time (/brief off to stop)
+/wakecall - a short morning phone call on Telegram that goes over your day (beta)
 /web - a one-time link to browse, search and edit your records in a browser
 /link - use me on both Telegram and WhatsApp, with the same records
 /usage - how much you've used today, and the daily limits
@@ -437,37 +438,68 @@ def use_link_code(ctx: Ctx, code: str) -> str | None:
     return "linked"
 
 
+CALL_INTRO = ("Wake-up calls (beta): every morning at a time you pick, ATYA calls you on Telegram, goes over your "
+              "day (calendar, what's due) and asks what you want to get done. What you say on the call is "
+              "transcribed and saved like a voice note, and you get a summary in the chat afterwards.\n\n"
+              "The call comes from a separate Telegram account{who}. If you don't pick up, it tries twice more, "
+              "10 minutes apart, then sends the brief instead. Calls are limited to {minutes} minutes a day.\n\n"
+              "To try it, send /wakecall agree.")
+
+
 def wakecall_cmd(ctx: Ctx, cmd: str, arg: str) -> str:
-    """/wakecall [on|off|time] and /callme: the morning call (owner only, needs the caller account)."""
+    """/wakecall [agree|on|off|time] and /callme: the morning call (opt-in beta, Telegram only)."""
     from . import wakecall
     assert ctx.tenant is not None
-    if not ctx.is_owner:
-        ctx.reply(f"I don't know {cmd}. Send /help for the commands.")
-        return "unknown-command"
     if not ctx.settings.tg_caller_on:
-        ctx.reply("Calls aren't set up on the server yet (the caller account isn't logged in).")
+        ctx.reply("Calls aren't available yet.")
         return "wakecall:not-set-up"
     tid = ctx.tenant["id"]
-    if cmd == "/callme":
-        with ctx.store.tx(system=True) as tx:
-            tx.set_state(wakecall.NOW_KEY, dt.datetime.now(dt.timezone.utc).isoformat())
-        ctx.reply("Calling you in a few seconds.")
-        return "wakecall:now"
     with ctx.store.tx(tid) as tx:
         current = tx.tenant(tid)
+    if not current.get("telegram_user_id"):
+        ctx.reply("The calls come through Telegram, and your account isn't linked to Telegram yet. "
+                  "Send /link to connect it, then try again.")
+        return "wakecall:no-telegram"
+    owner = ctx.is_owner
+    if not owner and current.get("wakecall_consent_at") is None:
+        if arg.lower() in ("agree", "yes", "i agree"):
+            with ctx.store.tx(system=True) as tx:
+                taken = tx.count_call_beta(ctx.settings.owner_telegram_user_id)
+            if taken >= ctx.settings.call_beta_users:
+                ctx.reply("The wake-up call beta is full right now. I'll keep your spot in mind; try again later.")
+                return "wakecall:full"
+            with ctx.store.tx(tid) as tx:
+                tx.set_wakecall_consent(tid)
+            ctx.reply("You're in. /wakecall on calls you every morning at 6 am (or pick a time, like /wakecall 7:15), "
+                      "and /callme calls you right now to try it.")
+            return "wakecall:agreed"
+        with ctx.store.tx(system=True) as tx:
+            who = tx.get_state(wakecall.CALLER_KEY) or {}
+        handle = f" (@{who['username']})" if who.get("username") else ""
+        ctx.reply(CALL_INTRO.format(who=handle, minutes=ctx.settings.daily_call_minutes))
+        return "wakecall:intro"
     tz = current["timezone"]
-    if not arg:
+    if cmd == "/callme":
+        if wakecall.seconds_left(ctx.store, ctx.settings, current) < wakecall.MIN_CALL_SECONDS:
+            ctx.reply(f"You've used today's {ctx.settings.daily_call_minutes} call minutes. Calls work again tomorrow.")
+            return "wakecall:no-minutes"
+        with ctx.store.tx(system=True) as tx:
+            tx.set_state(wakecall.now_key(tid), dt.datetime.now(dt.timezone.utc).isoformat())
+        ctx.reply("Calling you on Telegram in a few seconds.")
+        return "wakecall:now"
+    if not arg or arg.lower() in ("agree", "yes"):
         at = current.get("wakecall_time")
         ctx.reply(f"I call you every morning at {briefs.fmt_time(at)} ({tz}). Change it with /wakecall 6:30, "
                   "stop with /wakecall off, or get a call now with /callme." if at else
-                  "The morning call is off. /wakecall on calls you at 6 am; /wakecall 6:30 picks the time.")
+                  "The morning call is off. /wakecall on calls you at 6 am; /wakecall 6:30 picks the time; "
+                  "/callme calls you now.")
         return "wakecall:status"
     if arg.lower() in ("off", "stop", "no", "none"):
         with ctx.store.tx(tid) as tx:
             tx.set_wakecall(tid, None)
         ctx.reply("Morning call turned off. /wakecall on turns it back on.")
         return "wakecall:off"
-    at = wakecall.DEFAULT_TIME if arg.lower() in ("on", "yes", "start") else briefs.parse_time(arg)
+    at = wakecall.DEFAULT_TIME if arg.lower() in ("on", "start") else briefs.parse_time(arg)
     if at is None:
         ctx.reply("I didn't understand that time. Try /wakecall 6am or /wakecall 6:30.")
         return "wakecall:bad-time"
@@ -610,6 +642,8 @@ def usage(ctx: Ctx) -> str:
              line("PDF pages", u["pdf_pages"], st.daily_pdf_pages),
              line("Web research", u.get("research", 0), st.daily_research),
              line("Processing", u["tokens_in"] + u["tokens_out"], st.daily_tokens, " tokens")]
+    if u.get("call_seconds"):
+        lines.append(line("Calls", u["call_seconds"] // 60, st.daily_call_minutes, " min"))
     if u["held"]:
         lines.append(f"Held (over a limit): {u['held']}")
     if owner:
