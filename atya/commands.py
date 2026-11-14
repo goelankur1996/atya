@@ -283,6 +283,8 @@ def handle(ctx: Ctx, text: str) -> str:
             opening = interview.begin(tx, ctx.tenant["id"])
         ctx.reply(opening)
         return "setup:started"
+    if cmd in ("/wakecall", "/callme"):
+        return wakecall_cmd(ctx, cmd, arg)
     if cmd == "/export":
         return export(ctx)
     if cmd == "/delete":
@@ -433,6 +435,53 @@ def use_link_code(ctx: Ctx, code: str) -> str | None:
     ctx.reply(f"Connected. {name} now uses your existing account: same records, same reminders. "
               "Reminders and the morning brief go to wherever you last wrote to me.\n\nSend /help for the commands.")
     return "linked"
+
+
+def wakecall_cmd(ctx: Ctx, cmd: str, arg: str) -> str:
+    """/wakecall [on|off|time] and /callme: the morning call (owner only, needs the caller account)."""
+    from . import wakecall
+    assert ctx.tenant is not None
+    if not ctx.is_owner:
+        ctx.reply(f"I don't know {cmd}. Send /help for the commands.")
+        return "unknown-command"
+    if not ctx.settings.tg_caller_on:
+        ctx.reply("Calls aren't set up on the server yet (the caller account isn't logged in).")
+        return "wakecall:not-set-up"
+    tid = ctx.tenant["id"]
+    if cmd == "/callme":
+        with ctx.store.tx(system=True) as tx:
+            tx.set_state(wakecall.NOW_KEY, dt.datetime.now(dt.timezone.utc).isoformat())
+        ctx.reply("Calling you in a few seconds.")
+        return "wakecall:now"
+    with ctx.store.tx(tid) as tx:
+        current = tx.tenant(tid)
+    tz = current["timezone"]
+    if not arg:
+        at = current.get("wakecall_time")
+        ctx.reply(f"I call you every morning at {briefs.fmt_time(at)} ({tz}). Change it with /wakecall 6:30, "
+                  "stop with /wakecall off, or get a call now with /callme." if at else
+                  "The morning call is off. /wakecall on calls you at 6 am; /wakecall 6:30 picks the time.")
+        return "wakecall:status"
+    if arg.lower() in ("off", "stop", "no", "none"):
+        with ctx.store.tx(tid) as tx:
+            tx.set_wakecall(tid, None)
+        ctx.reply("Morning call turned off. /wakecall on turns it back on.")
+        return "wakecall:off"
+    at = wakecall.DEFAULT_TIME if arg.lower() in ("on", "yes", "start") else briefs.parse_time(arg)
+    if at is None:
+        ctx.reply("I didn't understand that time. Try /wakecall 6am or /wakecall 6:30.")
+        return "wakecall:bad-time"
+    now = briefs.local_now(tz)
+    with ctx.store.tx(tid) as tx:
+        tx.set_wakecall(tid, at)
+    first = "today"
+    if now.time() >= at:                           # already past it today: start tomorrow
+        with ctx.store.tx(system=True) as tx:
+            tx.set_state(wakecall.day_key(tid, now.date()), {"attempts": 0, "done": "set after the time"})
+        first = "tomorrow"
+    ctx.reply(f"Done. I'll call you every morning at {briefs.fmt_time(at)} ({tz}), first {first}. "
+              f"If you don't pick up I try twice more, {wakecall.RETRY_MINUTES} minutes apart, then send the brief.")
+    return "wakecall:set"
 
 
 def brief(ctx: Ctx, arg: str) -> str:

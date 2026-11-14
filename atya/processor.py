@@ -643,6 +643,9 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                 tx.finish_inbox(row["id"], status="failed", notes="empty content")
             return "failed"
 
+        if row["source"] == "call" and not research.explicit(raw):
+            return call_turn(store, llm, row, tenant, schema, tz, raw)
+
         with store.tx(row["tenant_id"]) as tx:
             files = tx.attachments_for([row["id"]])
         audio = [f for f in files if (f["mime_type"] or "").startswith("audio/")]
@@ -749,6 +752,30 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                          target_id=row["id"], summary=f"attempt {row['attempts']} failed; will retry",
                          source_data={"error": str(e)[:1000]})
         return "failed" if final else "retry"
+
+
+CALL_HINT = ("This is the transcript of my phone call with my assistant ATYA (lines starting 'ATYA:' are the "
+             "assistant; the other lines are me). File what I said that's worth keeping: tasks, plans for today, "
+             "reminders, notes, people. Use ATYA's lines only as context for what I meant. Ignore small talk and "
+             "greetings. If nothing is worth saving, save nothing.")
+
+
+def call_turn(store: Store, llm: LLM, row: dict, tenant: dict, schema: Schema, tz, raw: str) -> str:
+    """A call transcript: always filed (never answered as a question), then a short summary on Telegram."""
+    with store.tx(row["tenant_id"]) as tx:
+        context = fanout_context(tx, tenant["id"])
+    plan = llm.plan_fanout(schema=schema, raw_content=raw, captured_local=local_label(row["captured_at"], tz),
+                           context=context, hint=CALL_HINT)
+    with store.tx(row["tenant_id"]) as tx:
+        notes = FanoutExecutor(tx, schema, tenant, row).run(plan)
+        made = tx.records_from_inbox(tenant["id"], row["id"])
+        body = ("From this morning's call, saved:\n" + "\n".join(f"- {record_ref(schema, r)} {r['title']}"
+                                                                  for r in made)
+                if made else "From this morning's call: nothing needed saving.")
+        tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=body, inbox_id=row["id"])
+        confirm_reminders(tx, schema, tenant, row)
+        tx.finish_inbox(row["id"], status="processed", notes=notes, intent="log")
+    return "processed"
 
 
 def interview_turn(store: Store, llm: LLM, row: dict, tenant: dict, schema: Schema, tz, raw: str,

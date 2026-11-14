@@ -1028,6 +1028,11 @@ class Tx:
         self.conn.execute("UPDATE signin_codes SET used_at = now() WHERE id = %s", (handle,))
         return row["tenant_id"]
 
+    def set_wakecall(self, tenant_id: uuid.UUID, at: dt.time | None) -> None:
+        self.conn.execute("UPDATE tenants SET wakecall_time = %s WHERE id = %s", (at, tenant_id))
+        self.audit(tenant_id, actor="commands", action="update", target_table="tenants", target_id=tenant_id,
+                   summary=f"wake-up call {'at ' + at.strftime('%H:%M') if at else 'off'}")
+
     # --- waitlist (system scope) ---------------------------------------------
 
     def waitlist_entry(self, *, whatsapp: str | None = None, telegram: int | None = None) -> dict | None:

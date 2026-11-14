@@ -106,6 +106,7 @@ class Caller:
         self.listening = False
         self.on_audio = None            # called with each incoming 48 kHz PCM chunk, if set
         self.last_heard = 0.0           # monotonic time of the last incoming audio frame
+        self.out = bytearray()          # 48 kHz audio waiting to be played into the call
         self.ended = asyncio.Event()
 
     async def start(self) -> None:
@@ -139,6 +140,7 @@ class Caller:
         from pytgcalls.types.raw import AudioParameters
 
         self.ended.clear()
+        self.out.clear()
         await self.calls.play(user_id, MediaStream(ExternalMedia.AUDIO, AudioParameters(RATE, 1),
                                                    video_flags=MediaStream.Flags.IGNORE),
                               CallConfig(timeout=timeout))
@@ -227,6 +229,59 @@ MAX_CALL_SECONDS = 5 * 60
 SILENT_HANGUP_SECONDS = 10
 
 
+async def converse(caller: Caller, sonic, user_id: int, *, greeting: str | None,
+                   max_seconds: int = MAX_CALL_SECONDS) -> None:
+    """Hold a live conversation on an answered call until either side hangs up (or time runs out).
+    The Sonic session must be created with on_audio/on_interrupt wired to `caller.out`."""
+    inq: asyncio.Queue[bytes] = asyncio.Queue()
+    caller.on_audio = inq.put_nowait
+    if greeting:
+        await sonic.say_first(greeting)
+    out = caller.out
+
+    async def play():
+        from pytgcalls.types import Device
+        start, n = time.monotonic(), 0
+        while not caller.ended.is_set() and not sonic.done.is_set():
+            frame = bytes(out[:FRAME_BYTES]) if len(out) >= FRAME_BYTES else bytes(FRAME_BYTES)
+            del out[:FRAME_BYTES]
+            await caller.calls.send_frame(user_id, Device.MICROPHONE, frame)
+            n += 1
+            ahead = start + n * FRAME_MS / 1000 - time.monotonic()
+            if ahead > 0:
+                await asyncio.sleep(ahead)
+            elif ahead < -0.2:                 # fell behind (e.g. a pause): don't rush to catch up
+                start, n = time.monotonic(), 0
+
+    async def listen():
+        pending = bytearray()
+        while not caller.ended.is_set() and not sonic.done.is_set():
+            try:
+                pending.extend(await asyncio.wait_for(inq.get(), timeout=0.5))
+            except asyncio.TimeoutError:
+                continue
+            if len(pending) >= 3072 * 3:          # ~32 ms of audio per event
+                await sonic.send_audio(down_to_16k(bytes(pending)))
+                pending.clear()
+
+    async def watchdog():
+        # Telegram doesn't always tell us the other side hung up; their audio stopping does.
+        caller.last_heard = time.monotonic()
+        while not caller.ended.is_set():
+            await asyncio.sleep(1)
+            if time.monotonic() - caller.last_heard > SILENT_HANGUP_SECONDS:
+                log.info("no audio from the call for %ss: treating it as hung up", SILENT_HANGUP_SECONDS)
+                caller.ended.set()
+
+    tasks = [asyncio.create_task(play()), asyncio.create_task(listen()), asyncio.create_task(watchdog())]
+    ended = asyncio.create_task(caller.ended.wait())
+    stopped = asyncio.create_task(sonic.done.wait())
+    await asyncio.wait([ended, stopped], timeout=max_seconds, return_when=asyncio.FIRST_COMPLETED)
+    for t in (*tasks, ended, stopped):
+        t.cancel()
+    caller.on_audio = None
+
+
 async def talk(settings: Settings, *, voice: str | None = None, prompt: str | None = None, greeting: str | None =
                "The call just connected. Greet Ankur in English in one short sentence and ask how he's doing.") -> list:
     """Ring the owner and hold a live conversation with Nova 2 Sonic until someone hangs up."""
@@ -235,13 +290,11 @@ async def talk(settings: Settings, *, voice: str | None = None, prompt: str | No
     user_id = settings.owner_telegram_user_id
     caller = Caller(settings)
     await caller.start()
-    out = bytearray()                       # 48 kHz audio waiting to be played
-    inq: asyncio.Queue[bytes] = asyncio.Queue()
     voice = voice or settings.tg_call_voice
     print(f"Voice: {voice}", flush=True)
     sonic = Sonic(system_prompt=prompt or talk_prompt(voice), voice=voice, region=settings.aws_region,
-                  on_audio=lambda pcm: out.extend(up_from_24k(pcm)),
-                  on_interrupt=out.clear,
+                  on_audio=lambda pcm: caller.out.extend(up_from_24k(pcm)),
+                  on_interrupt=caller.out.clear,
                   on_text=lambda role, text: print(f"{'Ankur' if role == 'USER' else 'ATYA'}: {text}", flush=True))
     try:
         print(f"Ringing {user_id}...", flush=True)
@@ -256,55 +309,11 @@ async def talk(settings: Settings, *, voice: str | None = None, prompt: str | No
             print(f"Couldn't reach the voice model: {type(e).__name__}: {e}", flush=True)
             await caller.hang_up(user_id)
             return []
-        caller.on_audio = inq.put_nowait
-        if greeting:
-            await sonic.say_first(greeting)
         print("Connected. Talk; hang up to end.", flush=True)
-
-        async def play():
-            from pytgcalls.types import Device
-            start, n = time.monotonic(), 0
-            while not caller.ended.is_set() and not sonic.done.is_set():
-                frame = bytes(out[:FRAME_BYTES]) if len(out) >= FRAME_BYTES else bytes(FRAME_BYTES)
-                del out[:FRAME_BYTES]
-                await caller.calls.send_frame(user_id, Device.MICROPHONE, frame)
-                n += 1
-                ahead = start + n * FRAME_MS / 1000 - time.monotonic()
-                if ahead > 0:
-                    await asyncio.sleep(ahead)
-                elif ahead < -0.2:                 # fell behind (e.g. a pause): don't rush to catch up
-                    start, n = time.monotonic(), 0
-
-        async def listen():
-            pending = bytearray()
-            while not caller.ended.is_set() and not sonic.done.is_set():
-                try:
-                    pending.extend(await asyncio.wait_for(inq.get(), timeout=0.5))
-                except asyncio.TimeoutError:
-                    continue
-                if len(pending) >= 3072 * 3:          # ~32 ms of audio per event
-                    await sonic.send_audio(down_to_16k(bytes(pending)))
-                    pending.clear()
-
-        async def watchdog():
-            # Telegram doesn't always tell us the other side hung up; their audio stopping does.
-            caller.last_heard = time.monotonic()
-            while not caller.ended.is_set():
-                await asyncio.sleep(1)
-                if time.monotonic() - caller.last_heard > SILENT_HANGUP_SECONDS:
-                    log.info("no audio from the call for %ss: treating it as hung up", SILENT_HANGUP_SECONDS)
-                    caller.ended.set()
-
-        tasks = [asyncio.create_task(play()), asyncio.create_task(listen()), asyncio.create_task(watchdog())]
-        ended = asyncio.create_task(caller.ended.wait())
-        stopped = asyncio.create_task(sonic.done.wait())
-        await asyncio.wait([ended, stopped], timeout=MAX_CALL_SECONDS, return_when=asyncio.FIRST_COMPLETED)
+        await converse(caller, sonic, user_id, greeting=greeting)
         if sonic.error:
             print(f"Voice model error: {sonic.error}")
         print(f"Model sent {sonic.events} events, {sonic.audio_out / 2 / 24000:.1f} s of speech.", flush=True)
-        for t in (*tasks, ended, stopped):
-            t.cancel()
-        caller.on_audio = None
         await sonic.close()
         await caller.hang_up(user_id)
         return sonic.transcript

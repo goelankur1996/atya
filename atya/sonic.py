@@ -51,13 +51,18 @@ class Sonic:
     def __init__(self, *, system_prompt: str, voice: str = "matthew", region: str = "us-east-1",
                  on_audio: Callable[[bytes], None] | None = None,
                  on_interrupt: Callable[[], None] | None = None,
-                 on_text: Callable[[str, str], Awaitable[None] | None] | None = None):
+                 on_text: Callable[[str, str], Awaitable[None] | None] | None = None,
+                 tools: list[dict] | None = None):
+        """tools: [{"name", "description", "schema": JSON-schema dict, "run": async (args: dict) -> str}]"""
         self.system_prompt = system_prompt
         self.voice = voice
         self.region = region
         self.on_audio = on_audio
         self.on_interrupt = on_interrupt
         self.on_text = on_text
+        self.tools = {t["name"]: t for t in (tools or [])}
+        self.tool_calls: list[tuple[str, dict, str]] = []     # (name, args, result)
+        self._pending: set[asyncio.Task] = set()
         self.transcript: list[tuple[str, str]] = []
         self.prompt = str(uuid.uuid4())
         self.audio_content = str(uuid.uuid4())
@@ -89,12 +94,7 @@ class Sonic:
         system = str(uuid.uuid4())
         for e in (
             _event("sessionStart", {"inferenceConfiguration": {"maxTokens": 1024, "topP": 0.9, "temperature": 0.7}}),
-            _event("promptStart", {
-                "promptName": self.prompt,
-                "textOutputConfiguration": {"mediaType": "text/plain"},
-                "audioOutputConfiguration": {"mediaType": "audio/lpcm", "sampleRateHertz": OUT_RATE,
-                                             "sampleSizeBits": 16, "channelCount": 1, "voiceId": self.voice,
-                                             "encoding": "base64", "audioType": "SPEECH"}}),
+            _event("promptStart", self._prompt_start()),
             _event("contentStart", {"promptName": self.prompt, "contentName": system, "type": "TEXT",
                                     "interactive": False, "role": "SYSTEM",
                                     "textInputConfiguration": {"mediaType": "text/plain"}}),
@@ -108,6 +108,43 @@ class Sonic:
         ):
             await self._send(e)
         self._reader = asyncio.create_task(self._read())
+
+    def _prompt_start(self) -> dict:
+        body = {"promptName": self.prompt,
+                "textOutputConfiguration": {"mediaType": "text/plain"},
+                "audioOutputConfiguration": {"mediaType": "audio/lpcm", "sampleRateHertz": OUT_RATE,
+                                             "sampleSizeBits": 16, "channelCount": 1, "voiceId": self.voice,
+                                             "encoding": "base64", "audioType": "SPEECH"}}
+        if self.tools:
+            body["toolUseOutputConfiguration"] = {"mediaType": "application/json"}
+            body["toolConfiguration"] = {"tools": [
+                {"toolSpec": {"name": t["name"], "description": t["description"],
+                              "inputSchema": {"json": json.dumps(t["schema"])}}} for t in self.tools.values()]}
+        return body
+
+    async def _tool(self, use_id: str, name: str, raw_args: str) -> None:
+        """Run one tool the model asked for and hand the result back (the model keeps talking meanwhile)."""
+        try:
+            args = json.loads(raw_args or "{}")
+        except ValueError:
+            args = {}
+        tool = self.tools.get(name)
+        try:
+            result = await tool["run"](args) if tool else f"There is no tool called {name}."
+        except Exception as e:
+            log.warning("tool %s failed: %s", name, e)
+            result = "That didn't work this time. Tell him you'll follow up on Telegram instead."
+        self.tool_calls.append((name, args, result))
+        if self._closing or self.done.is_set():
+            return
+        content = str(uuid.uuid4())
+        await self._send(_event("contentStart", {
+            "promptName": self.prompt, "contentName": content, "interactive": False, "type": "TOOL", "role": "TOOL",
+            "toolResultInputConfiguration": {"toolUseId": use_id, "type": "TEXT",
+                                             "textInputConfiguration": {"mediaType": "text/plain"}}}))
+        await self._send(_event("toolResult", {"promptName": self.prompt, "contentName": content,
+                                               "content": json.dumps({"result": result})}))
+        await self._send(_event("contentEnd", {"promptName": self.prompt, "contentName": content}))
 
     async def say_first(self, instruction: str) -> None:
         """A text turn from the user's side, so the model speaks first (e.g. a greeting)."""
@@ -195,6 +232,12 @@ class Sonic:
                     r = self.on_text(role, text)
                     if asyncio.iscoroutine(r):
                         await r
+        elif "toolUse" in ev:
+            t = ev["toolUse"]
+            log.info("Sonic: tool %s", t.get("toolName"))
+            task = asyncio.create_task(self._tool(t.get("toolUseId", ""), t.get("toolName", ""), t.get("content", "")))
+            self._pending.add(task)
+            task.add_done_callback(self._pending.discard)
         elif "audioOutput" in ev:
             pcm = base64.b64decode(ev["audioOutput"]["content"])
             self.audio_out += len(pcm)
