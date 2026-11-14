@@ -13,7 +13,7 @@ heard, and hangs up. It prints how much audio it received and how loud it was.
 Step 2 is a live conversation with Nova 2 Sonic (hang up to end it):
 
     docker compose exec -T app python -m atya.tgcall check   # the voice model alone, no call
-    docker compose exec -T app python -m atya.tgcall talk
+    docker compose exec -T app python -m atya.tgcall talk [voice]     # e.g. talk kiara
 """
 from __future__ import annotations
 
@@ -210,15 +210,24 @@ async def ring_test(settings: Settings) -> int:
 
 TALK_PROMPT = (
     "You are ATYA, Ankur's personal assistant, on a phone call with him. This is a test of the call. "
-    "Speak naturally and warmly, in one or two short sentences per turn. He may speak English, Hindi or a mix; "
-    "answer in the language he uses. If he says goodbye, say a short goodbye."
+    "Speak naturally and calmly, like a capable assistant, not overly cheerful, in one or two short sentences "
+    "per turn. Speak English by default. Switch to Hindi only while he is speaking Hindi, and back to English "
+    "when he does. {gender} If he says goodbye, say a short goodbye."
 )
+FEMALE_VOICES = {"tiffany", "amy", "kiara", "lupe", "carolina", "ambre", "beatrice", "tina", "olivia"}
+
+
+def talk_prompt(voice: str) -> str:
+    gender = ("You are female: in Hindi always use feminine first-person forms (मैं कर सकती हूँ, मैं अच्छी हूँ)."
+              if voice in FEMALE_VOICES else
+              "You are male: in Hindi always use masculine first-person forms (मैं कर सकता हूँ, मैं अच्छा हूँ).")
+    return TALK_PROMPT.format(gender=gender)
 MAX_CALL_SECONDS = 5 * 60
 SILENT_HANGUP_SECONDS = 10
 
 
-async def talk(settings: Settings, *, prompt: str = TALK_PROMPT, greeting: str | None =
-               "The call just connected. Greet Ankur in one short sentence and ask how he's doing.") -> list:
+async def talk(settings: Settings, *, voice: str | None = None, prompt: str | None = None, greeting: str | None =
+               "The call just connected. Greet Ankur in English in one short sentence and ask how he's doing.") -> list:
     """Ring the owner and hold a live conversation with Nova 2 Sonic until someone hangs up."""
     from .sonic import Sonic
 
@@ -227,7 +236,9 @@ async def talk(settings: Settings, *, prompt: str = TALK_PROMPT, greeting: str |
     await caller.start()
     out = bytearray()                       # 48 kHz audio waiting to be played
     inq: asyncio.Queue[bytes] = asyncio.Queue()
-    sonic = Sonic(system_prompt=prompt, voice=settings.tg_call_voice, region=settings.aws_region,
+    voice = voice or settings.tg_call_voice
+    print(f"Voice: {voice}", flush=True)
+    sonic = Sonic(system_prompt=prompt or talk_prompt(voice), voice=voice, region=settings.aws_region,
                   on_audio=lambda pcm: out.extend(up_from_24k(pcm)),
                   on_interrupt=out.clear,
                   on_text=lambda role, text: print(f"{'Ankur' if role == 'USER' else 'ATYA'}: {text}", flush=True))
@@ -331,7 +342,7 @@ def main(argv: list[str]) -> int:
     if argv[:1] == ["check"]:
         return asyncio.run(sonic_check(load_settings()))
     if argv[:1] == ["talk"]:
-        transcript = asyncio.run(talk(load_settings()))
+        transcript = asyncio.run(talk(load_settings(), voice=argv[1].lower() if len(argv) > 1 else None))
         print(f"\nCall over: {sum(1 for r, _ in transcript if r == 'USER')} things heard from you.")
         return 0 if transcript else 1
     print(__doc__)
