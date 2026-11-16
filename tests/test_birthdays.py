@@ -27,8 +27,11 @@ def test_brief_lists_birthdays_today_and_this_week(store, user):
                          enforce_verbatim=False, actor="test")
         tx.create_record(user["id"], S, "person", title="Later", fields={"Birthday": "12-30"},
                          enforce_verbatim=False, actor="test")
+        tx.create_record(user["id"], S, "person", title="Raj", fields={"Anniversary": "2020-11-18"},
+                         enforce_verbatim=False, actor="test")
         brief = briefs.build_brief(tx, S, user["id"], dt.date(2026, 11, 16))
-    assert "Birthdays\n- Meera, turns 36 (today)\n- Rohan (Thu)" in brief and "Later" not in brief
+    assert "Birthdays\n- Meera, turns 36 (today)\n- Raj (anniversary), 6 years (Wed)\n- Rohan (Thu)" in brief
+    assert "Later" not in brief
 
 
 def test_old_birthday_tasks_are_removed_once(store, user):

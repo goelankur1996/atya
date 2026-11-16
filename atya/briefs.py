@@ -92,18 +92,23 @@ def birthday_lines(tx: Tx, schema: Schema, tenant_id, today: dt.date) -> list[st
         return []
     days = [today + dt.timedelta(days=i) for i in range(WEEK_DAYS + 1)]
     lines = []
+    window = {d.strftime("%m-%d") for d in days}
     for p in tx.birthdays_on(tenant_id, days):
-        b = str(p["fields"].get("Birthday", ""))
-        try:
-            day = dt.date(today.year, int(b[-5:-3]), int(b[-2:]))
-        except ValueError:
-            continue
-        if day < today:                                   # the week runs into next year
-            day = day.replace(year=today.year + 1)
-        age = ""
-        if len(b) == 10 and b[:4].isdigit():
-            age = f", turns {day.year - int(b[:4])}"
-        lines.append((day, f"- {p['title']}{age} ({'today' if day == today else _day_word(day, today)})"))
+        for fname, what in (("Birthday", ""), ("Anniversary", " (anniversary)")):
+            b = str(p["fields"].get(fname) or "")
+            if len(b) < 5 or b[-5:] not in window:
+                continue
+            try:
+                day = dt.date(today.year, int(b[-5:-3]), int(b[-2:]))
+            except ValueError:
+                continue
+            if day < today:                               # the week runs into next year
+                day = day.replace(year=today.year + 1)
+            age = ""
+            if len(b) == 10 and b[:4].isdigit():
+                years = day.year - int(b[:4])
+                age = f", turns {years}" if not what else f", {years} years"
+            lines.append((day, f"- {p['title']}{what}{age} ({'today' if day == today else _day_word(day, today)})"))
     return [line for _, line in sorted(lines)]
 
 

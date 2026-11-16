@@ -1035,7 +1035,8 @@ class Tx:
         """People whose Birthday (MM-DD or YYYY-MM-DD) falls on any of these days (year ignored)."""
         mds = [d.strftime("%m-%d") for d in days]
         return self._all("SELECT * FROM records WHERE tenant_id = %s AND type = 'person' "
-                         "AND right(fields->>'Birthday', 5) = ANY(%s) ORDER BY title", (tenant_id, mds))
+                         "AND (right(fields->>'Birthday', 5) = ANY(%s) OR right(fields->>'Anniversary', 5) = ANY(%s)) "
+                         "ORDER BY title", (tenant_id, mds, mds))
 
     def birthday_tasks(self, tenant_id: uuid.UUID) -> list[dict]:
         """Tasks made for birthdays/anniversaries by the old rule (Google sync or typed)."""
