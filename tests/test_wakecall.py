@@ -287,3 +287,47 @@ def test_call_runs_in_its_own_process(monkeypatch):
         return await real(sys.executable, "-c", script, **kw)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
     assert asyncio.run(wakecall.call_in_own_process({"telegram_user_id": 1, "id": "abcd"}, {"id": "c1"})) == "missed"
+
+
+def test_setup_by_call(store, settings, owner):
+    from atya import commands, interview
+    meera = friend(store, FRIEND)
+    tg = FakeTelegram()
+    ctx = commands.Ctx(store=store, tg=tg, settings=settings, tenant=meera, channel="telegram",
+                       user_id=FRIEND, chat_id=FRIEND, name="Meera")
+    assert commands.offer_setup(ctx, meera, head="You're in.") == "setup:offered"
+    text = tg.sent[-1][1]
+    assert "quick call" in text and [b[1] for b in tg.last_buttons[0]] == ["setup:call", "setup:text"]
+    assert commands.setup_choice(store, settings, meera, FRIEND, "call", channel="telegram") == "setup:call"
+    assert tenant(store, meera["id"])["wakecall_consent_at"] is not None              # the tap is the consent
+    phone = Phone("answered")
+    assert wakecall.tick(store, settings, phone, now=dt.datetime.now(dt.timezone.utc)) == "setup:answered:answered"
+    # The transcript comes back as a 'setup call' and ends with the usual summary and the 9 am brief.
+    wakecall.save_transcript(store, tenant(store, meera["id"]),
+                             [("ASSISTANT", "What's on this week?"), ("USER", "dentist on friday at 5")],
+                             dt.datetime.now(dt.timezone.utc), sender="setup call")
+    llm = FakeLLM()
+    llm.plans["ATYA: What's on this week?\nMeera: dentist on friday at 5"] = {
+        "writes": [{"type": "task", "title": "Dentist", "fields": {}}]}
+    while processor.process_once(store, llm, settings):
+        pass
+    assert outbox(store, meera["id"])[-1].startswith("That's it, thanks. I've got: 1 task.")
+    assert tenant(store, meera["id"])["brief_time"] == dt.time(9, 0)
+
+
+def test_setup_call_not_answered_falls_back_to_messages(store, settings, owner):
+    from atya import commands, interview
+    meera = friend(store, FRIEND2, "Ravi", None)
+    commands.setup_choice(store, settings, meera, FRIEND2, "call", channel="telegram")
+    assert wakecall.tick(store, settings, Phone("declined"),
+                         now=dt.datetime.now(dt.timezone.utc)) == "setup:declined:declined"
+    assert interview.TEXT_INSTEAD in outbox(store, meera["id"])[-1]
+    with store.tx(meera["id"]) as tx:
+        assert interview.current(tx, meera["id"]) is not None                          # message interview started
+    assert commands.setup_choice(store, settings, meera, FRIEND2, "text", channel="telegram") == "setup:text"
+
+
+def test_set_morning_call_tool(store, owner):
+    assert wakecall.set_morning_call(store, owner, "6:45") == "Done: a call every morning at 6:45 am, starting tomorrow."
+    assert owner_tenant(store)["wakecall_time"] == dt.time(6, 45)
+    assert wakecall.set_morning_call(store, owner, "off") == "Morning call turned off."

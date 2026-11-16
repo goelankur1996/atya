@@ -176,6 +176,8 @@ def handle_callback(store: Store, tg: TelegramAPI, settings: Settings, cq: dict)
     if data.startswith("rtn:"):
         from . import routines
         return routines.tap(store, tenant, chat_id, data, channel="telegram")
+    if data.startswith("setup:"):
+        return commands.setup_choice(store, settings, tenant, chat_id, data[6:], channel="telegram")
     if not data.startswith("tz:"):
         return "ignored:callback"
     if tenant is None or tenant["status"] not in ("invited", "active"):

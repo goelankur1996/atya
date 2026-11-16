@@ -207,6 +207,21 @@ def save_city(store: Store, tenant: dict, city: str, http=None) -> str:
         f"Saved {place['label']}. The weather service didn't answer, so skip the weather today."
 
 
+def set_morning_call(store: Store, tenant: dict, when: str) -> str:
+    if when.strip().lower() in ("off", "stop", "none", "no"):
+        with store.tx(tenant["id"]) as tx:
+            tx.set_wakecall(tenant["id"], None)
+        return "Morning call turned off."
+    at = DEFAULT_TIME if when.strip().lower() in ("on", "yes", "") else briefs.parse_time(when)
+    if at is None:
+        return "That time wasn't clear. Ask for a time like 6:30 or 7 am."
+    with store.tx(tenant["id"]) as tx:
+        tx.set_wakecall(tenant["id"], at)
+        if tenant.get("wakecall_consent_at") is None:
+            tx.set_wakecall_consent(tenant["id"])
+    return f"Done: a call every morning at {briefs.fmt_time(at)}, starting tomorrow."
+
+
 def log_routine(store: Store, tenant: dict, args: dict) -> str:
     from . import routines
     return routines.log_from_call(store, tenant, args)
@@ -271,6 +286,10 @@ def call_tools(store: Store, llm, embedder, tenant: dict) -> list[dict]:
              "restart": {"type": "boolean", "description": "Only after a miss: true if they chose to restart "
                                                            "from day 1, false to keep going"}},
                     "required": ["routine", "result"]}},
+        {"name": "set_morning_call", "run": text_tool(lambda a: set_morning_call(store, tenant, str(a.get("time", "")))),
+         "description": "Turn on (or move) the daily morning call from ATYA, at a local time, or 'off' to stop it.",
+         "schema": {"type": "object", "properties": {"time": {
+             "type": "string", "description": "Local time like '6:30' or '7am', or 'off'"}}, "required": ["time"]}},
         {"name": "save_city", "run": text_tool(lambda a: save_city(store, tenant, str(a.get("city", "")))),
          "description": "Save the city the user lives in (for the weather on future calls). Returns today's weather.",
          "schema": {"type": "object", "properties": {"city": {
@@ -388,7 +407,7 @@ def after_call(store: Store, settings: Settings, tenant: dict, call: dict, resul
                now: dt.datetime) -> str:
     """The call's new status: retry (not answered), or done, with a message instead where needed."""
     kind = call["kind"]
-    if result == "missed" and call["attempts"] < ATTEMPTS and kind in ("morning", "reminder", "setup"):
+    if result == "missed" and call["attempts"] < ATTEMPTS and kind in ("morning", "reminder"):
         with store.tx(system=True) as tx:
             tx.finish_call(call["id"], "pending", next_at=now + dt.timedelta(minutes=RETRY_MINUTES))
         return "retry"

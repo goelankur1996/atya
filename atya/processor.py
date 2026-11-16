@@ -769,9 +769,15 @@ def call_turn(store: Store, llm: LLM, row: dict, tenant: dict, schema: Schema, t
     with store.tx(row["tenant_id"]) as tx:
         notes = FanoutExecutor(tx, schema, tenant, row).run(plan)
         made = tx.records_from_inbox(tenant["id"], row["id"])
-        body = ("From our call, saved:\n" + "\n".join(f"- {record_ref(schema, r)} {r['title']}"
-                                                                  for r in made)
-                if made else "From our call: nothing needed saving.")
+        if row.get("sender") == "setup call":
+            counts: dict[str, int] = {}
+            for r in made:
+                counts[r["type"]] = counts.get(r["type"], 0) + 1
+            body = interview.done_by_call(tx, tx.tenant(tenant["id"]), counts)
+        else:
+            body = ("From our call, saved:\n" + "\n".join(f"- {record_ref(schema, r)} {r['title']}"
+                                                          for r in made)
+                    if made else "From our call: nothing needed saving.")
         tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=body, inbox_id=row["id"])
         confirm_reminders(tx, schema, tenant, row)
         tx.finish_inbox(row["id"], status="processed", notes=notes, intent="log")

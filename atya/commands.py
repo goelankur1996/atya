@@ -147,8 +147,53 @@ def finish_onboarding(ctx: Ctx, zone: str) -> None:
     with ctx.store.tx(ctx.tenant["id"]) as tx:
         tx.set_timezone(ctx.tenant["id"], zone, actor="commands")
         tx.set_tenant_status(ctx.tenant["id"], "active", actor="commands")
-        opening = interview.begin(tx, ctx.tenant["id"])
-    ctx.reply(f"Timezone set to {zone}. You're in.\n\n{opening}")
+        tenant = tx.tenant(ctx.tenant["id"])
+    offer_setup(ctx, tenant, head=f"Timezone set to {zone}. You're in.")
+
+
+def can_call(settings: Settings, tenant: dict) -> bool:
+    return bool(settings.tg_caller_on and tenant.get("telegram_user_id"))
+
+
+def caller_handle(store: Store) -> str:
+    from . import wakecall
+    with store.tx(system=True) as tx:
+        who = tx.get_state(wakecall.CALLER_KEY) or {}
+    return f" from @{who['username']}" if who.get("username") else ""
+
+
+def offer_setup(ctx: Ctx, tenant: dict, head: str = "") -> str:
+    """The setup interview: offered as a call when possible, otherwise by message."""
+    if can_call(ctx.settings, tenant):
+        body = interview.CALL_OFFER.format(who=caller_handle(ctx.store))
+        ctx.reply(f"{head}\n\n{body}" if head else body, buttons=interview.CALL_BUTTONS)
+        return "setup:offered"
+    with ctx.store.tx(tenant["id"]) as tx:
+        opening = interview.begin(tx, tenant["id"])
+    if ctx.settings.tg_caller_on:
+        opening += "\n\n(Prefer a quick call instead? Link Telegram with /link, then send /setup.)"
+    ctx.reply(f"{head}\n\n{opening}" if head else opening)
+    return "setup:started"
+
+
+def setup_choice(store: Store, settings: Settings, tenant: dict | None, chat_id: int, choice: str, *,
+                 channel: str) -> str:
+    """'Call me now' / 'Text instead' under the setup offer."""
+    if tenant is None or tenant["status"] != "active":
+        return "ignored:callback-no-tenant"
+    tid = tenant["id"]
+    if choice == "call" and can_call(settings, tenant):
+        with store.tx(tid) as tx:
+            if tenant.get("wakecall_consent_at") is None:
+                tx.set_wakecall_consent(tid)
+            tx.add_call(tid, "setup", dt.datetime.now(dt.timezone.utc))
+            tx.add_outbox(tid, chat_id=chat_id, body=interview.CALL_SOON.format(who=caller_handle(store)),
+                          actor="commands", channel=channel)
+        return "setup:call"
+    with store.tx(tid) as tx:
+        opening = interview.begin(tx, tid)
+        tx.add_outbox(tid, chat_id=chat_id, body=opening, actor="commands", channel=channel)
+    return "setup:text"
 
 
 def stranger(ctx: Ctx, text: str | None = None) -> str:
@@ -283,9 +328,8 @@ def handle(ctx: Ctx, text: str) -> str:
         return web_link(ctx, "/settings", "Open this to connect your Google Calendar")
     if cmd == "/setup":
         with ctx.store.tx(ctx.tenant["id"]) as tx:
-            opening = interview.begin(tx, ctx.tenant["id"])
-        ctx.reply(opening)
-        return "setup:started"
+            tenant = tx.tenant(ctx.tenant["id"])
+        return offer_setup(ctx, tenant)
     if cmd == "/city":
         return city_cmd(ctx, arg)
     if cmd in ("/wakecall", "/callme"):

@@ -1,5 +1,10 @@
 """The setup interview: a short conversation right after sign-up (or /setup).
 
+By phone where possible: if the user is on Telegram and calls are set up, ATYA
+offers a setup call ("Call me now" doubles as agreeing to calls). The call covers
+the same AREAS; its transcript is filed like any call, then the usual summary.
+If they choose text, or the call doesn't happen, it's the message interview below.
+
 ATYA asks one question at a time, by text; the user answers by voice note or
 text. Each answer is filed straight away like any message, and the next
 question follows up on what was said (the model picks it). It ends after
@@ -132,3 +137,48 @@ FALLBACK = {
 
 def fallback_question(area: str | None) -> str:
     return FALLBACK.get(area or "", "Anything else coming up that you'd like me to keep track of?")
+
+
+
+# --- by phone -------------------------------------------------------------------
+
+CALL_OFFER = ("Let's set you up so I'm useful from day one. The easiest way is a quick call: I'll ring you on "
+              "Telegram{who} and ask about your week, people, plans and anything coming up (about 10 minutes). "
+              "Everything you tell me goes into your records.")
+CALL_BUTTONS = [[("Call me now", "setup:call"), ("Text instead", "setup:text")]]
+CALL_SOON = ("Calling you on Telegram in a few seconds{who}. (By tapping that you've also agreed to calls from ATYA; "
+             "/wakecall has the details.)")
+TEXT_INSTEAD = "No problem, let's do it by message instead."
+
+CALL_OPENING = """This is {name}'s setup call: they just joined ATYA, and this call fills ATYA in so it's useful from day one.
+Open with ONE short turn: greet {name} warmly, say this is a quick setup chat of about ten minutes, and ask the first
+question: what's on for them this week? Then stop and wait."""
+
+
+def call_plan() -> str:
+    areas = "\n".join(f"- {v}" for v in AREAS.values())
+    return ("Setup plan. Cover these, one question at a time, in roughly this order, following up on what they say "
+            "to get concrete details (days, times, names, dates):\n" + areas +
+            f"\nAim for at least {TARGET_RECORDS} concrete things worth saving. Move on if they have nothing for "
+            "an area. After about ten minutes, or whenever they want to stop, wrap up: ask whether they'd like "
+            "ATYA to call every morning (if yes, at what time: use set_morning_call), then thank them and say a "
+            "summary will be in the chat and they can message ATYA anything from now on.")
+
+
+def call_fallback(store, settings, tenant: dict, result: str) -> None:
+    """The setup call didn't happen: do the interview by message."""
+    with store.tx(tenant["id"]) as tx:
+        opening = begin(tx, tenant["id"])
+        note = {"declined": "No call then. ", "unreachable": ""}.get(result, "I couldn't reach you by phone. ")
+        tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=f"{note}{TEXT_INSTEAD}\n\n{opening}",
+                      actor="interview")
+
+
+def done_by_call(tx: Tx, tenant: dict, counts: dict[str, int]) -> str:
+    """The message after a setup call's transcript is filed, plus the first habit (the 9 am brief)."""
+    if tenant.get("brief_time") is None:
+        at = dt.time(9, 0)
+        from zoneinfo import ZoneInfo
+        local_now = dt.datetime.now(ZoneInfo(tenant["timezone"] or "UTC"))
+        tx.set_brief(tenant["id"], at, skip_until=local_now.date() if local_now.time() >= at else None)
+    return summary(counts, "")
