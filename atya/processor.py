@@ -722,7 +722,7 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                 tx.finish_inbox(row["id"], status="processed", notes=notes, intent="log")
             return "processed"
 
-        plan = llm.plan_query(schema=schema, question=raw, now=now)
+        plan = llm.plan_query(schema=schema, question=raw, now=now, fast=row["source"] == "call")
         query_vector = None
         if embedder is not None:
             try:

@@ -205,7 +205,7 @@ def test_opening_prompt():
     p = wakecall.build_prompt(t, {"kind": "reminder", "about": "leave for the airport"}, local, "B", "matthew", None)
     assert 'asked to be reminded: "leave for the airport"' in p
     # Everything about their records goes to ATYA (the same path as a text); a varied filler before each.
-    assert "send it with atya" in p and "never say you can't make a change" in p
+    assert "send it with atya" in p and "Never say you can't make a change" in p
     assert len(wakecall.FILLERS) >= 40 and len(set(wakecall.FILLERS)) == len(wakecall.FILLERS)
     assert all(f'"{f}"' in p for f in wakecall.FILLERS) and "{fillers}" not in p
 
@@ -361,3 +361,32 @@ def test_set_morning_call_tool(store, owner):
         "Done: a call every morning at 6:45 am (Asia/Kolkata), starting tomorrow."
     assert owner_tenant(store)["wakecall_time"] == dt.time(6, 45)
     assert wakecall.set_morning_call(store, owner, "off") == "Morning call turned off."
+
+
+def test_call_starts_with_their_records(store, settings, owner):
+    from atya import briefs
+    with store.tx(owner["id"]) as tx:
+        tx.create_record(owner["id"], S, "task", title="Storytelling with Data workshop", enforce_verbatim=False,
+                         actor="t", fields={"Status": "next", "Due Date": "2026-11-19",
+                                            "Notes": "Lemon Tree Hotel, Sector 60, 9:30 to 5:30"})
+        tx.create_record(owner["id"], S, "task", title="Renew passport", enforce_verbatim=False, actor="t",
+                         fields={"Status": "inbox"})
+        tx.create_record(owner["id"], S, "task", title="Old thing", enforce_verbatim=False, actor="t",
+                         fields={"Status": "done"})
+        tx.create_record(owner["id"], S, "person", title="Rahul", enforce_verbatim=False, actor="t",
+                         fields={"Birthday": "11-25", "Relationship": "friend"})
+        text = briefs.call_records(tx, S, owner["id"], dt.date(2026, 11, 17))
+    assert "Storytelling with Data workshop; due Thu 19 Nov; Lemon Tree Hotel" in text
+    assert "- Renew passport" in text and "Old thing" not in text
+    assert "Rahul: birthday 11-25" in text and "- Rahul (relationship friend)" in text
+    p = wakecall.build_prompt({"display_name": "Ankur"}, {"kind": "now"}, dt.datetime(2026, 11, 17, 9), "B",
+                              "matthew", None, records=text)
+    assert p.endswith(text) and "answer\n  straight away without atya" in p
+
+
+def test_call_questions_plan_with_the_fast_model(store, settings, owner):
+    llm = FakeLLM()
+    llm.intent["What's on Friday 2026-11-20?"] = "query"
+    llm.query_plans["What's on Friday 2026-11-20?"] = {"types": ["task"], "search": "friday"}
+    reply, _ = call_with_processor(store, settings, llm, owner, "What's on Friday 2026-11-20?")
+    assert reply and llm.last_fast is True

@@ -99,7 +99,8 @@ class FakeLLM:
         self.last_captured_local = captured_local
         return self.plans[raw_content]
 
-    def plan_query(self, *, schema, question, now):
+    def plan_query(self, *, schema, question, now, fast=False):
+        self.last_fast = fast
         self.last_now = now
         return self.query_plans[question]
 

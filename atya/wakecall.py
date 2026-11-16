@@ -60,8 +60,10 @@ RULES = """Rules for the whole call:
   edit, move, copy, mark done, delete, a reminder, "call me at 4 to ..."), report a routine day, or mention
   something worth keeping (a plan, a date, a person's details), send it with atya, in their words as a complete
   message with dates written out ("tasks on Thursday 2026-11-19"). Then tell them ATYA's reply in a few words.
-  Beyond the brief below, never answer about their records from memory; never say you can't make a change, never ask them to do it
-  themselves. If the reply says it's still working, say it'll be in the chat and go on.
+  Questions the records below already answer (what's on a day, what's due, someone's birthday), answer
+  straight away without atya. Use atya for anything not there or that needs more detail, and for every change.
+  After a change, don't trust the records below for that item. Never say you can't make a change, never ask them
+  to do it themselves. If the reply says it's still working, say it'll be in the chat and go on.
 - Before each atya call, say one short filler so they aren't left in silence. Use a different one each time, never
   the same one twice in a call, for example: {fillers}
 - You have no live information except the weather given below: no news, prices, traffic, AQI or internet. Never
@@ -103,7 +105,10 @@ PROMPT = """You are ATYA, {name}'s personal assistant, on a phone call with {nam
 {rules}
 
 From ATYA (use only when relevant):
-{brief}{extra}"""
+{brief}{extra}
+
+Their records as of the start of this call (use only when relevant):
+{records}"""
 
 GREETING = "The call just connected. Begin."
 
@@ -125,7 +130,7 @@ def filler_list() -> str:
 
 
 def build_prompt(tenant: dict, call: dict, local: dt.datetime, brief: str, voice: str,
-                 weather: str | None, extra: str = "") -> str:
+                 weather: str | None, extra: str = "", records: str = "") -> str:
     name = first_name(tenant)
     clock = briefs.fmt_time(local.time())
     if call["kind"] == "reminder":
@@ -141,7 +146,7 @@ def build_prompt(tenant: dict, call: dict, local: dt.datetime, brief: str, voice
     return PROMPT.format(name=name, clock=clock, day=local.strftime("%A %-d %B"),
                          iso=local.strftime("%Y-%m-%dT%H:%M"), opening=opening,
                          rules=RULES.format(gender=gender_rule(voice), fillers=filler_list()), brief=brief,
-                         extra=f"\n\n{extra}" if extra else "")
+                         extra=f"\n\n{extra}" if extra else "", records=records or "(none loaded)")
 
 
 def seconds_left(store: Store, settings: Settings, tenant: dict) -> int:
@@ -299,13 +304,15 @@ async def prepare(store: Store, settings: Settings, tenant: dict, call: dict,
     """The voice model's instructions and tools for this call (brief, weather and context fetched now)."""
     from . import weather as wx
     local = briefs.local_now(tenant["timezone"])
+    schema = load_schema(tenant["schema_name"])
     with store.tx(tenant["id"]) as tx:
-        brief = briefs.build_brief(tx, load_schema(tenant["schema_name"]), tenant["id"], local.date())
+        brief = briefs.build_brief(tx, schema, tenant["id"], local.date())
+        records = briefs.call_records(tx, schema, tenant["id"], local.date())
     forecast = None
     if call["kind"] in ("morning", "now") and tenant.get("city_lat") is not None:
         forecast = await asyncio.to_thread(wx.today_line, tenant["city_lat"], tenant["city_lon"])
     extra = call_extra(store, tenant, call)
-    return (build_prompt(tenant, call, local, brief, settings.tg_call_voice, forecast, extra),
+    return (build_prompt(tenant, call, local, brief, settings.tg_call_voice, forecast, extra, records),
             call_tools(store, tenant, requests))
 
 

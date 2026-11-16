@@ -169,6 +169,87 @@ def build_brief(tx: Tx, schema: Schema, tenant_id, today: dt.date) -> str:
     return "\n\n".join(parts)
 
 
+CALL_RECORDS_CHARS = 16000      # how much of their records a call starts with
+
+
+def _short(value, n: int = 140) -> str:
+    text = " ".join(str(value).split())
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def call_records(tx: Tx, schema: Schema, tenant_id, today: dt.date) -> str:
+    """What a phone call starts out knowing, so common questions need no lookup: the calendar for the next
+    week, open tasks (dated ones first), birthdays and anniversaries for a month, people and projects.
+    Fetched when the call starts; reading only."""
+    parts: list[str] = []
+    if "event" in schema.types:
+        days = []
+        for i in range(WEEK_DAYS + 2):
+            day = today + dt.timedelta(days=i)
+            items = []
+            for e in tx.events_on(tenant_id, day.isoformat()):
+                start = str(e["fields"].get("Start", ""))
+                when = "all day" if e["fields"].get("All Day") or len(start) <= 10 else _clock(start[11:16])
+                where = f" at {e['fields']['Location']}" if e["fields"].get("Location") else ""
+                items.append(f"  - {when}: {e['title']}{where}")
+            if items:
+                days.append(f"{day.strftime('%A %-d %B')}:\n" + "\n".join(items))
+        if days:
+            parts.append("Calendar, next 8 days:\n" + "\n".join(days))
+    if "task" in schema.types:
+        def task_line(r: dict) -> str:
+            f = r["fields"]
+            bits = [r["title"]]
+            if f.get("Due Date"):
+                try:
+                    d = dt.date.fromisoformat(str(f["Due Date"])[:10])
+                    bits.append(f"due {d.strftime('%a %-d %b')}" + (" (overdue)" if d < today else ""))
+                except ValueError:
+                    pass
+            if f.get("Remind At"):
+                bits.append(f"reminder {str(f['Remind At']).replace('T', ' ')}")
+            if f.get("Notes"):
+                bits.append(_short(f["Notes"]))
+            return "- " + "; ".join(bits)
+        until = (today + dt.timedelta(days=30)).isoformat()
+        dated = tx.due_records(tenant_id, "task", until=until, closed=CLOSED_STATUSES, limit=80)
+        seen = {r["id"] for r in dated}
+        undated = [r for r in tx.list_records(tenant_id, "task", limit=200)
+                   if r["id"] not in seen and r["fields"].get("Status") not in CLOSED_STATUSES][:60]
+        if dated:
+            parts.append("Open tasks with a date (to 30 days ahead):\n" + "\n".join(map(task_line, dated)))
+        if undated:
+            parts.append("Other open tasks (most recently touched first):\n" + "\n".join(map(task_line, undated)))
+    if "person" in schema.types:
+        days = [today + dt.timedelta(days=i) for i in range(31)]
+        window = {d.strftime("%m-%d") for d in days}
+        dates = []
+        for p in tx.birthdays_on(tenant_id, days):
+            for fname in ("Birthday", "Anniversary"):
+                b = str(p["fields"].get(fname) or "")
+                if len(b) >= 5 and b[-5:] in window:
+                    dates.append(f"- {p['title']}: {fname.lower()} {b}")
+        if dates:
+            parts.append("Birthdays and anniversaries, next 30 days:\n" + "\n".join(dates))
+        people = []
+        for p in tx.list_records(tenant_id, "person", limit=80):
+            f = p["fields"]
+            about = [f"{k.lower()} {_short(f[k], 60)}" for k in ("Relationship", "Role", "Company", "Context")
+                     if f.get(k)]
+            people.append(f"- {p['title']}" + (f" ({'; '.join(about)})" if about else ""))
+        if people:
+            parts.append("People (most recently touched first):\n" + "\n".join(people))
+    if "project" in schema.types:
+        projects = [f"- {p['title']}" for p in tx.list_records(tenant_id, "project", limit=30)
+                    if p["fields"].get("Status") in (None, "", "active")]
+        if projects:
+            parts.append("Active projects:\n" + "\n".join(projects))
+    text = "\n\n".join(parts)
+    if len(text) > CALL_RECORDS_CHARS:
+        text = text[:CALL_RECORDS_CHARS].rsplit("\n", 1)[0] + "\n(more not shown: ask ATYA)"
+    return text
+
+
 def send_due_briefs(store: Store, now: dt.datetime | None = None) -> int:
     """Queue every brief that's due right now. Returns how many were queued."""
     with store.tx(system=True) as tx:
