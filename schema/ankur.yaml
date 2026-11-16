@@ -115,6 +115,7 @@ types:
       Last Contact:  {type: date}
       Next Followup: {type: date}
       Birthday:      {type: text, description: "MM-DD, or YYYY-MM-DD if the year is known"}
+      Anniversary:   {type: text, description: "MM-DD, or YYYY-MM-DD if the year is known"}
       Projects:      {type: relation, to: project, many: true}
 
   library:
@@ -189,6 +190,33 @@ types:
       Calendar:  {type: text}
       Status:    {type: select, options: [confirmed, tentative, cancelled]}
       Link:      {type: url}
+
+  routine:
+    label: Routines
+    prefix: RTN
+    description: >-
+      Daily commitments the owner wants to be checked on: challenges (75 Hard),
+      habits ("meditate every day"), programs with a daily checklist. ATYA asks
+      about each one every day and keeps a log (routine_day).
+    title_field: Title
+    fields:
+      Status:      {type: select, options: [active, paused, done, dropped], default: active}
+      Start Date:  {type: date, description: "day 1, YYYY-MM-DD"}
+      Days:        {type: number, description: "length in days, e.g. 75; blank = ongoing"}
+      Checklist:   {type: text, description: "the daily items, one per line"}
+      Check-in At: {type: text, description: "local time to ask each day, HH:MM (24h); default 21:00"}
+      Notes:       {type: text}
+
+  routine_day:
+    label: Routine check-ins
+    prefix: RTD
+    description: One day of one routine, as the owner reported it.
+    title_field: Title
+    fields:
+      Routine:      {type: relation, to: routine}
+      Date:         {type: date}
+      Result:       {type: select, options: [done, partial, missed]}
+      Missed Items: {type: text, description: "which checklist items weren't done"}
 
   # --- Child trackers (project-scoped) -----------------------------------
 
@@ -320,7 +348,9 @@ rules:
     - Reminder request ("remind me to X at 2pm", "ping me tomorrow 9am about Y", "in 2 hours remind me...") → a task with Remind At = the exact local date and time (YYYY-MM-DDTHH:MM, no offset; code applies the owner's timezone) and Due Date = that date. If an open task for the same thing exists, update it instead (set Remind At) rather than creating a duplicate. Times relative to the capture time ("in 20 minutes", "in 2 hours") are added to it. Vague times: morning 09:00, noon 12:00, afternoon 14:00, evening 18:00, tonight 20:00, "later" = 3 hours from now. A time already past today with no day named means tomorrow. Never set Remind At unless the owner asked to be reminded.
     - Call request ("call me at 4 to remind me to leave", "call me tomorrow 9am about the invoice", "call me in 20 minutes") → exactly like a reminder (a task with Remind At and Due Date), plus Remind By = call. With no topic ("call me at 5"), the title is "Call from ATYA". Only set Remind By = call when the owner asks to be called; "remind me" alone is a message.
     - Birthday ("Meera's birthday is on 14 March") → set the person's Birthday (MM-DD, or YYYY-MM-DD if the year is given; create the person if needed). Do NOT create a task for it: birthdays are shown on the day in the brief and answered when asked. Only if the owner explicitly asks to be reminded ("remind me to get her a gift a week before") create that task with Remind At.
-    - Anniversary or other yearly occasion → an event with Start = the next occurrence (all day) and the occasion in the title ("Meera & Raj's anniversary"); again no task unless a reminder is asked for.
+    - Anniversary → set the person's Anniversary (MM-DD, or YYYY-MM-DD; for a couple, on the person the owner knows best). Again no task unless a reminder is asked for.
+    - Routine, challenge or daily habit ("I've started 75 Hard from Nov 15", "I'll meditate every day for 30 days", "no sugar for a month") → a routine, NOT a task: Title, Status = active, Start Date (day 1; "today" = the capture date), Days if a length is given or the program has one (75 Hard = 75), Checklist = the daily items one per line (the ones the owner gives; for a well-known program, its standard items), Check-in At only if the owner says when to be asked. If a task was made for it before, drop that task. Only for what the owner says they're doing: never add a routine they didn't mention.
+    - Routine check-in ("did everything for 75 hard today", "skipped reading yesterday", "day 3 done") → a routine_day: Routine = the matching active routine, Date = the day it's about, Result (done / partial / missed), Missed Items. One routine_day per routine per day: if one exists for that day, update it.
     - Trip or travel plan ("flying to Goa on the 20th") → a task "Trip: <place>" with Due Date = the departure date (Status next) and the dates and details in the body, plus a task for each preparation step mentioned (tickets, packing, visa), with due dates before departure.
     - Commitment / choice made → create a decision (Title, Decision, Reasoning, Decided At = today, Project/People if relevant).
     - Media to consume or consumed (books, articles, blogs, websites, movies, TV, videos, songs, podcasts) → library.

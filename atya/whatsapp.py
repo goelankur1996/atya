@@ -338,6 +338,9 @@ def handle_tap(store: Store, ctx: commands.Ctx, data: str) -> str:
         return save_as_task(store, tenant, ctx.chat_id, data[5:], channel="whatsapp")
     if data.startswith("rem:"):
         return reminder_button(store, tenant, ctx.chat_id, data, channel="whatsapp")
+    if data.startswith("rtn:"):
+        from . import routines
+        return routines.tap(store, tenant, ctx.chat_id, data, channel="whatsapp")
     if data.startswith("tz:"):
         if tenant is None or tenant["status"] not in ("invited", "active"):
             return "ignored:callback-no-tenant"

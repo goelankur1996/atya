@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
-from . import connections, health, wakecall, research, transcribe, briefs, embeddings, processor, receiver, reminders, sender, web, whatsapp
+from . import connections, health, routines, wakecall, research, transcribe, briefs, embeddings, processor, receiver, reminders, sender, web, whatsapp
 from .config import load_settings
 from .llm import BedrockLLM, ClaudeLLM
 from .migrate import migrate
@@ -119,6 +119,7 @@ def main() -> None:
         ("web", web.run, (store, settings)),
         ("briefs", briefs.run, (store, settings)),
         ("reminders", reminders.run, (store, settings)),
+        ("routines", routines.run, (store, settings)),
         ("health", health.run, (store, settings)),
     ]
     if settings.google_on:

@@ -173,6 +173,9 @@ def handle_callback(store: Store, tg: TelegramAPI, settings: Settings, cq: dict)
         return save_as_task(store, tenant, chat_id, data[5:], channel="telegram")
     if data.startswith("rem:"):
         return reminder_button(store, tenant, chat_id, data, channel="telegram")
+    if data.startswith("rtn:"):
+        from . import routines
+        return routines.tap(store, tenant, chat_id, data, channel="telegram")
     if not data.startswith("tz:"):
         return "ignored:callback"
     if tenant is None or tenant["status"] not in ("invited", "active"):

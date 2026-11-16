@@ -207,6 +207,11 @@ def save_city(store: Store, tenant: dict, city: str, http=None) -> str:
         f"Saved {place['label']}. The weather service didn't answer, so skip the weather today."
 
 
+def log_routine(store: Store, tenant: dict, args: dict) -> str:
+    from . import routines
+    return routines.log_from_call(store, tenant, args)
+
+
 def record_call(store: Store, tenant: dict, seconds: float) -> None:
     day = briefs.local_now(tenant["timezone"]).date()
     with store.tx(tenant["id"]) as tx:
@@ -256,6 +261,16 @@ def call_tools(store: Store, llm, embedder, tenant: dict) -> list[dict]:
              "when": {"type": "string", "description": "Local date and time, YYYY-MM-DDTHH:MM"},
              "about": {"type": "string", "description": "What the call is for, e.g. 'leave for the airport'"}},
                     "required": ["when"]}},
+        {"name": "log_routine", "run": text_tool(lambda a: log_routine(store, tenant, a)),
+         "description": "Record how a day of one of their routines went (e.g. 75 Hard), as they told you.",
+         "schema": {"type": "object", "properties": {
+             "routine": {"type": "string", "description": "The routine's name, e.g. '75 Hard'"},
+             "day": {"type": "string", "description": "'today', 'yesterday', or YYYY-MM-DD"},
+             "result": {"type": "string", "enum": ["done", "partial", "missed"]},
+             "missed": {"type": "string", "description": "Which items weren't done, if any"},
+             "restart": {"type": "boolean", "description": "Only after a miss: true if they chose to restart "
+                                                           "from day 1, false to keep going"}},
+                    "required": ["routine", "result"]}},
         {"name": "save_city", "run": text_tool(lambda a: save_city(store, tenant, str(a.get("city", "")))),
          "description": "Save the city the user lives in (for the weather on future calls). Returns today's weather.",
          "schema": {"type": "object", "properties": {"city": {
