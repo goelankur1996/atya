@@ -37,9 +37,9 @@ class LLM(Protocol):
     def classify(self, text: str) -> dict: ...   # {"intent": log|query|chat, "reply": str}
     def plan_fanout(self, *, schema: Schema, raw_content: str, captured_local: str,
                     context: dict[str, list[dict]], hint: str | None = None) -> dict: ...
-    def plan_query(self, *, schema: Schema, question: str, now: str) -> dict: ...
+    def plan_query(self, *, schema: Schema, question: str, now: str, fast: bool = False) -> dict: ...
     def broaden_search(self, *, question: str, tried: str, found: list[str]) -> str: ...
-    def answer(self, *, schema: Schema, question: str, records: list[dict], now: str) -> dict: ...
+    def answer(self, *, schema: Schema, question: str, records: list[dict], now: str, fast: bool = False) -> dict: ...
     def interview_next(self, *, transcript: list[dict], areas: dict[str, str], still_open: list[str],
                        saved: int, target: int) -> dict: ...
     def research_plan(self, *, request: str, answers: str | None, allow_questions: bool,
@@ -334,10 +334,11 @@ class PromptLLM:
             raise LLMError("plan.updates is not a list")
         return plan
 
-    def plan_query(self, *, schema: Schema, question: str, now: str) -> dict:
+    def plan_query(self, *, schema: Schema, question: str, now: str, fast: bool = False) -> dict:
+        """fast: the quicker model (lookups during a phone call, where every second is silence)."""
         system = PLAN_SYSTEM.format(types=schema.render_types(), lenses=schema.rules_lenses,
                                     max_types=MAX_TYPES_TO_SEARCH)
-        plan = parse_json(self._call(model=self.main_model, system=system,
+        plan = parse_json(self._call(model=self.fast_model if fast else self.main_model, system=system,
                                      user=f"Now: {now}\nQuestion: {question}", max_tokens=300))
         types = [t for t in plan.get("types", []) if isinstance(t, str)][:MAX_TYPES_TO_SEARCH]
         return {"types": types, "search": str(plan.get("search", "")),
@@ -351,7 +352,7 @@ class PromptLLM:
                                     max_tokens=150, cache=False))
         return str(obj.get("search", "")).strip()
 
-    def answer(self, *, schema: Schema, question: str, records: list[dict], now: str) -> str:
+    def answer(self, *, schema: Schema, question: str, records: list[dict], now: str, fast: bool = False) -> str:
         system = ANSWER_SYSTEM.format(hard_rules=schema.rules_hard,
                                       vocabularies=schema.render_vocabularies(),
                                       lenses=schema.rules_lenses, now=now)
@@ -359,7 +360,8 @@ class PromptLLM:
         if len(data) > 60000:
             data = data[:60000] + " ...[truncated]"
         user = f"Question:\n{question}\n\nRecords:\n{data if records else '(none found)'}"
-        raw = self._call(model=self.main_model, system=system, user=user, max_tokens=2048)
+        raw = self._call(model=self.fast_model if fast else self.main_model, system=system, user=user,
+                         max_tokens=2048)
         return parse_answer(raw, had_records=bool(records))
 
     def interview_next(self, *, transcript: list[dict], areas: dict[str, str], still_open: list[str],

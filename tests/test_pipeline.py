@@ -99,7 +99,7 @@ class FakeLLM:
         self.last_captured_local = captured_local
         return self.plans[raw_content]
 
-    def plan_query(self, *, schema, question, now):
+    def plan_query(self, *, schema, question, now, fast=False):
         self.last_now = now
         return self.query_plans[question]
 
@@ -136,7 +136,7 @@ class FakeLLM:
         return {"reply": "Written: " + findings[0]["text"],
                 "report": "Report:\n" + "\n".join(f["text"] for f in findings)}
 
-    def answer(self, *, schema, question, records, now):
+    def answer(self, *, schema, question, records, now, fast=False):
         self.seen_records = records
         found = self.found.get(question, bool(records))
         return {"text": "Answer: " + ", ".join(r["id"] for r in records), "found": found}

@@ -767,8 +767,11 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
 
 CALL_HINT = ("This is the transcript of my phone call with my assistant ATYA (lines starting 'ATYA:' are the "
              "assistant; the other lines are me). File what I said that's worth keeping: tasks, plans for today, "
-             "reminders, notes, people. Use ATYA's lines only as context for what I meant. Ignore small talk and "
-             "greetings. If nothing is worth saving, save nothing.")
+             "reminders, notes, people, and make the changes I asked for. Change an existing record only when I "
+             "clearly asked for that change to that record; never change records I only asked about. If ATYA sums "
+             "up the changes near the end and I agree (or correct it), do exactly that list, as corrected. ATYA's "
+             "own offers, guesses or refusals are not instructions. Ignore small talk and greetings. If nothing is "
+             "worth saving, save nothing.")
 
 
 def call_turn(store: Store, llm: LLM, row: dict, tenant: dict, schema: Schema, tz, raw: str) -> str:

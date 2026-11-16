@@ -49,17 +49,38 @@ OUT_OF_MINUTES = "You've used today's call minutes, so here's the brief instead 
 RULES = """Rules for the whole call:
 - One thing per turn, in one or two short sentences. After you ask a question, stop talking and wait for the answer.
 - Speak calmly and warmly. Let them lead.
+- This is a voice call: say "go over" or "tell you", never "see" or "show".
+- If they say hello or talk over your opening, don't repeat the whole greeting: say "Hi, it's ATYA" and go on with
+  your question.
 - Always speak English. Only if they speak Hindi two or more turns in a row, switch to Hindi; switch back when they
   speak English. {gender}
 - You have no live information except the weather given below: no news, prices, traffic or internet. Never guess
   at those. If asked, say you can't check that on the call, and use follow_up so it's researched and sent in the chat.
 - To check their own records (tasks, people, notes, birthdays, the calendar on other days, anything they told ATYA
-  before), use lookup. Say something short like "let me check" first.
+  before), use lookup. When the question is about a day, put the date in the question ("tasks on Thursday
+  2026-11-19"). Before a lookup, say one short filler so they aren't left in silence. Use a different one each time,
+  never the same one twice in a call, for example: {fillers}
+- Talk about tasks and records by name only, in plain words. Never say reference codes (like TSK-12), statuses,
+  priority codes (like P1) or app words like "inbox".
+- You can't change records during the call. ATYA makes every change right after the call, from what was said. When
+  they ask for a change (add, edit, move, copy, mark done, delete, remind), say in a few words that you'll do it after
+  the call. Never say you can't, and never ask them to do it themselves.
+- If they asked for any changes, before the goodbye sum them up in one or two sentences, naming each task, and ask if
+  that's right. Correct it if they say so.
 - If they want another call later ("call me at 4 to ...", "call me back in an hour"), use schedule_call with the exact
   local date and time, then confirm the time in a few words.
-- Everything said on the call is saved afterwards, so don't confirm each item as saved.
-- Never read reference codes like TSK-12 aloud.
 - When they're done, say a short goodbye and that a summary will be in the chat."""
+
+FILLERS = ["Let me check.", "One moment.", "Give me a second.", "Checking now.", "Let me look.", "Just a sec.",
+           "Hang on.", "Let me pull that up.", "Looking it up.", "Bear with me a moment.", "Let me see.",
+           "One sec, checking.", "Let me find that.", "Okay, checking.", "Sure, one moment.", "Right, let me look.",
+           "Let me have a look.", "Give me a moment.", "Checking your list.", "Let me go through it.",
+           "Pulling it up.", "Hmm, let me check.", "Just a moment.", "Let me dig that out.", "Okay, one second.",
+           "Let me check your notes.", "Looking now.", "Let me quickly check.", "Sure, let me see.",
+           "One moment, please.", "Let me look into it.", "Okay, let me find it.", "Checking that for you.",
+           "Let me just check.", "Hold on a second.", "Searching now.", "Let me see what's there.",
+           "A moment, please.", "Let me confirm.", "Okay, looking.", "Let me check on that.", "Right, one sec.",
+           "Let me take a look.", "Give me a sec.", "Let me check the details."]
 
 OPENING_KNOWN_CITY = """Open with ONE short turn: greet {name} by name, say the time ({clock}), give the weather in a few
 words ({weather}), and ask one light, cheerful question: what would they like to focus on today: their tasks, today's
@@ -98,6 +119,12 @@ def gender_rule(voice: str) -> str:
             else "You are male: in Hindi always use masculine first-person forms.")
 
 
+def filler_list() -> str:
+    """All the fillers, shuffled per call so the model doesn't always reach for the first few."""
+    import random
+    return " / ".join(f'"{f}"' for f in random.sample(FILLERS, len(FILLERS)))
+
+
 def build_prompt(tenant: dict, call: dict, local: dt.datetime, brief: str, voice: str,
                  weather: str | None, extra: str = "") -> str:
     name = first_name(tenant)
@@ -114,7 +141,7 @@ def build_prompt(tenant: dict, call: dict, local: dt.datetime, brief: str, voice
         opening = OPENING_NO_CITY.format(name=name, clock=clock)
     return PROMPT.format(name=name, clock=clock, day=local.strftime("%A %-d %B"),
                          iso=local.strftime("%Y-%m-%dT%H:%M"), opening=opening,
-                         rules=RULES.format(gender=gender_rule(voice)), brief=brief,
+                         rules=RULES.format(gender=gender_rule(voice), fillers=filler_list()), brief=brief,
                          extra=f"\n\n{extra}" if extra else "")
 
 
@@ -136,7 +163,7 @@ def lookup(store: Store, llm, embedder, tenant: dict, question: str) -> str:
     schema = load_schema(tenant["schema_name"])
     tz = processor._tz(tenant)
     now = processor.local_label(dt.datetime.now(dt.timezone.utc), tz)
-    plan = llm.plan_query(schema=schema, question=question, now=now)
+    plan = llm.plan_query(schema=schema, question=question, now=now, fast=True)
     vector = None
     if embedder is not None:
         try:
@@ -145,7 +172,9 @@ def lookup(store: Store, llm, embedder, tenant: dict, question: str) -> str:
             vector = None
     with store.tx(tenant["id"]) as tx:
         records = processor.gather_records(tx, schema, tenant["id"], plan, vector)
-    return llm.answer(schema=schema, question=question, records=records, now=now)["text"]
+    spoken = (f"{question}\n(This answer is read aloud on a phone call: a few short sentences in plain words, "
+              "tasks by name only, no reference codes, statuses or priority codes.)")
+    return llm.answer(schema=schema, question=spoken, records=records, now=now, fast=True)["text"]
 
 
 def save_transcript(store: Store, tenant: dict, transcript: list[tuple[str, str]], started: dt.datetime,
@@ -261,7 +290,8 @@ def call_tools(store: Store, llm, embedder, tenant: dict) -> list[dict]:
          "description": "Look something up in the user's own ATYA records: tasks, reminders, people and birthdays, "
                         "notes, documents, routines, and calendar events on any day.",
          "schema": {"type": "object", "properties": {"question": {
-             "type": "string", "description": "The question, in full, e.g. 'What's on my calendar on Thursday?'"}},
+             "type": "string", "description": "The question, in full, with the date when it's about a day, e.g. "
+                            "'What's on my calendar on Thursday 2026-11-19?'"}},
                     "required": ["question"]}},
         {"name": "follow_up", "run": text_tool(lambda a: queue_follow_up(store, tenant, str(a.get("request", "")))),
          "description": "Queue something to research after the call (news, prices, facts, anything needing the "

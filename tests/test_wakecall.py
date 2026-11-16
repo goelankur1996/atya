@@ -203,6 +203,10 @@ def test_opening_prompt():
     assert "24°C and clear" in p and "what would they like to focus on" in p and "stop and wait" in p.lower()
     p = wakecall.build_prompt(t, {"kind": "reminder", "about": "leave for the airport"}, local, "B", "matthew", None)
     assert 'asked to be reminded: "leave for the airport"' in p
+    # Changes happen after the call (one path, the same as a text); a varied filler before each lookup.
+    assert "You can't change records during the call" in p and "never ask them to do it themselves" in p
+    assert len(wakecall.FILLERS) >= 40 and len(set(wakecall.FILLERS)) == len(wakecall.FILLERS)
+    assert all(f'"{f}"' in p for f in wakecall.FILLERS) and "{fillers}" not in p
 
 
 class FakeHTTP:
