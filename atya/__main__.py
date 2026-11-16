@@ -83,6 +83,10 @@ def main() -> None:
     load_schema("default")  # fail fast on a broken schema file
 
     store = Store(settings.database_url)
+    try:
+        connections.remove_birthday_tasks(store)
+    except Exception:
+        log.exception("birthday-task cleanup failed (will retry next start)")
     sync_owner_timezone(store, settings)
     sync_owner_schema(store, settings)
     tg = Telegram(settings.telegram_bot_token)

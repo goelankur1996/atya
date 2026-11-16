@@ -4,8 +4,8 @@ Every SYNC_EVERY minutes, for each connected account:
 - Calendar: events from yesterday to WINDOW_DAYS ahead, on the calendars the
   user shows in Google Calendar, are copied into event records (one per
   event, matched by Google's id; changes and cancellations are applied).
-- Contacts: a birthday in the next BIRTHDAY_DAYS becomes a "Wish X a happy
-  birthday" task with a 9 am reminder; the person's Birthday field is filled
+- Contacts: each contact's birthday is kept on the person (Birthday field),
+  creating the person if needed. No tasks: the brief shows birthdays on the day
   (for people already in the records, whenever it's known).
 
 Changes enter through one inbox row per sync (source 'google'), like any
@@ -54,6 +54,29 @@ def event_fields(ev: dict, calendar_name: str, tz: ZoneInfo) -> dict:
     return {k: v for k, v in fields.items() if v not in ("", None)}
 
 
+CLEANUP_KEY = "cleanup:birthday-tasks:v1"
+
+
+def remove_birthday_tasks(store) -> int:
+    """One-time: delete the 'Wish X a happy birthday' tasks the old rule made (audited)."""
+    from .schema import load_schema
+    with store.tx(system=True) as tx:
+        if tx.get_state(CLEANUP_KEY):
+            return 0
+        tenants = tx._all("SELECT id, schema_name FROM tenants")
+    removed = 0
+    for t in tenants:
+        schema = load_schema(t["schema_name"])
+        with store.tx(t["id"]) as tx:
+            for r in tx.birthday_tasks(t["id"]):
+                tx.delete_record(t["id"], schema, r["id"], actor="cleanup")
+                removed += 1
+    with store.tx(system=True) as tx:
+        tx.set_state(CLEANUP_KEY, {"removed": removed})
+    log.info("removed %d birthday tasks (birthdays now live on people)", removed)
+    return removed
+
+
 def next_birthday(month: int, day: int, today: dt.date) -> dt.date | None:
     for year in (today.year, today.year + 1):
         try:
@@ -74,8 +97,7 @@ class Sync:
         self.schema = load_schema(tenant["schema_name"])
         self.tz = ZoneInfo(tenant.get("timezone") or "UTC")
         self.inbox_id = None
-        self.counts = {"new events": 0, "changed events": 0, "cancelled events": 0, "birthday reminders": 0,
-                       "birthdays filled": 0}
+        self.counts = {"new events": 0, "changed events": 0, "cancelled events": 0, "birthdays filled": 0}
 
     def _inbox(self):
         if self.inbox_id is None:
@@ -111,30 +133,19 @@ class Sync:
             self.counts["changed events"] += 1
 
     def birthday(self, b: dict, today: dt.date) -> None:
-        when = next_birthday(b["month"], b["day"], today)
+        if "person" not in self.schema.types or "Birthday" not in self.schema.types["person"].fields:
+            return
         md = f"{b['year']:04d}-{b['month']:02d}-{b['day']:02d}" if b.get("year") else f"{b['month']:02d}-{b['day']:02d}"
         person = self.tx._one("SELECT * FROM records WHERE tenant_id = %s AND type = 'person' "
                               "AND lower(title) = lower(%s) LIMIT 1", (self.tid, b["name"]))
-        soon = when is not None and (when - today).days <= BIRTHDAY_DAYS
-        if person is None and not soon:
-            return
         if person is None:
-            person, _ = self.tx.create_record(self.tid, self.schema, "person", title=b["name"],
-                                              fields={"Birthday": md}, source_inbox_id=self._inbox(),
-                                              actor="google", external_id=f"gperson:{b['id']}")
+            self.tx.create_record(self.tid, self.schema, "person", title=b["name"], fields={"Birthday": md},
+                                  source_inbox_id=self._inbox(), actor="google", external_id=f"gperson:{b['id']}")
             self.counts["birthdays filled"] += 1
-        elif not person["fields"].get("Birthday") and "Birthday" in self.schema.types["person"].fields:
+        elif not person["fields"].get("Birthday"):
             self._inbox()
             self.tx.update_record(self.tid, self.schema, person["id"], {"Birthday": md}, actor="google")
             self.counts["birthdays filled"] += 1
-        if soon and "task" in self.schema.types:
-            ext = f"gbday:{b['id']}:{when.year}"
-            if self.tx.record_by_external(self.tid, ext) is None:
-                self.tx.create_record(self.tid, self.schema, "task", title=f"Wish {b['name']} a happy birthday",
-                                      fields={"Status": "next", "Due Date": when.isoformat(),
-                                              "Remind At": f"{when.isoformat()}T09:00"},
-                                      source_inbox_id=self._inbox(), actor="google", external_id=ext)
-                self.counts["birthday reminders"] += 1
 
     def finish(self) -> str:
         summary = ", ".join(f"{n} {k}" for k, n in self.counts.items() if n) or "no changes"

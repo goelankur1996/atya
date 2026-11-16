@@ -86,6 +86,27 @@ def _clock(hhmm: str) -> str:
     return f"{h % 12 or 12}:{m:02d} {'am' if h < 12 else 'pm'}"
 
 
+def birthday_lines(tx: Tx, schema: Schema, tenant_id, today: dt.date) -> list[str]:
+    """Today's birthdays, then the rest of the week's."""
+    if "person" not in schema.types or "Birthday" not in schema.types["person"].fields:
+        return []
+    days = [today + dt.timedelta(days=i) for i in range(WEEK_DAYS + 1)]
+    lines = []
+    for p in tx.birthdays_on(tenant_id, days):
+        b = str(p["fields"].get("Birthday", ""))
+        try:
+            day = dt.date(today.year, int(b[-5:-3]), int(b[-2:]))
+        except ValueError:
+            continue
+        if day < today:                                   # the week runs into next year
+            day = day.replace(year=today.year + 1)
+        age = ""
+        if len(b) == 10 and b[:4].isdigit():
+            age = f", turns {day.year - int(b[:4])}"
+        lines.append((day, f"- {p['title']}{age} ({'today' if day == today else _day_word(day, today)})"))
+    return [line for _, line in sorted(lines)]
+
+
 def build_brief(tx: Tx, schema: Schema, tenant_id, today: dt.date) -> str:
     """The brief's text for one user on one (local) day."""
     head = f"Good morning. {today.strftime('%A %-d %b')}"
@@ -121,14 +142,18 @@ def build_brief(tx: Tx, schema: Schema, tenant_id, today: dt.date) -> str:
             where = f" ({e['fields']['Location']})" if e["fields"].get("Location") else ""
             calendar.append(f"- {when}: {e['title']}{where}")
 
+    bdays = birthday_lines(tx, schema, tenant_id, today)
     if not (overdue or today_items or week):
         tail = f"{open_count} open task{'s' if open_count != 1 else ''}." if open_count else "No open tasks."
         cal = ("\n\nCalendar today\n" + "\n".join(calendar)) if calendar else ""
-        return f"{head}{cal}\n\nNothing due today or this week. {tail}"
+        bd = ("\n\nBirthdays\n" + "\n".join(bdays)) if bdays else ""
+        return f"{head}{cal}{bd}\n\nNothing due today or this week. {tail}"
 
     parts = [head]
     if calendar:
         parts.append("Calendar today\n" + "\n".join(calendar))
+    if bdays:
+        parts.append("Birthdays\n" + "\n".join(bdays))
     for title, items in (("Overdue", overdue), ("Today", today_items), ("This week", week)):
         if items:
             extra = len(items) - MAX_PER_SECTION

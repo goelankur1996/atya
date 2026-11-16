@@ -177,4 +177,4 @@ def test_interview_prompt_and_parsing():
 def test_schema_has_birthdays():
     s = load_schema("default")
     assert "Birthday" in s.types["person"].fields
-    assert "happy birthday" in s.rules_routing and "Trip:" in s.rules_routing
+    assert "Do NOT create a task for it" in s.rules_routing and "Trip:" in s.rules_routing

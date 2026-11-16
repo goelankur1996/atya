@@ -108,7 +108,7 @@ def test_sync_copies_events_and_birthdays_then_applies_changes(store, settings, 
     conn = connect(store, user, settings)
     http = FakeGoogleHTTP()
     summary = connections.sync_one(store, None, google.Vault(KEY), conn, http=http, now=NOW)
-    assert "2 new events" in summary and "1 birthday reminders" in summary
+    assert "2 new events" in summary and "birthdays filled" in summary
     evs = records(store, user, "event")
     call = next(e for e in evs if e["title"] == "Pricing call with Meera")
     assert call["fields"]["Start"] == "2026-11-13T15:00:00" and call["fields"]["Attendees"] == "Meera"
@@ -118,10 +118,10 @@ def test_sync_copies_events_and_birthdays_then_applies_changes(store, settings, 
     assert not any("hidden" in c for c in http.calls)                          # hidden calendars skipped
 
     tasks = records(store, user, "task")
-    assert [(t["title"], t["fields"]["Remind At"]) for t in tasks] == \
-        [("Wish Rohan Mehta a happy birthday", "2026-11-20T09:00:00")]
+    assert tasks == []                                                          # birthdays are not tasks
     people = records(store, user, "person")
-    assert [(p["title"], p["fields"]["Birthday"]) for p in people] == [("Rohan Mehta", "11-20")]   # Far Away: not soon
+    assert [(p["title"], p["fields"]["Birthday"]) for p in people][-1] == ("Rohan Mehta", "11-20")
+    assert len(people) == 2                                                     # every contact with a birthday
     with store.tx(user["id"]) as tx:
         inbox = tx._all("SELECT * FROM inbox WHERE tenant_id = %s", (user["id"],))
     assert len(inbox) == 1 and inbox[0]["source"] == "google" and inbox[0]["status"] == "processed"

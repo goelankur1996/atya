@@ -1030,6 +1030,18 @@ class Tx:
         self.conn.execute("UPDATE signin_codes SET used_at = now() WHERE id = %s", (handle,))
         return row["tenant_id"]
 
+    def birthdays_on(self, tenant_id: uuid.UUID, days: list[dt.date]) -> list[dict]:
+        """People whose Birthday (MM-DD or YYYY-MM-DD) falls on any of these days (year ignored)."""
+        mds = [d.strftime("%m-%d") for d in days]
+        return self._all("SELECT * FROM records WHERE tenant_id = %s AND type = 'person' "
+                         "AND right(fields->>'Birthday', 5) = ANY(%s) ORDER BY title", (tenant_id, mds))
+
+    def birthday_tasks(self, tenant_id: uuid.UUID) -> list[dict]:
+        """Tasks made for birthdays/anniversaries by the old rule (Google sync or typed)."""
+        return self._all("SELECT id FROM records WHERE tenant_id = %s AND type = 'task' AND "
+                         "(external_id LIKE 'gbday:%%' OR title ~* '^wish .* (a )?happy (birthday|anniversary)')",
+                         (tenant_id,))
+
     def set_wakecall(self, tenant_id: uuid.UUID, at: dt.time | None) -> None:
         self.conn.execute("UPDATE tenants SET wakecall_time = %s WHERE id = %s", (at, tenant_id))
         self.audit(tenant_id, actor="commands", action="update", target_table="tenants", target_id=tenant_id,
