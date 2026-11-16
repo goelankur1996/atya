@@ -1,14 +1,15 @@
-"""Circle: people who let each other ask ATYA to call them, with a short report back.
+"""Circle: people who let each other ask ATYA to call or message them, with the answer passed back.
 
 - `/circle add Dad [hinglish]` gives an invite link (WhatsApp and Telegram). The person taps it
   and sends the message it fills in (`/start c-XXXXXXXX`): someone new gets an account (no
   waitlist), someone already on ATYA is simply asked.
 - The person being called agrees, with buttons: that creates a link caller -> callee. Then the
   inviter is asked whether the other person may ask ATYA to call *them* (the reverse link).
-- A `checkin` record (filed like anything else: "call dad every day at 5:30 to check his
-  situps") is turned into a call in the callee's call queue at its time. After the call (or
-  after the retries run out) the person who asked gets a short report. Only that: nothing
-  else of the callee's is shared.
+- A `checkin` record (filed like anything else: "ask dad which ice cream to bring", "call dad
+  every day at 5:30 to check his situps") becomes, at its time, a message to the callee (their
+  reply is passed back; no reply in time is reported) or a call in their call queue (a short
+  report after it, or after the retries run out). Only that: nothing else of the callee's is
+  shared.
 - `/circle` lists links, `/circle remove <name>` ends them (both directions).
 """
 from __future__ import annotations
@@ -236,14 +237,14 @@ def ask(store: Store, tenant: dict, inv: dict) -> None:
         inviter = tx.tenant(inv["from_tenant"])
     who = first(inviter)
     if hindi(tenant):
-        body = (f"{who} chahte hain ki ATYA unke kehne par aapko call kare (jaise exercise ya khaane ka check-in), "
-                f"aur har aisi call ke baad unhe ek chhota summary bheje. Aapka aur kuch {who} ke saath share nahi "
-                "hoga. Allow karein?")
+        body = (f"{who} chahte hain ki ATYA unke kehne par aapko call ya message kare (jaise exercise ya khaane ka "
+                f"check-in, ya koi sawaal), aur aapka jawab ya call ka chhota summary unhe bheje. Aapka aur kuch "
+                f"{who} ke saath share nahi hoga. Allow karein?")
         buttons = [[("Haan, allow", f"circle:allow:{inv['code']}"), ("Abhi nahi", f"circle:no:{inv['code']}")]]
     else:
-        body = (f"{who} would like ATYA to call you when they ask (for example, to check in on your exercise), and to "
-                f"send them a short summary after each of those calls. Nothing else of yours is shared with {who}. "
-                "Allow?")
+        body = (f"{who} would like ATYA to call or message you when they ask (for example, to check in on your "
+                f"exercise, or to ask you something), and to pass your answer or a short summary of the call back to "
+                f"them. Nothing else of yours is shared with {who}. Allow?")
         buttons = [[("Allow", f"circle:allow:{inv['code']}"), ("Not now", f"circle:no:{inv['code']}")]]
     tell(store, tenant, body, buttons)
 
@@ -317,8 +318,8 @@ def _due_day(rec: dict, local: dt.datetime, at: dt.time, tz) -> dt.date | None:
     return today if day == today else None
 
 
-def queue_checkins(store: Store, now: dt.datetime) -> int:
-    """Check-ins whose time has come become calls in the callee's queue."""
+def queue_checkins(store: Store, now: dt.datetime, llm=None) -> int:
+    """Check-ins whose time has come become calls in the callee's queue, or messages to them."""
     from zoneinfo import ZoneInfo
     with store.tx(system=True) as tx:
         recs = tx._all("SELECT r.* FROM records r JOIN tenants t ON t.id = r.tenant_id WHERE r.type = 'checkin' "
@@ -326,17 +327,18 @@ def queue_checkins(store: Store, now: dt.datetime) -> int:
     n = 0
     for rec in recs:
         try:
-            n += _queue_one(store, rec, now, ZoneInfo)
+            n += _queue_one(store, rec, now, ZoneInfo, llm)
         except Exception:
             log.exception("check-in %s couldn't be queued", rec["id"])
     return n
 
 
-def _queue_one(store: Store, rec: dict, now: dt.datetime, ZoneInfo) -> int:
+def _queue_one(store: Store, rec: dict, now: dt.datetime, ZoneInfo, llm=None) -> int:
     f = rec["fields"]
+    repeat = (f.get("Repeat") or "once").lower()
     at = briefs.parse_time(str(f.get("Time") or ""))
-    if at is None:
-        return 0
+    if at is None and (repeat != "once" or str(f.get("Time") or "").strip()):
+        return 0                                   # a repeating one needs a time; a garbled time waits for a fix
     with store.tx(system=True) as tx:
         link = find_link(tx, rec["tenant_id"], str(f.get("Person") or ""))
         requester = tx.tenant(rec["tenant_id"])
@@ -347,12 +349,23 @@ def _queue_one(store: Store, rec: dict, now: dt.datetime, ZoneInfo) -> int:
         return 0
     tz = ZoneInfo(callee["timezone"] or "UTC")
     local = now.astimezone(tz)
-    day = _due_day(rec, local, at, tz)
-    if day is None:
-        return 0
-    due = dt.datetime.combine(day, at, tzinfo=tz)
+    if at is None:                                 # "now": as soon as it's filed
+        due = rec["created_at"].astimezone(tz)
+        day = due.date()
+        if f.get("Date") and str(f["Date"])[:10] != day.isoformat():
+            return 0
+    else:
+        day = _due_day(rec, local, at, tz)
+        if day is None:
+            return 0
+        due = dt.datetime.combine(day, at, tzinfo=tz)
     if not (due <= local < due + LATE_LIMIT):
         return 0
+    if (f.get("Via") or "message").lower() != "call":
+        sent = send_ask(store, llm, rec, requester, callee, link, day, now)
+        if sent and repeat == "once":
+            _mark_done(store, requester, rec)
+        return 1 if sent else 0
     with store.tx(system=True) as tx:
         today_n = tx._one("SELECT count(*) AS n FROM calls WHERE kind = 'checkin' AND requested_by = %s "
                           "AND tenant_id = %s AND day = %s", (requester["id"], callee["id"], day))["n"]
@@ -362,12 +375,108 @@ def _queue_one(store: Store, rec: dict, now: dt.datetime, ZoneInfo) -> int:
             return 0
         call = tx.add_call(callee["id"], "checkin", due.astimezone(dt.timezone.utc), about=str(f.get("Purpose") or ""),
                            day=day, requested_by=requester["id"], checkin_id=rec["id"])
-    if call and (f.get("Repeat") or "once").lower() == "once":
-        from .schema import load_schema
-        with store.tx(requester["id"]) as tx:
-            tx.update_record(requester["id"], load_schema(requester["schema_name"]), rec["id"], {"Status": "done"},
-                             actor="circle")
+    if call and repeat == "once":
+        _mark_done(store, requester, rec)
     return 1 if call else 0
+
+
+def _mark_done(store: Store, requester: dict, rec: dict) -> None:
+    from .schema import load_schema
+    with store.tx(requester["id"]) as tx:
+        tx.update_record(requester["id"], load_schema(requester["schema_name"]), rec["id"], {"Status": "done"},
+                         actor="circle")
+
+
+# --- check-ins by message --------------------------------------------------------------
+
+DEFAULT_WAIT_HOURS = 3
+SHORT_ANSWER = 400                 # longer replies are summarised for the requester
+
+
+def send_ask(store: Store, llm, rec: dict, requester: dict, callee: dict, link: dict, day: dt.date,
+             now: dt.datetime) -> bool:
+    """Message the callee on the requester's behalf; the reply goes back (see maybe_answer). False if it was
+    already sent today."""
+    f = rec["fields"]
+    purpose = str(f.get("Purpose") or "").strip() or rec["title"]
+    who = first(requester)
+    text = None
+    if llm is not None:
+        try:
+            text = llm.relay_question(purpose=purpose, requester=who, name=first(callee, link["name"]),
+                                      language=callee.get("call_language") or "english")
+        except Exception:
+            log.exception("couldn't word the message; sending it plainly")
+    if not text:
+        text = (f"{who} pooch rahe hain: {purpose}" if hindi(callee) else f"{who} asks: {purpose}")
+    try:
+        hours = float(f.get("Wait Hours") or DEFAULT_WAIT_HOURS)
+    except (TypeError, ValueError):
+        hours = DEFAULT_WAIT_HOURS
+    with store.tx(system=True) as tx:
+        today_n = tx._one("SELECT count(*) AS n FROM circle_asks WHERE requester = %s AND callee = %s AND day = %s",
+                          (requester["id"], callee["id"], day))["n"]
+        if today_n >= DAILY_CHECKINS * 2:
+            log.info("check-in message %s skipped: %d messages to this person today", rec["id"], today_n)
+            return False
+        row = tx._one("INSERT INTO circle_asks (requester, callee, name, checkin_id, day, question, sent_text, "
+                      "wait_until) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING id",
+                      (requester["id"], callee["id"], link["name"], rec["id"], day, purpose, text,
+                       now + dt.timedelta(hours=hours)))
+    if row is None:
+        return False
+    tell(store, callee, text + ("\n\n(Bas yahin reply karein, main {} ko bata dunga.)" if hindi(callee) else
+                                "\n\n(Just reply here and I'll pass it on to {}.)").format(who))
+    return True
+
+
+def maybe_answer(store: Store, llm, tenant: dict, inbox_id, text: str) -> bool:
+    """A message from someone who was asked something on another's behalf: if it answers that, pass it on (and
+    don't treat it as a message to their own assistant). True if it was an answer."""
+    with store.tx(system=True) as tx:
+        asks = tx._all("SELECT * FROM circle_asks WHERE callee = %s AND status = 'waiting' AND wait_until > now() "
+                       "ORDER BY sent_at DESC LIMIT 3", (tenant["id"],))
+    for ask in asks:
+        try:
+            if llm is not None and not llm.is_answer(question=ask["sent_text"], message=text):
+                continue
+        except Exception:
+            log.exception("couldn't tell if this answers a circle question")
+            continue
+        with store.tx(system=True) as tx:
+            done = tx.conn.execute("UPDATE circle_asks SET status = 'answered', answer = %s, answered_at = now() "
+                                   "WHERE id = %s AND status = 'waiting'", (text[:4000], ask["id"])).rowcount
+            requester = tx.tenant(ask["requester"])
+        if not done or requester is None:
+            continue
+        reply = text.strip()
+        if len(reply) > SHORT_ANSWER and llm is not None:
+            try:
+                reply = llm.call_report(transcript=text, purpose=ask["question"], name=ask["name"])
+            except Exception:
+                reply = reply[:SHORT_ANSWER] + "…"
+        tell(store, requester, f"💬 {ask['name']}, on \"{ask['question']}\":\n{reply}")
+        with store.tx(tenant["id"]) as tx:
+            tx.add_outbox(tenant["id"], chat_id=tenant.get("telegram_chat_id") or 0, inbox_id=inbox_id,
+                          body=f"{first(requester)} ko bata diya." if hindi(tenant) else
+                          f"Passed on to {first(requester)}.")
+        return True
+    return False
+
+
+def expire_asks(store: Store, now: dt.datetime) -> int:
+    """Questions nobody answered in time: tell whoever asked."""
+    with store.tx(system=True) as tx:
+        rows = tx._all("UPDATE circle_asks SET status = 'expired' WHERE status = 'waiting' AND wait_until <= %s "
+                       "RETURNING *", (now,))
+    for a in rows:
+        with store.tx(system=True) as tx:
+            requester = tx.tenant(a["requester"])
+        if requester:
+            hours = max(1, round((a["wait_until"] - a["sent_at"]).total_seconds() / 3600))
+            tell(store, requester, f"💬 {a['name']} hasn't replied to \"{a['question']}\" "
+                                   f"({hours} hour{'s' if hours != 1 else ''}).")
+    return len(rows)
 
 
 def _pause(store: Store, rec: dict, requester: dict | None, note: str) -> None:
@@ -412,3 +521,17 @@ def report(store: Store, llm, call: dict, callee: dict, result: str) -> None:
             "unreachable": f"I couldn't reach {name}'s phone"}.get(result, f"I couldn't reach {name}")
     tries = f" ({call.get('attempts', 1)} tries)" if result == "missed" else ""
     tell(store, requester, f"📞 {what}{tries}, for: {about}.")
+
+
+def run(store: Store, llm) -> None:
+    """Check-ins (calls are queued, messages sent) and unanswered questions, every few seconds."""
+    import time
+    log.info("circle worker started")
+    while True:
+        try:
+            now = dt.datetime.now(dt.timezone.utc)
+            queue_checkins(store, now, llm)
+            expire_asks(store, now)
+        except Exception:
+            log.exception("circle tick failed")
+        time.sleep(10)

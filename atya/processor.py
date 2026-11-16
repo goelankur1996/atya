@@ -679,6 +679,14 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
         elif files:                                   # a PDF is always a capture
             return process_files(store, llm, row, tenant, schema, tz, files)
 
+        if row["source"] != "call" and row.get("forced_intent") is None:
+            from . import circle                      # an answer to something asked on someone's behalf?
+            if circle.maybe_answer(store, llm, tenant, row["id"], raw):
+                with store.tx(row["tenant_id"]) as tx:
+                    tx.finish_inbox(row["id"], status="responded", intent="chat",
+                                    notes="answer to a circle question; passed on")
+                return "responded"
+
         with store.tx(row["tenant_id"]) as tx:
             setup = interview.current(tx, tenant["id"])
         if setup is not None and row.get("forced_intent") is None:

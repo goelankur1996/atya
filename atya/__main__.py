@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
-from . import connections, health, routines, wakecall, research, transcribe, briefs, embeddings, processor, receiver, reminders, sender, web, whatsapp
+from . import circle, connections, health, routines, wakecall, research, transcribe, briefs, embeddings, processor, receiver, reminders, sender, web, whatsapp
 from .config import load_settings
 from .llm import BedrockLLM, ClaudeLLM
 from .migrate import migrate
@@ -135,6 +135,7 @@ def main() -> None:
                     "WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN)")
     if embedder is not None:
         workers.append(("embedder", embeddings.run, (store, embedder, settings)))
+    workers.append(("circle", circle.run, (store, llm)))
     if settings.calls_on:
         workers.append(("wakecall", wakecall.run, (store, settings, llm, embedder)))
     else:

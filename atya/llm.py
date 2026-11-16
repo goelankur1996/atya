@@ -48,6 +48,8 @@ class LLM(Protocol):
     def read_document(self, *, filename: str, caption: str, text: str | None = None,
                       pdf: bytes | None = None) -> dict: ...
     def call_report(self, *, transcript: str, purpose: str, name: str) -> str: ...
+    def relay_question(self, *, purpose: str, requester: str, name: str, language: str) -> str: ...
+    def is_answer(self, *, question: str, message: str) -> bool: ...
 
 
 # --- prompts -------------------------------------------------------------------
@@ -309,6 +311,28 @@ class PromptLLM:
                   "about, which is private to them. Plain text, no preamble.")
         return self._call(model=self.fast_model, system=system, user=transcript[:20000], max_tokens=300,
                           cache=False).strip()
+
+    def relay_question(self, *, purpose: str, requester: str, name: str, language: str) -> str:
+        """A short chat message to {name}, asking on {requester}'s behalf (their words were about {name})."""
+        tongue = {"hinglish": "Hinglish (mostly Hindi in Latin script, everyday English words), warm and respectful "
+                              "(aap, ji)",
+                  "hindi": "simple Hindi in Latin script, warm and respectful (aap, ji)"}.get(language, "English")
+        system = (f"{requester} asked their assistant ATYA to message {name}. Write the message ATYA sends to {name}, "
+                  f"in {tongue}: one or two short sentences that say {requester} is asking, then the question "
+                  f"itself, rewritten to address {name} directly ('I' in the request means {requester}). If the "
+                  "request says how to respond (e.g. motivate if not done), only ask the question now. No greeting "
+                  "line, no sign-off, plain text.")
+        return self._call(model=self.fast_model, system=system, user=f"Request: {purpose}", max_tokens=200,
+                          cache=False).strip()
+
+    def is_answer(self, *, question: str, message: str) -> bool:
+        """Is this message a reply to that question (or something else for their assistant)?"""
+        system = ("Someone was asked a question by message. Decide if their next message is a reply to it (even a "
+                  "short one like 'yes', 'done', 'kal', a choice, or a reason), or something unrelated they want "
+                  "their assistant to do or note. Answer with exactly one word: answer or other.")
+        out = self._call(model=self.fast_model, system=system,
+                         user=f"Question: {question}\nTheir message: {message}", max_tokens=5, cache=False)
+        return out.strip().lower().startswith("answer")
 
     def _call_pdf(self, *, model: str, system: str, intro: str, pdf: bytes, max_tokens: int) -> str:
         raise NotImplementedError

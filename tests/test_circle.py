@@ -73,7 +73,7 @@ def test_existing_user_agrees_both_ways(store, settings, owner):
     ctx, _ = ctx_for(store, settings, dad, DAD, "Rajesh")
     assert commands.start(ctx, inv["code"].lower()) == "circle:asked"
     ask = bodies(store, dad["id"])[-1]
-    assert ask.startswith("Ankur chahte hain") and "Allow karein?" in ask              # in his language
+    assert ask.startswith("Ankur chahte hain") and "call ya message" in ask and "Allow karein?" in ask              # in his language
     assert tap_last(store, dad, "Haan, allow") == "circle:allowed"
     assert "Rajesh" not in bodies(store, owner["id"])[-2] and "Dad said yes" in bodies(store, owner["id"])[-2]
     assert tap_last(store, owner, "Yes") == "circle:back-allowed"
@@ -97,14 +97,15 @@ def test_someone_new_joins_from_the_link(store, settings, owner):
     assert commands.start(ctx, inv["code"]) == "circle:joined-new"          # no waitlist
     assert tg.sent[-1][1] == commands.TZ_PROMPT
     commands.finish_onboarding(ctx, "Asia/Kolkata")                          # then the circle question
-    assert bodies(store, ctx.tenant["id"])[-1].startswith("Ankur would like ATYA to call you")
+    assert bodies(store, ctx.tenant["id"])[-1].startswith("Ankur would like ATYA to call or message you")
 
 
 def make_checkin(store, owner, **fields):
     with store.tx(owner["id"]) as tx:
         rec, _ = tx.create_record(owner["id"], S, "checkin", title="Dad: situps", enforce_verbatim=False, actor="t",
                                   fields={"Person": "Dad", "Purpose": "did he do his situps; motivate him if not",
-                                          "Time": "17:30", "Repeat": "daily", "Status": "active", **fields})
+                                          "Via": "call", "Time": "17:30", "Repeat": "daily", "Status": "active",
+                                          **fields})
     return rec
 
 
@@ -176,3 +177,51 @@ def test_checkin_prompt_is_in_their_language():
     assert "Ankur asked ATYA to check in with them" in p and "Speak Hinglish" in p and "Ek second." in p
     s = Settings(database_url="x", telegram_bot_token="x", anthropic_api_key="x", owner_telegram_user_id=1)
     assert wakecall.voice_for(s, dad) == "arjun" and wakecall.voice_for(s, {"call_language": "english"}) == "matthew"
+
+
+class RelayLLM(FakeLLM):
+    def relay_question(self, *, purpose, requester, name, language):
+        return f"{requester} pooch rahe hain: ghar aate hue kaun si ice cream laayein?"
+
+    def is_answer(self, *, question, message):
+        return "ice cream" in message or "butterscotch" in message
+
+
+def test_ask_by_message_and_the_reply_goes_back(store, settings, owner):
+    from atya import processor
+    dad = linked_dad(store, settings, owner)
+    with store.tx(owner["id"]) as tx:                                     # what filing makes of "ask dad …"
+        tx.create_record(owner["id"], S, "checkin", title="Dad: ice cream", enforce_verbatim=False, actor="t",
+                         fields={"Person": "Dad", "Purpose": "which ice cream should I bring on the way back",
+                                 "Via": "message", "Repeat": "once", "Status": "active"})
+    llm = RelayLLM()
+    now = dt.datetime.now(dt.timezone.utc)
+    assert circle.queue_checkins(store, now, llm) == 1 and circle.queue_checkins(store, now, llm) == 0
+    sent = bodies(store, dad["id"])[-1]
+    assert sent.startswith("Ankur pooch rahe hain: ghar aate hue kaun si ice cream") and "reply karein" in sent
+    with store.tx(dad["id"]) as tx:                                      # an unrelated message is his own
+        tx.add_inbox(dad["id"], source="telegram", raw_content="remind me to pay the electricity bill")
+        tx.add_inbox(dad["id"], source="telegram", raw_content="butterscotch, aur mummy ke liye kulfi")
+    llm.plans["remind me to pay the electricity bill"] = {"writes": [{"type": "task", "title": "Pay electricity bill",
+                                                                      "fields": {}}]}
+    while processor.process_once(store, llm, settings):
+        pass
+    assert bodies(store, owner["id"])[-1] == ('💬 Dad, on "which ice cream should I bring on the way back":\n'
+                                              "butterscotch, aur mummy ke liye kulfi")
+    assert bodies(store, dad["id"])[-1] == "Ankur ko bata diya."
+    with store.tx(dad["id"]) as tx:
+        assert tx._all("SELECT * FROM records WHERE tenant_id = %s AND title = 'Pay electricity bill'", (dad["id"],))
+
+
+def test_unanswered_question_is_reported(store, settings, owner):
+    dad = linked_dad(store, settings, owner)
+    with store.tx(owner["id"]) as tx:
+        tx.create_record(owner["id"], S, "checkin", title="Dad: protein", enforce_verbatim=False, actor="t",
+                         fields={"Person": "Dad", "Purpose": "did he eat eggs today", "Via": "message",
+                                 "Repeat": "once", "Status": "active", "Wait Hours": 2})
+    now = dt.datetime.now(dt.timezone.utc)
+    assert circle.queue_checkins(store, now) == 1                          # no model: sent plainly
+    assert bodies(store, dad["id"])[-1].startswith("Ankur pooch rahe hain: did he eat eggs today")
+    assert circle.expire_asks(store, now + dt.timedelta(hours=1)) == 0
+    assert circle.expire_asks(store, now + dt.timedelta(hours=2, minutes=1)) == 1
+    assert bodies(store, owner["id"])[-1] == '💬 Dad hasn\'t replied to "did he eat eggs today" (2 hours).'

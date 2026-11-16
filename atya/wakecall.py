@@ -560,7 +560,7 @@ def tick(store: Store, settings: Settings, call_fn: CallFn, now: dt.datetime | N
     from . import circle
     now = now or dt.datetime.now(dt.timezone.utc)
     queue_morning_calls(store, now)
-    circle.queue_checkins(store, now)
+    circle.queue_checkins(store, now, llm)
     with store.tx(system=True) as tx:
         call = tx.claim_due_call(now)
         tenant = tx.tenant(call["tenant_id"]) if call else None
