@@ -47,6 +47,7 @@ class LLM(Protocol):
     def research_write(self, *, request: str, goal: str, findings: list[dict]) -> dict: ...
     def read_document(self, *, filename: str, caption: str, text: str | None = None,
                       pdf: bytes | None = None) -> dict: ...
+    def call_report(self, *, transcript: str, purpose: str, name: str) -> str: ...
 
 
 # --- prompts -------------------------------------------------------------------
@@ -298,6 +299,16 @@ class PromptLLM:
 
     def _call(self, *, model: str, system: str, user: str, max_tokens: int, cache: bool = True) -> str:
         raise NotImplementedError
+
+    def call_report(self, *, transcript: str, purpose: str, name: str) -> str:
+        """A check-in call, summed up for the person who asked for it: only about that purpose."""
+        system = (f"You write a short report for someone who asked their assistant ATYA to phone {name} and check: "
+                  f"\"{purpose}\". Below is the call's transcript (it may be in Hindi or Hinglish). In English, in 1 to "
+                  f"3 short sentences: what {name} said about that (done or not, when, any reason or plan), and their "
+                  "mood if it was clear. Report only what bears on the check-in: leave out anything else they talked "
+                  "about, which is private to them. Plain text, no preamble.")
+        return self._call(model=self.fast_model, system=system, user=transcript[:20000], max_tokens=300,
+                          cache=False).strip()
 
     def _call_pdf(self, *, model: str, system: str, intro: str, pdf: bytes, max_tokens: int) -> str:
         raise NotImplementedError

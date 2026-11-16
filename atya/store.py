@@ -1062,11 +1062,16 @@ class Tx:
     # --- calls -----------------------------------------------------------------
 
     def add_call(self, tenant_id: uuid.UUID, kind: str, due_at: dt.datetime, *, about: str | None = None,
-                 record_id: uuid.UUID | None = None, day: dt.date | None = None) -> dict | None:
-        """Queue a call. None if that morning call already exists."""
+                 record_id: uuid.UUID | None = None, day: dt.date | None = None,
+                 requested_by: uuid.UUID | None = None, checkin_id: uuid.UUID | None = None) -> dict | None:
+        """Queue a call. None if that morning call (or that check-in, that day) already exists."""
         return self._one(
-            "INSERT INTO calls (tenant_id, kind, about, record_id, day, due_at) VALUES (%s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT DO NOTHING RETURNING *", (tenant_id, kind, about, record_id, day, due_at))
+            "INSERT INTO calls (tenant_id, kind, about, record_id, day, due_at, requested_by, checkin_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING *",
+            (tenant_id, kind, about, record_id, day, due_at, requested_by, checkin_id))
+
+    def set_call_transcript(self, call_id, inbox_id) -> None:
+        self.conn.execute("UPDATE calls SET transcript_id = %s WHERE id = %s", (inbox_id, call_id))
 
     def claim_due_call(self, now: dt.datetime) -> dict | None:
         """The next call whose time has come, marked 'calling' (system scope)."""
@@ -1200,6 +1205,13 @@ class Tx:
 
     def waitlist_get(self, entry_id: uuid.UUID) -> dict | None:
         return self._one("SELECT * FROM waitlist WHERE id = %s", (entry_id,))
+
+    def waitlist_remove_person(self, *, whatsapp_phone: str | None, telegram_user_id: int | None) -> None:
+        """Someone on the waitlist who got in another way (e.g. a circle invite)."""
+        if whatsapp_phone:
+            self.conn.execute("DELETE FROM waitlist WHERE whatsapp_phone = %s", (whatsapp_phone,))
+        if telegram_user_id:
+            self.conn.execute("DELETE FROM waitlist WHERE telegram_user_id = %s", (telegram_user_id,))
 
     def waitlist_remove(self, entry_id: uuid.UUID) -> None:
         self.conn.execute("DELETE FROM waitlist WHERE id = %s", (entry_id,))

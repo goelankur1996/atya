@@ -53,8 +53,7 @@ RULES = """Rules for the whole call:
 - This is a voice call: say "go over" or "tell you", never "see" or "show".
 - If they say hello or talk over your opening, don't repeat the whole greeting: say "Hi, it's ATYA" and go on with
   your question.
-- Always speak English. Only if they speak Hindi two or more turns in a row, switch to Hindi; switch back when they
-  speak English. {gender}
+- {language} {gender}
 - ATYA (the atya tool) holds all their records and does everything with them. Whenever they ask about their own
   things (tasks, people, birthdays, notes, routines, the calendar on any day), want something saved or changed (add,
   edit, move, copy, mark done, delete, a reminder, "call me at 4 to ..."), report a routine day, or mention
@@ -94,6 +93,28 @@ weather, which you then give in a few words. Then ask one light, cheerful questi
 today: their tasks, today's birthdays and events, or anything else? Stop and wait.
 Don't run through the day unprompted. Use the information below only for what they choose or ask about."""
 
+LANGUAGE_RULES = {
+    "english": "Always speak English. Only if they speak Hindi two or more turns in a row, switch to Hindi; switch "
+               "back when they speak English.",
+    "hinglish": "Speak Hinglish, the way people in North India talk at home: mostly Hindi, with the English words "
+                "people normally use (exercise, protein, call, done, time). Never speak only English. Keep it simple, "
+                "warm and respectful (aap, ji). If they clearly prefer English, follow them.",
+    "hindi": "Speak simple, everyday Hindi, warm and respectful (aap, ji), with English only for words people normally "
+             "say in English. If they clearly prefer English, follow them.",
+}
+
+HINGLISH_FILLERS = ["Ek second.", "Ek minute ji.", "Bas ek pal.", "Haan, check karte hain.", "Zara dekhte hain.",
+                    "Ruko, abhi batate hain.", "Ek second, dekh rahe hain.", "Haan ji, ek minute.",
+                    "Achha, check karte hain.", "Thoda sa ruko.", "Bas abhi.", "Dekhte hain zara.",
+                    "Haan, ek pal.", "Ek second ji.", "Theek hai, dekhte hain."]
+
+OPENING_CHECKIN = """You are calling {name} because {requester} asked ATYA to check in with them: "{about}".
+Open with ONE short turn: greet {name} warmly by name, say {requester} asked you to check in, and ask the question.
+Then stop and wait. If it's done, be genuinely pleased and say so. If it isn't, encourage them kindly: ask what got
+in the way and suggest one small, concrete next step (when and how), without nagging or lecturing. If they say no
+firmly, accept it gracefully. Before the goodbye, say that {requester} will get a short note on how it went.
+Keep the call short (two or three minutes) unless they want to talk; they can also ask you about their own day."""
+
 OPENING_REMINDER = """You are calling because {name} asked to be reminded: "{about}".
 Open with ONE short turn: greet {name} by name and say the reminder in your first sentence. Then ask if they want
 anything about it: another call later, or a note. Stop and wait. Keep the call short unless they want to talk."""
@@ -123,18 +144,31 @@ def gender_rule(voice: str) -> str:
             else "You are male: in Hindi always use masculine first-person forms.")
 
 
-def filler_list() -> str:
+def filler_list(language: str = "english") -> str:
     """All the fillers, shuffled per call so the model doesn't always reach for the first few."""
     import random
-    return " / ".join(f'"{f}"' for f in random.sample(FILLERS, len(FILLERS)))
+    pool = HINGLISH_FILLERS if language in ("hinglish", "hindi") else FILLERS
+    return " / ".join(f'"{f}"' for f in random.sample(pool, len(pool)))
+
+
+def voice_for(settings: Settings, tenant: dict) -> str:
+    """The configured voice for English calls; the Hindi voice of the same gender for Hindi/Hinglish."""
+    from .tgcall import FEMALE_VOICES
+    if tenant.get("call_language") in ("hinglish", "hindi"):
+        return "kiara" if settings.tg_call_voice in FEMALE_VOICES else "arjun"
+    return settings.tg_call_voice
 
 
 def build_prompt(tenant: dict, call: dict, local: dt.datetime, brief: str, voice: str,
                  weather: str | None, extra: str = "", records: str = "") -> str:
     name = first_name(tenant)
+    language = tenant.get("call_language") or "english"
     clock = briefs.fmt_time(local.time())
     if call["kind"] == "reminder":
         opening = OPENING_REMINDER.format(name=name, about=call.get("about") or "something")
+    elif call["kind"] == "checkin":
+        opening = OPENING_CHECKIN.format(name=name, requester=call.get("requester_name") or "someone",
+                                         about=call.get("about") or "how they're doing")
     elif call["kind"] == "setup":
         from . import interview
         opening = interview.CALL_OPENING.format(name=name)
@@ -145,7 +179,9 @@ def build_prompt(tenant: dict, call: dict, local: dt.datetime, brief: str, voice
         opening = OPENING_NO_CITY.format(name=name, clock=clock)
     return PROMPT.format(name=name, clock=clock, day=local.strftime("%A %-d %B"),
                          iso=local.strftime("%Y-%m-%dT%H:%M"), opening=opening,
-                         rules=RULES.format(gender=gender_rule(voice), fillers=filler_list()), brief=brief,
+                         rules=RULES.format(gender=gender_rule(voice), fillers=filler_list(language),
+                                           language=LANGUAGE_RULES.get(language, LANGUAGE_RULES["english"])),
+                         brief=brief,
                          extra=f"\n\n{extra}" if extra else "", records=records or "(none loaded)")
 
 
@@ -190,11 +226,11 @@ def ask_atya(store: Store, tenant: dict, message: str, requests: list, *, wait: 
 
 
 def save_transcript(store: Store, tenant: dict, transcript: list[tuple[str, str]], started: dt.datetime,
-                    *, sender: str = "call") -> bool:
+                    *, sender: str = "call"):
     """Keep the call's transcript in the inbox, as a record of what was said. It isn't filed: everything
-    worth keeping was sent to ATYA during the call. False if the user said nothing."""
+    worth keeping was sent to ATYA during the call. Returns its inbox id; None if the user said nothing."""
     if not any(role == "USER" and text.strip() for role, text in transcript):
-        return False
+        return None
     name = (tenant.get("display_name") or "Me").split()[0]
     lines = [f"{name if role == 'USER' else 'ATYA'}: {text.strip()}" for role, text in transcript if text.strip()]
     with store.tx(tenant["id"]) as tx:
@@ -202,7 +238,7 @@ def save_transcript(store: Store, tenant: dict, transcript: list[tuple[str, str]
                               sender=sender, actor="wakecall", status="processing")
         tx.finish_inbox(row_id, status="processed", notes="call transcript (kept as said; its requests were "
                                                          "handled during the call)")
-    return True
+    return row_id
 
 
 def save_city(store: Store, tenant: dict, city: str, http=None) -> str:
@@ -312,7 +348,12 @@ async def prepare(store: Store, settings: Settings, tenant: dict, call: dict,
     if call["kind"] in ("morning", "now") and tenant.get("city_lat") is not None:
         forecast = await asyncio.to_thread(wx.today_line, tenant["city_lat"], tenant["city_lon"])
     extra = call_extra(store, tenant, call)
-    return (build_prompt(tenant, call, local, brief, settings.tg_call_voice, forecast, extra, records),
+    if call.get("requested_by"):
+        from .circle import first
+        with store.tx(system=True) as tx:
+            requester = tx.tenant(call["requested_by"])
+        call = {**call, "requester_name": first(requester)}
+    return (build_prompt(tenant, call, local, brief, voice_for(settings, tenant), forecast, extra, records),
             call_tools(store, tenant, requests))
 
 
@@ -322,6 +363,9 @@ def finish_talk(store: Store, tenant: dict, call: dict, sonic, seconds: float, s
     record_call(store, tenant, seconds)
     setup = call["kind"] == "setup"
     saved = save_transcript(store, tenant, sonic.transcript, started, sender="setup call" if setup else "call")
+    if saved and call.get("id"):
+        with store.tx(system=True) as tx:
+            tx.set_call_transcript(call["id"], saved)
     with store.tx(tenant["id"]) as tx:
         made = [r for i in requests for r in tx.records_from_inbox(tenant["id"], i)]
         changes = [line for i in requests
@@ -340,7 +384,7 @@ def finish_talk(store: Store, tenant: dict, call: dict, sonic, seconds: float, s
         if body:
             tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=body, actor="wakecall")
     log.info("call done (%s, %s): %d turns, %d tool uses, %d requests, transcript saved=%s", str(tenant["id"])[:4],
-             call["kind"], len(sonic.transcript), len(sonic.tool_calls), len(requests), saved)
+             call["kind"], len(sonic.transcript), len(sonic.tool_calls), len(requests), bool(saved))
 
 
 async def place_call(store: Store, settings: Settings, llm, embedder, tenant: dict, call: dict) -> str:
@@ -363,7 +407,7 @@ async def place_call(store: Store, settings: Settings, llm, embedder, tenant: di
     except Exception:
         log.debug("couldn't record the caller's identity", exc_info=True)
     started = dt.datetime.now(dt.timezone.utc)
-    sonic = Sonic(system_prompt=prompt, voice=settings.tg_call_voice, region=settings.aws_region, tools=tools,
+    sonic = Sonic(system_prompt=prompt, voice=voice_for(settings, tenant), region=settings.aws_region, tools=tools,
                   on_audio=lambda pcm: caller.out.extend(up_from_24k(pcm)), on_interrupt=caller.out.clear)
     try:
         try:
@@ -448,10 +492,10 @@ def close_call_only_task(store: Store, tenant: dict, record_id) -> None:
 
 
 def after_call(store: Store, settings: Settings, tenant: dict, call: dict, result: str,
-               now: dt.datetime) -> str:
+               now: dt.datetime, llm=None) -> str:
     """The call's new status: retry (not answered), or done, with a message instead where needed."""
     kind = call["kind"]
-    if result == "missed" and call["attempts"] < ATTEMPTS and kind in ("morning", "reminder"):
+    if result == "missed" and call["attempts"] < ATTEMPTS and kind in ("morning", "reminder", "checkin"):
         with store.tx(system=True) as tx:
             tx.finish_call(call["id"], "pending", next_at=now + dt.timedelta(minutes=RETRY_MINUTES))
         return "retry"
@@ -480,6 +524,11 @@ def after_call(store: Store, settings: Settings, tenant: dict, call: dict, resul
                 "no-minutes": f"You've used today's {settings.daily_call_minutes} call minutes. They reset tomorrow.",
                 "failed": "The call didn't go through on my side. Try /callme again in a few minutes.",
             }.get(result, "I called but couldn't reach you. Send /callme to try again."))
+    if kind == "checkin":
+        from . import circle
+        with store.tx(system=True) as tx:
+            fresh = tx.call(call["id"]) or call
+        circle.report(store, llm, {**fresh, "attempts": call["attempts"]}, tenant, result)
     status = "cancelled" if result in ("no-consent", "no-line") else result
     with store.tx(system=True) as tx:
         tx.finish_call(call["id"], status)
@@ -505,10 +554,13 @@ def queue_morning_calls(store: Store, now: dt.datetime) -> int:
     return n
 
 
-def tick(store: Store, settings: Settings, call_fn: CallFn, now: dt.datetime | None = None) -> str | None:
-    """Queue today's morning calls, then place at most one due call. Returns what happened."""
+def tick(store: Store, settings: Settings, call_fn: CallFn, now: dt.datetime | None = None,
+         llm=None) -> str | None:
+    """Queue today's morning calls and check-ins, then place at most one due call. Returns what happened."""
+    from . import circle
     now = now or dt.datetime.now(dt.timezone.utc)
     queue_morning_calls(store, now)
+    circle.queue_checkins(store, now)
     with store.tx(system=True) as tx:
         call = tx.claim_due_call(now)
         tenant = tx.tenant(call["tenant_id"]) if call else None
@@ -521,14 +573,17 @@ def tick(store: Store, settings: Settings, call_fn: CallFn, now: dt.datetime | N
         return f"{call['kind']}:cancelled"
     if line_for(settings, tenant) is None:
         result = "no-line"                          # no way to call them (e.g. calls off, or a number we can't dial)
-    elif call["kind"] != "setup" and not tenant.get("wakecall_consent_at") and not limits.is_owner(tenant, settings):
+    elif call["kind"] == "checkin" and not circle.allowed(store, call):
+        result = "no-consent"                       # they ended the circle link since it was queued
+    elif call["kind"] not in ("setup", "checkin") and not tenant.get("wakecall_consent_at") \
+            and not limits.is_owner(tenant, settings):
         result = "no-consent"                       # asked for a call without agreeing to calls yet
     elif now - call["due_at"] > LATE_LIMIT:
         result = "missed"
         call["attempts"] = ATTEMPTS                 # too late: no retries, just the message instead
     else:
         result = asyncio.run(call_fn(tenant, call))
-    status = after_call(store, settings, tenant, call, result, now)
+    status = after_call(store, settings, tenant, call, result, now, llm)
     return f"{call['kind']}:{result}:{status}"
 
 
@@ -585,7 +640,7 @@ def run(store: Store, settings: Settings, llm, embedder) -> None:
         log.info("%d call(s) were mid-way at shutdown; queued again", stuck)
     while True:
         try:
-            did = tick(store, settings, dialer(store, settings))
+            did = tick(store, settings, dialer(store, settings), llm=llm)
             if did:
                 log.info("call: %s", did)
                 continue                              # more may be due

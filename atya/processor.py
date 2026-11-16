@@ -126,6 +126,15 @@ def fanout_context(tx: Tx, tenant_id: uuid.UUID) -> dict[str, list[dict]]:
         "FROM records r WHERE r.tenant_id = %s AND r.type = 'routine' "
         "AND coalesce(r.fields->>'Status', 'active') = 'active'", (tenant_id,))
     out = {"Projects": projects, "People": people, "Open tasks": open_tasks, "Recent decisions": decisions}
+    circle = tx._all("SELECT id, name AS title, 'can be called' AS note FROM circle_links "
+                     "WHERE caller = %s AND status = 'active' ORDER BY name", (tenant_id,))
+    out["Circle: people the owner can ask ATYA to call (checkin Person must be one of these)"] = circle
+    checkins = tx._all(
+        "SELECT id, title, concat_ws('; ', fields->>'Person', fields->>'Repeat', fields->>'Time', "
+        "fields->>'Status') AS note FROM records WHERE tenant_id = %s AND type = 'checkin' "
+        "AND coalesce(fields->>'Status', 'active') <> 'done' ORDER BY updated_at DESC LIMIT 20", (tenant_id,))
+    if checkins:
+        out["Check-in calls (id)"] = checkins
     if routines:
         out["Active routines (recent check-ins: date result (id))"] = routines
     return out

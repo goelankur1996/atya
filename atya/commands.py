@@ -57,6 +57,8 @@ Commands:
 /wakecall - a short morning phone call that goes over your day (beta)
 /callme - a phone call from me right now; or just say "call me at 4 to remind me to leave"
 /city Noida - your city, for the weather on calls
+/circle - people who let you ask me to call them (e.g. check in on dad's exercise), with a report back to you
+/language hinglish - the language I use on your calls: english, hinglish or hindi
 /web - a one-time link to browse, search and edit your records in a browser
 /link - use me on both Telegram and WhatsApp, with the same records
 /usage - how much you've used today, and the daily limits
@@ -169,6 +171,8 @@ def finish_onboarding(ctx: Ctx, zone: str) -> None:
         tenant = tx.tenant(ctx.tenant["id"])
     where = f"{tenant['city']} ({zone})" if tenant.get("city") else zone
     offer_setup(ctx, tenant, head=f"Got it: {where}. You're in.")
+    from . import circle
+    circle.after_onboarding(ctx.store, tenant)
 
 
 def can_call(settings: Settings, tenant: dict) -> bool:
@@ -361,6 +365,11 @@ def handle(ctx: Ctx, text: str) -> str:
         return offer_setup(ctx, tenant)
     if cmd == "/city":
         return city_cmd(ctx, arg)
+    if cmd == "/circle":
+        from . import circle
+        return circle.command(ctx, arg)
+    if cmd == "/language":
+        return language_cmd(ctx, arg)
     if cmd in ("/wakecall", "/callme"):
         return wakecall_cmd(ctx, cmd, arg)
     if cmd == "/export":
@@ -372,6 +381,9 @@ def handle(ctx: Ctx, text: str) -> str:
 
 
 def start(ctx: Ctx, code: str) -> str:
+    from . import circle
+    if circle.is_code(code):
+        return circle.join(ctx, code)
     if code.lower() == "waitlist" and ctx.tenant is None:
         return stranger(ctx, JOIN_PHRASE)
     if code and ctx.tenant is None:
@@ -513,6 +525,22 @@ def use_link_code(ctx: Ctx, code: str) -> str | None:
     ctx.reply(f"Connected. {name} now uses your existing account: same records, same reminders. "
               "Reminders and the morning brief go to wherever you last wrote to me.\n\nSend /help for the commands.")
     return "linked"
+
+
+def language_cmd(ctx: Ctx, arg: str) -> str:
+    """/language [english|hinglish|hindi]: the language calls use."""
+    from .circle import LANGUAGES
+    assert ctx.tenant is not None
+    want = arg.strip().lower()
+    if want not in LANGUAGES:
+        ctx.reply(f"Calls are in {ctx.tenant.get('call_language') or 'english'}. Change it with /language english, "
+                  "/language hinglish or /language hindi.")
+        return "language:status"
+    with ctx.store.tx(ctx.tenant["id"]) as tx:
+        tx.conn.execute("UPDATE tenants SET call_language = %s WHERE id = %s", (want, ctx.tenant["id"]))
+    ctx.reply({"english": "Calls will be in English.", "hinglish": "Theek hai, calls ab Hinglish mein hongi.",
+               "hindi": "Theek hai, calls ab Hindi mein hongi."}[want])
+    return f"language:{want}"
 
 
 def city_cmd(ctx: Ctx, arg: str) -> str:

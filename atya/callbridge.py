@@ -130,7 +130,7 @@ class Bridge:
             sess.budget = wakecall.seconds_left(self.store, self.settings, sess.tenant)
             prompt, tools = await wakecall.prepare(self.store, self.settings, sess.tenant, sess.call, sess.requests)
             make = self.sonic_factory or _sonic
-            sess.sonic = make(prompt=prompt, voice=self.settings.tg_call_voice, region=self.settings.aws_region,
+            sess.sonic = make(prompt=prompt, voice=wakecall.voice_for(self.settings, sess.tenant), region=self.settings.aws_region,
                               tools=tools, on_audio=sess.on_audio, on_interrupt=sess.on_interrupt)
             await sess.sonic.open()
             await sess.sonic.say_first(wakecall.GREETING)
