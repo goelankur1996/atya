@@ -41,6 +41,16 @@ services:
     depends_on:
       db: {condition: service_healthy}
     logging: {driver: json-file, options: {max-size: "10m", max-file: "5"}}
+  # The audio bridge for phone calls (Plivo <-> voice model); idles when Plivo isn't set up.
+  callbridge:
+    image: ${ECR_IMAGE}
+    restart: unless-stopped
+    command: ["python", "-u", "-m", "atya.callbridge"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://atya:${POSTGRES_PASSWORD}@db:5432/atya
+    depends_on: [app]
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "5"}}
   # HTTPS for the web view. Only started when WEB_DOMAIN is set (update.sh).
   caddy:
     image: caddy:2
@@ -65,7 +75,13 @@ cat > Caddyfile <<'EOF'
 # Caddy gets and renews the HTTPS certificate for WEB_DOMAIN automatically.
 {$WEB_DOMAIN} {
 	encode gzip
-	reverse_proxy app:8080
+	# Phone call audio (Plivo) goes to the audio bridge; everything else to the app.
+	handle /plivo/ws/* {
+		reverse_proxy callbridge:8099
+	}
+	handle {
+		reverse_proxy app:8080
+	}
 	header -Server
 	header Strict-Transport-Security "max-age=31536000"
 }

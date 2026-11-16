@@ -90,6 +90,21 @@ class Settings:
         return bool(self.tg_caller_api_id and self.tg_caller_api_hash and self.tg_caller_session
                     and self.owner_telegram_user_id)
 
+    # Real phone calls through Plivo (iRefill's account), from plivo_number to the user's WhatsApp number.
+    # All three set plus WEB_BASE_URL (Plivo calls back there), or it stays off.
+    plivo_auth_id: str | None = None
+    plivo_auth_token: str | None = None
+    plivo_number: str | None = None          # digits with country code, e.g. 918031772892
+
+    @property
+    def plivo_on(self) -> bool:
+        return bool(self.plivo_auth_id and self.plivo_auth_token and self.plivo_number and self.web_base_url
+                    and self.web_base_url.startswith("https://"))
+
+    @property
+    def calls_on(self) -> bool:
+        return self.plivo_on or self.tg_caller_on
+
     # Contact address shown on /privacy.
     privacy_email: str | None = None
 
@@ -148,6 +163,9 @@ def load_settings() -> Settings:
         tg_caller_api_id=opt("TG_CALLER_API_ID"),
         tg_caller_api_hash=opt("TG_CALLER_API_HASH"),
         tg_caller_session=opt("TG_CALLER_SESSION"),
+        plivo_auth_id=opt("PLIVO_AUTH_ID"),
+        plivo_auth_token=opt("PLIVO_AUTH_TOKEN"),
+        plivo_number="".join(c for c in os.environ.get("PLIVO_NUMBER", "") if c.isdigit()) or None,
         tg_call_voice=os.environ.get("TG_CALL_VOICE", "").strip().lower() or "matthew",
         owner_schema=os.environ.get("OWNER_SCHEMA", "ankur").strip() or None,
         daily_messages=num("LIMIT_DAILY_MESSAGES", 150),

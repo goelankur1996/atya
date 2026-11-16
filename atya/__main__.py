@@ -135,10 +135,11 @@ def main() -> None:
                     "WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN)")
     if embedder is not None:
         workers.append(("embedder", embeddings.run, (store, embedder, settings)))
-    if settings.tg_caller_on:
+    if settings.calls_on:
         workers.append(("wakecall", wakecall.run, (store, settings, llm, embedder)))
     else:
-        log.warning("Wake-up calls off (needs TG_CALLER_API_ID, TG_CALLER_API_HASH, TG_CALLER_SESSION)")
+        log.warning("Calls off (phone: PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN, PLIVO_NUMBER; "
+                    "Telegram: TG_CALLER_API_ID, TG_CALLER_API_HASH, TG_CALLER_SESSION)")
     for name, target, args in workers:
         threading.Thread(target=_supervise, args=(name, target, *args), daemon=True, name=name).start()
 

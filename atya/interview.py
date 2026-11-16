@@ -142,11 +142,11 @@ def fallback_question(area: str | None) -> str:
 
 # --- by phone -------------------------------------------------------------------
 
-CALL_OFFER = ("Let's set you up so I'm useful from day one. The easiest way is a quick call: I'll ring you on "
-              "Telegram{who} and ask about your week, people, plans and anything coming up (about 10 minutes). "
+CALL_OFFER = ("Let's set you up so I'm useful from day one. The easiest way is a quick call: I'll ring you "
+              "{how} and ask about your week, people, plans and anything coming up (about 10 minutes). "
               "Everything you tell me goes into your records.")
 CALL_BUTTONS = [[("Call me now", "setup:call"), ("Text instead", "setup:text")]]
-CALL_SOON = ("Calling you on Telegram in a few seconds{who}. (By tapping that you've also agreed to calls from ATYA; "
+CALL_SOON = ("Calling you {how} in a few seconds. (By tapping that you've also agreed to calls from ATYA; "
              "/wakecall has the details.)")
 TEXT_INSTEAD = "No problem, let's do it by message instead."
 

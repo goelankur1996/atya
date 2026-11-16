@@ -710,7 +710,7 @@ class Tx:
         return self._all(
             "SELECT r.id, r.tenant_id, r.seq, r.title, r.fields->>'Remind At' AS remind_at, "
             "       r.fields->>'Remind By' AS remind_by, "
-            "       t.timezone, t.telegram_chat_id, t.telegram_user_id, t.schema_name "
+            "       t.timezone, t.telegram_chat_id, t.telegram_user_id, t.whatsapp_phone, t.schema_name "
             "FROM records r JOIN tenants t ON t.id = r.tenant_id "
             "WHERE t.status = 'active' AND (t.telegram_chat_id IS NOT NULL OR t.whatsapp_phone IS NOT NULL) "
             "  AND r.type = 'task' "
@@ -1079,6 +1079,35 @@ class Tx:
     def call(self, call_id) -> dict | None:
         return self._one("SELECT * FROM calls WHERE id = %s", (call_id,))
 
+    # --- phone calls (Plivo): the callbacks find the attempt by its secret (system scope) ---
+
+    def start_phone_attempt(self, call_id, secret: str) -> None:
+        self.conn.execute("UPDATE calls SET line = 'phone', secret = %s, provider_uuid = NULL, answered_at = NULL, "
+                          "hangup_cause = NULL, outcome = NULL WHERE id = %s", (secret, call_id))
+
+    def set_call_line(self, call_id, line: str) -> None:
+        self.conn.execute("UPDATE calls SET line = %s WHERE id = %s", (line, call_id))
+
+    def set_call_provider_uuid(self, call_id, provider_uuid: str) -> None:
+        self.conn.execute("UPDATE calls SET provider_uuid = %s WHERE id = %s", (provider_uuid, call_id))
+
+    def call_by_secret(self, secret: str) -> dict | None:
+        if not secret:
+            return None
+        return self._one("SELECT * FROM calls WHERE secret = %s AND status = 'calling'", (secret,))
+
+    def mark_call_answered(self, call_id) -> bool:
+        """True the first time only: one audio stream per attempt."""
+        return self.conn.execute("UPDATE calls SET answered_at = now() WHERE id = %s AND answered_at IS NULL",
+                                 (call_id,)).rowcount == 1
+
+    def set_call_hangup(self, call_id, cause: str, provider_uuid: str | None = None) -> None:
+        self.conn.execute("UPDATE calls SET hangup_cause = %s, provider_uuid = coalesce(provider_uuid, %s) "
+                          "WHERE id = %s", (cause[:200], provider_uuid, call_id))
+
+    def set_call_outcome(self, call_id, outcome: str) -> None:
+        self.conn.execute("UPDATE calls SET outcome = %s WHERE id = %s", (outcome, call_id))
+
     def unstick_calls(self) -> int:
         """After a restart: calls left 'calling' go back to pending (system scope)."""
         return self.conn.execute("UPDATE calls SET status = 'pending' WHERE status = 'calling'").rowcount
@@ -1098,9 +1127,10 @@ class Tx:
                    summary="agreed to wake-up calls (beta)")
 
     def wakecall_tenants(self) -> list[dict]:
-        """Active accounts on Telegram with a morning call time set (system scope)."""
+        """Active accounts with a morning call time set and a way to be called (system scope)."""
         return self._all("SELECT * FROM tenants WHERE status = 'active' AND wakecall_time IS NOT NULL "
-                         "AND telegram_user_id IS NOT NULL ORDER BY wakecall_time, created_at")
+                         "AND (telegram_user_id IS NOT NULL OR whatsapp_phone IS NOT NULL) "
+                         "ORDER BY wakecall_time, created_at")
 
     def count_call_beta(self, exclude_telegram: int | None) -> int:
         return self._one("SELECT count(*) AS n FROM tenants WHERE wakecall_consent_at IS NOT NULL "

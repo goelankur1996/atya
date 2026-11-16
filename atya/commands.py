@@ -54,7 +54,7 @@ Reminders: "remind me to call Jim at 2pm" and I'll message you at 2pm. PDFs: sen
 
 Commands:
 /brief 9am - a morning list of what's due, every day at that time (/brief off to stop)
-/wakecall - a short morning phone call on Telegram that goes over your day (beta)
+/wakecall - a short morning phone call that goes over your day (beta)
 /callme - a phone call from me right now; or just say "call me at 4 to remind me to leave"
 /city Noida - your city, for the weather on calls
 /web - a one-time link to browse, search and edit your records in a browser
@@ -152,7 +152,8 @@ def finish_onboarding(ctx: Ctx, zone: str) -> None:
 
 
 def can_call(settings: Settings, tenant: dict) -> bool:
-    return bool(settings.tg_caller_on and tenant.get("telegram_user_id"))
+    from .plivo import line_for
+    return line_for(settings, tenant) is not None
 
 
 def caller_handle(store: Store) -> str:
@@ -162,15 +163,23 @@ def caller_handle(store: Store) -> str:
     return f" from @{who['username']}" if who.get("username") else ""
 
 
+def call_how(store: Store, settings: Settings, tenant: dict) -> str:
+    """How a call reaches this user, for messages: 'on your phone from +91 …' or 'on Telegram from @…'."""
+    from . import plivo
+    if plivo.line_for(settings, tenant) == "phone":
+        return f"on your phone from {plivo.display_number(settings)} (save it as ATYA)"
+    return "on Telegram" + caller_handle(store)
+
+
 def offer_setup(ctx: Ctx, tenant: dict, head: str = "") -> str:
     """The setup interview: offered as a call when possible, otherwise by message."""
     if can_call(ctx.settings, tenant):
-        body = interview.CALL_OFFER.format(who=caller_handle(ctx.store))
+        body = interview.CALL_OFFER.format(how=call_how(ctx.store, ctx.settings, tenant))
         ctx.reply(f"{head}\n\n{body}" if head else body, buttons=interview.CALL_BUTTONS)
         return "setup:offered"
     with ctx.store.tx(tenant["id"]) as tx:
         opening = interview.begin(tx, tenant["id"])
-    if ctx.settings.tg_caller_on:
+    if ctx.settings.tg_caller_on and not ctx.settings.plivo_on:
         opening += "\n\n(Prefer a quick call instead? Link Telegram with /link, then send /setup.)"
     ctx.reply(f"{head}\n\n{opening}" if head else opening)
     return "setup:started"
@@ -187,7 +196,7 @@ def setup_choice(store: Store, settings: Settings, tenant: dict | None, chat_id:
             if tenant.get("wakecall_consent_at") is None:
                 tx.set_wakecall_consent(tid)
             tx.add_call(tid, "setup", dt.datetime.now(dt.timezone.utc))
-            tx.add_outbox(tid, chat_id=chat_id, body=interview.CALL_SOON.format(who=caller_handle(store)),
+            tx.add_outbox(tid, chat_id=chat_id, body=interview.CALL_SOON.format(how=call_how(store, settings, tenant)),
                           actor="commands", channel=channel)
         return "setup:call"
     with store.tx(tid) as tx:
@@ -505,29 +514,37 @@ def city_cmd(ctx: Ctx, arg: str) -> str:
     return "city:set"
 
 
-CALL_INTRO = ("Wake-up calls (beta): every morning at a time you pick, ATYA calls you on Telegram, goes over your "
+CALL_INTRO = ("Calls (beta): every morning at a time you pick, ATYA calls you {how}, goes over your "
               "day (calendar, what's due) and asks what you want to get done. What you say on the call is "
               "transcribed and saved like a voice note, and you get a summary in the chat afterwards.\n\n"
-              "The call comes from a separate Telegram account{who}. If you don't pick up, it tries twice more, "
-              "10 minutes apart, then sends the brief instead. You can also ask for calls any time, in the chat or on a "
-              "call (\"call me at 4 to remind me to leave\").\n\n"
+              "{line}If you don't pick up, it tries twice more, 10 minutes apart, then sends the brief instead. You can "
+              "also ask for calls any time, in the chat or on a call (\"call me at 4 to remind me to leave\").\n\n"
               "To try it, send /wakecall agree.")
+LINE_PHONE = ("Phone calls are placed for ATYA by iRefill through its telephony provider (Plivo); the call audio passes "
+              "through them and Amazon's voice model, and isn't recorded. ")
+LINE_TELEGRAM = "The call comes from a separate Telegram account. "
 
 
 def wakecall_cmd(ctx: Ctx, cmd: str, arg: str) -> str:
-    """/wakecall [agree|on|off|time] and /callme: the morning call (opt-in beta, Telegram only)."""
-    from . import wakecall
+    """/wakecall [agree|on|off|time] and /callme: calls from ATYA (opt-in beta)."""
+    from . import plivo, wakecall
     assert ctx.tenant is not None
-    if not ctx.settings.tg_caller_on:
+    if not ctx.settings.calls_on:
         ctx.reply("Calls aren't available yet.")
         return "wakecall:not-set-up"
     tid = ctx.tenant["id"]
     with ctx.store.tx(tid) as tx:
         current = tx.tenant(tid)
-    if not current.get("telegram_user_id"):
-        ctx.reply("The calls come through Telegram, and your account isn't linked to Telegram yet. "
-                  "Send /link to connect it, then try again.")
-        return "wakecall:no-telegram"
+    line = plivo.line_for(ctx.settings, current)
+    if line is None:
+        if ctx.settings.plivo_on:
+            ctx.reply("Calls go to the number you use on WhatsApp, and for now ATYA can only call Indian (+91) "
+                      "numbers. Send /link to connect WhatsApp, then try again.")
+        else:
+            ctx.reply("The calls come through Telegram, and your account isn't linked to Telegram yet. "
+                      "Send /link to connect it, then try again.")
+        return "wakecall:no-line"
+    how = call_how(ctx.store, ctx.settings, current)
     owner = ctx.is_owner
     if not owner and current.get("wakecall_consent_at") is None:
         if arg.lower() in ("agree", "yes", "i agree"):
@@ -541,10 +558,7 @@ def wakecall_cmd(ctx: Ctx, cmd: str, arg: str) -> str:
             ctx.reply("You're in. /wakecall on calls you every morning at 6 am (or pick a time, like /wakecall 7:15), "
                       "and /callme calls you right now to try it.")
             return "wakecall:agreed"
-        with ctx.store.tx(system=True) as tx:
-            who = tx.get_state(wakecall.CALLER_KEY) or {}
-        handle = f" (@{who['username']})" if who.get("username") else ""
-        ctx.reply(CALL_INTRO.format(who=handle))
+        ctx.reply(CALL_INTRO.format(how=how, line=LINE_PHONE if line == "phone" else LINE_TELEGRAM))
         return "wakecall:intro"
     tz = current["timezone"]
     if cmd == "/callme":
@@ -553,7 +567,7 @@ def wakecall_cmd(ctx: Ctx, cmd: str, arg: str) -> str:
             return "wakecall:no-minutes"
         with ctx.store.tx(tid) as tx:
             tx.add_call(tid, "now", dt.datetime.now(dt.timezone.utc))
-        ctx.reply("Calling you on Telegram in a few seconds.")
+        ctx.reply(f"Calling you {how} in a few seconds.")
         return "wakecall:now"
     if not arg or arg.lower() in ("agree", "yes"):
         at = current.get("wakecall_time")

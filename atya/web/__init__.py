@@ -29,7 +29,7 @@ from typing import Any
 from flask import Flask, Response, abort, make_response, g, redirect, render_template, request, send_file, url_for
 
 from ..config import Settings
-from .. import connections as gsync, documents, google, whatsapp
+from .. import connections as gsync, documents, google, plivo, whatsapp
 from ..export import build_export
 from ..schema import CLOSED_STATUSES, FieldDef, TypeDef, load_schema
 from ..store import Store
@@ -372,6 +372,32 @@ def create_app(store: Store, settings: Settings) -> Flask:
             abort(400)
         with store.tx(system=True) as tx:
             tx.add_whatsapp_event(payload)
+        return Response("", status=200)
+
+    # --- phone calls: Plivo's callbacks (the secret in the path is the only credential) ---
+
+    def plivo_call() -> dict | None:
+        secret = request.view_args.get("secret", "") if request.view_args else ""
+        if not settings.plivo_on or len(secret) < 20:
+            abort(404)
+        with store.tx(system=True) as tx:
+            return tx.call_by_secret(secret)
+
+    @app.route("/plivo/answer/<secret>", methods=["GET", "POST"])
+    def plivo_answer(secret: str):
+        call = plivo_call()
+        if call is None:
+            log.warning("plivo answer for an unknown call")
+        return Response(plivo.answer_xml(settings, secret if call else None), mimetype="application/xml")
+
+    @app.post("/plivo/hangup/<secret>")
+    def plivo_hangup(secret: str):
+        call = plivo_call()
+        if call is not None:
+            summary = plivo.hangup_summary(request.form)
+            with store.tx(system=True) as tx:
+                tx.set_call_hangup(call["id"], summary, request.form.get("CallUUID"))
+            log.info("phone call %s ended: %s", str(call["id"])[:8], summary)
         return Response("", status=200)
 
     @app.post("/logout")

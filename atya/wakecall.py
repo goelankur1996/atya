@@ -1,5 +1,5 @@
-"""Phone calls from ATYA (through a second Telegram account; unofficial user-account
-automation, so users opt in first).
+"""Phone calls from ATYA: real phone calls through Plivo (plivo.py + callbridge.py) to Indian
+numbers, otherwise through a second Telegram account. Users opt in first (/wakecall agree).
 
 Every call is a row in the `calls` table, placed by one worker, one at a time:
 - morning: every day at tenants.wakecall_time (local), set with /wakecall
@@ -298,16 +298,9 @@ def call_tools(store: Store, llm, embedder, tenant: dict) -> list[dict]:
     ]
 
 
-async def place_call(store: Store, settings: Settings, llm, embedder, tenant: dict, call: dict) -> str:
-    """One attempt. Returns 'answered', 'missed', 'declined', 'unreachable', 'no-minutes' or 'failed'."""
+async def prepare(store: Store, settings: Settings, llm, embedder, tenant: dict, call: dict) -> tuple[str, list[dict]]:
+    """The voice model's instructions and tools for this call (brief, weather and context fetched now)."""
     from . import weather as wx
-    from .sonic import Sonic
-    from .tgcall import Caller, converse, up_from_24k
-
-    budget = seconds_left(store, settings, tenant)
-    if budget < MIN_CALL_SECONDS:
-        return "no-minutes"
-    user_id = tenant["telegram_user_id"]
     local = briefs.local_now(tenant["timezone"])
     with store.tx(tenant["id"]) as tx:
         brief = briefs.build_brief(tx, load_schema(tenant["schema_name"]), tenant["id"], local.date())
@@ -315,6 +308,29 @@ async def place_call(store: Store, settings: Settings, llm, embedder, tenant: di
     if call["kind"] in ("morning", "now") and tenant.get("city_lat") is not None:
         forecast = await asyncio.to_thread(wx.today_line, tenant["city_lat"], tenant["city_lon"])
     extra = call_extra(store, tenant, call)
+    return (build_prompt(tenant, call, local, brief, settings.tg_call_voice, forecast, extra),
+            call_tools(store, llm, embedder, tenant))
+
+
+def finish_talk(store: Store, tenant: dict, call: dict, sonic, seconds: float, started: dt.datetime) -> None:
+    """After an answered call: count the minutes and save what was said."""
+    record_call(store, tenant, seconds)
+    saved = save_transcript(store, tenant, sonic.transcript, started,
+                            sender="setup call" if call["kind"] == "setup" else "call")
+    log.info("call done (%s, %s): %d turns, %d tool uses, saved=%s", str(tenant["id"])[:4], call["kind"],
+             len(sonic.transcript), len(sonic.tool_calls), saved)
+
+
+async def place_call(store: Store, settings: Settings, llm, embedder, tenant: dict, call: dict) -> str:
+    """One attempt on Telegram. Returns 'answered', 'missed', 'declined', 'unreachable', 'no-minutes' or 'failed'."""
+    from .sonic import Sonic
+    from .tgcall import Caller, converse, up_from_24k
+
+    budget = seconds_left(store, settings, tenant)
+    if budget < MIN_CALL_SECONDS:
+        return "no-minutes"
+    user_id = tenant["telegram_user_id"]
+    prompt, tools = await prepare(store, settings, llm, embedder, tenant, call)
 
     caller = Caller(settings)
     await caller.start()
@@ -324,9 +340,7 @@ async def place_call(store: Store, settings: Settings, llm, embedder, tenant: di
     except Exception:
         log.debug("couldn't record the caller's identity", exc_info=True)
     started = dt.datetime.now(dt.timezone.utc)
-    sonic = Sonic(system_prompt=build_prompt(tenant, call, local, brief, settings.tg_call_voice, forecast, extra),
-                  voice=settings.tg_call_voice, region=settings.aws_region,
-                  tools=call_tools(store, llm, embedder, tenant),
+    sonic = Sonic(system_prompt=prompt, voice=settings.tg_call_voice, region=settings.aws_region, tools=tools,
                   on_audio=lambda pcm: caller.out.extend(up_from_24k(pcm)), on_interrupt=caller.out.clear)
     try:
         try:
@@ -348,14 +362,21 @@ async def place_call(store: Store, settings: Settings, llm, embedder, tenant: di
         await converse(caller, sonic, user_id, greeting=GREETING, max_seconds=budget)
         await sonic.close()
         await caller.hang_up(user_id)
-        record_call(store, tenant, time.monotonic() - answered)
-        saved = save_transcript(store, tenant, sonic.transcript, started,
-                                sender="setup call" if call["kind"] == "setup" else "call")
-        log.info("call done (%s, %s): %d turns, %d tool uses, saved=%s", str(tenant["id"])[:4], call["kind"],
-                 len(sonic.transcript), len(sonic.tool_calls), saved)
+        finish_talk(store, tenant, call, sonic, time.monotonic() - answered, started)
         return "answered"
     finally:
         await caller.stop()
+
+
+def make_models(settings: Settings):
+    """The text model and embedder a call's tools need (for processes of their own)."""
+    from . import embeddings
+    from .llm import BedrockLLM, ClaudeLLM
+    llm = (BedrockLLM(fast_model=settings.bedrock_fast_model, main_model=settings.bedrock_main_model,
+                      region=settings.aws_region) if settings.llm_provider == "bedrock"
+           else ClaudeLLM(settings.anthropic_api_key))
+    embedder = embeddings.VoyageEmbedder(settings.voyage_api_key) if settings.voyage_api_key else None
+    return llm, embedder
 
 
 # --- what happens after an attempt ---------------------------------------------
@@ -423,19 +444,20 @@ def after_call(store: Store, settings: Settings, tenant: dict, call: dict, resul
             send_brief_instead(store, tenant, day, note)
         elif kind == "reminder":
             note = {"declined": "you declined the call", "no-minutes": "out of call minutes today",
-                    "no-consent": "to get reminders as phone calls, send /wakecall first"}.get(
+                    "no-consent": "to get reminders as phone calls, send /wakecall first",
+                    "no-line": "I couldn't call you"}.get(
                 result, "I called but couldn't reach you")
             send_reminder_instead(store, tenant, call, note)
         elif kind == "setup":
             from . import interview
             interview.call_fallback(store, settings, tenant, result)
-        elif kind == "now" and result not in ("unreachable", "no-consent"):
+        elif kind == "now" and result not in ("unreachable", "no-consent", "no-line"):
             tell(store, tenant, {
                 "declined": "Call declined. Send /callme whenever you want one.",
                 "no-minutes": f"You've used today's {settings.daily_call_minutes} call minutes. They reset tomorrow.",
                 "failed": "The call didn't go through on my side. Try /callme again in a few minutes.",
             }.get(result, "I called but couldn't reach you. Send /callme to try again."))
-    status = "cancelled" if result == "no-consent" else result
+    status = "cancelled" if result in ("no-consent", "no-line") else result
     with store.tx(system=True) as tx:
         tx.finish_call(call["id"], status)
     return status
@@ -469,11 +491,14 @@ def tick(store: Store, settings: Settings, call_fn: CallFn, now: dt.datetime | N
         tenant = tx.tenant(call["tenant_id"]) if call else None
     if call is None:
         return None
-    if tenant is None or tenant["status"] not in ("active", "invited") or not tenant["telegram_user_id"]:
+    from .plivo import line_for
+    if tenant is None or tenant["status"] not in ("active", "invited"):
         with store.tx(system=True) as tx:
             tx.finish_call(call["id"], "cancelled")
         return f"{call['kind']}:cancelled"
-    if call["kind"] != "setup" and not tenant.get("wakecall_consent_at") and not limits.is_owner(tenant, settings):
+    if line_for(settings, tenant) is None:
+        result = "no-line"                          # no way to call them (e.g. calls off, or a number we can't dial)
+    elif call["kind"] != "setup" and not tenant.get("wakecall_consent_at") and not limits.is_owner(tenant, settings):
         result = "no-consent"                       # asked for a call without agreeing to calls yet
     elif now - call["due_at"] > LATE_LIMIT:
         result = "missed"
@@ -511,15 +536,33 @@ async def call_in_own_process(tenant: dict, call: dict) -> str:
     return result
 
 
+def dialer(store: Store, settings: Settings) -> CallFn:
+    """Place one attempt on the user's line: a real phone call when we can, otherwise Telegram."""
+    from . import plivo
+
+    async def dial(tenant: dict, call: dict) -> str:
+        line = plivo.line_for(settings, tenant)
+        with store.tx(system=True) as tx:
+            tx.set_call_line(call["id"], line)
+        if line == "phone":
+            budget = seconds_left(store, settings, tenant)
+            if budget < MIN_CALL_SECONDS:
+                return "no-minutes"
+            return await plivo.place_call(store, settings, tenant, call, budget=budget)
+        return await call_in_own_process(tenant, call)
+    return dial
+
+
 def run(store: Store, settings: Settings, llm, embedder) -> None:
-    log.info("calls worker started")
+    log.info("calls worker started (phone %s, Telegram %s)", "on" if settings.plivo_on else "off",
+             "on" if settings.tg_caller_on else "off")
     with store.tx(system=True) as tx:
         stuck = tx.unstick_calls()
     if stuck:
         log.info("%d call(s) were mid-way at shutdown; queued again", stuck)
     while True:
         try:
-            did = tick(store, settings, call_in_own_process)
+            did = tick(store, settings, dialer(store, settings))
             if did:
                 log.info("call: %s", did)
                 continue                              # more may be due
@@ -538,14 +581,9 @@ def main(argv: list[str]) -> int:
     if argv[:1] != ["call"] or len(argv) < 2:
         print(main.__doc__)
         return 2
-    from . import embeddings
-    from .llm import BedrockLLM, ClaudeLLM
     settings = load_settings()
     store = Store(settings.database_url)
-    llm = (BedrockLLM(fast_model=settings.bedrock_fast_model, main_model=settings.bedrock_main_model,
-                      region=settings.aws_region) if settings.llm_provider == "bedrock"
-           else ClaudeLLM(settings.anthropic_api_key))
-    embedder = embeddings.VoyageEmbedder(settings.voyage_api_key) if settings.voyage_api_key else None
+    llm, embedder = make_models(settings)
     with store.tx(system=True) as tx:
         call = tx.call(argv[1])
         tenant = tx.tenant(call["tenant_id"]) if call else None

@@ -80,7 +80,7 @@ def queue_message(tx, tenant_id, chat_id, record_id, title: str, ref: str, late:
 
 def send_due_reminders(store: Store, now: dt.datetime | None = None, *, calls_on: bool = False) -> int:
     """Due reminders go out as a message, or as a call when the task says Remind By = call
-    (and calls are set up and the user is on Telegram; otherwise a message after all)."""
+    (when calls are set up; if the call can't happen, a message after all)."""
     now_utc = now or dt.datetime.now(dt.timezone.utc)
     with store.tx(system=True) as tx:
         candidates = tx.reminder_candidates(CLOSED_STATUSES)
@@ -95,7 +95,7 @@ def send_due_reminders(store: Store, now: dt.datetime | None = None, *, calls_on
             with store.tx(c["tenant_id"]) as tx:
                 if not tx.claim_reminder(c["tenant_id"], c["id"], c["remind_at"]):
                     continue
-                if calls_on and c.get("remind_by") == "call" and c.get("telegram_user_id"):
+                if calls_on and c.get("remind_by") == "call" and (c.get("telegram_user_id") or c.get("whatsapp_phone")):
                     tx.add_call(c["tenant_id"], "reminder", now_utc, about=c["title"], record_id=c["id"])
                 else:
                     local_now = now_utc.astimezone(tz)
@@ -123,5 +123,5 @@ def snooze_value(choice: str, tz: dt.tzinfo, now: dt.datetime | None = None) -> 
 def run(store: Store, settings: Settings) -> None:
     log.info("reminders started")
     while True:
-        send_due_reminders(store, calls_on=settings.tg_caller_on)
+        send_due_reminders(store, calls_on=settings.calls_on)
         time.sleep(CHECK_SECONDS)
