@@ -116,8 +116,19 @@ def fanout_context(tx: Tx, tenant_id: uuid.UUID) -> dict[str, list[dict]]:
     decisions = tx._all(
         "SELECT id, title, concat('DEC-', seq) AS note FROM records WHERE tenant_id = %s "
         "AND type = 'decision' ORDER BY updated_at DESC LIMIT %s", (tenant_id, CONTEXT_DECISIONS))
-    return {"Projects": projects, "People": people, "Open tasks": open_tasks,
-            "Recent decisions": decisions}
+    routines = tx._all(
+        "SELECT r.id, r.title, concat_ws('; ', 'started ' || (r.fields->>'Start Date'), "
+        "       (SELECT string_agg(d.fields->>'Date' || ' ' || coalesce(d.fields->>'Result', '?') || "
+        "               ' (' || d.id || ')', ', ' ORDER BY d.fields->>'Date' DESC) "
+        "          FROM (SELECT d.* FROM records d JOIN record_links l ON l.from_id = d.id AND l.field = 'Routine' "
+        "                WHERE l.to_id = r.id AND d.type = 'routine_day' "
+        "                ORDER BY d.fields->>'Date' DESC LIMIT 3) d)) AS note "
+        "FROM records r WHERE r.tenant_id = %s AND r.type = 'routine' "
+        "AND coalesce(r.fields->>'Status', 'active') = 'active'", (tenant_id,))
+    out = {"Projects": projects, "People": people, "Open tasks": open_tasks, "Recent decisions": decisions}
+    if routines:
+        out["Active routines (recent check-ins: date result (id))"] = routines
+    return out
 
 
 class FanoutExecutor:

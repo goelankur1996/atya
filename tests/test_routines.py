@@ -98,3 +98,12 @@ def test_finishes_after_the_last_day(store, user):
     assert outbox(store, user["id"])[-1]["body"] == "No sugar is complete: all 10 days. Well done!"
     with store.tx(user["id"]) as tx:
         assert tx.record(user["id"], r["id"])["fields"]["Status"] == "done"
+
+
+def test_filing_sees_active_routines_and_recent_days(store, user, hard):
+    from atya import processor
+    routines.log_from_call(store, user, {"routine": "75 Hard", "day": "2026-11-15", "result": "done"})
+    with store.tx(user["id"]) as tx:
+        ctx = processor.fanout_context(tx, user["id"])
+    (r,) = ctx["Active routines (recent check-ins: date result (id))"]
+    assert r["title"] == "75 Hard" and "started 2026-11-15" in r["note"] and "2026-11-15 done" in r["note"]
