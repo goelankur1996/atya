@@ -55,6 +55,8 @@ Reminders: "remind me to call Jim at 2pm" and I'll message you at 2pm. PDFs: sen
 Commands:
 /brief 9am - a morning list of what's due, every day at that time (/brief off to stop)
 /wakecall - a short morning phone call on Telegram that goes over your day (beta)
+/callme - a phone call from me right now; or just say "call me at 4 to remind me to leave"
+/city Noida - your city, for the weather on calls
 /web - a one-time link to browse, search and edit your records in a browser
 /link - use me on both Telegram and WhatsApp, with the same records
 /usage - how much you've used today, and the daily limits
@@ -284,6 +286,8 @@ def handle(ctx: Ctx, text: str) -> str:
             opening = interview.begin(tx, ctx.tenant["id"])
         ctx.reply(opening)
         return "setup:started"
+    if cmd == "/city":
+        return city_cmd(ctx, arg)
     if cmd in ("/wakecall", "/callme"):
         return wakecall_cmd(ctx, cmd, arg)
     if cmd == "/export":
@@ -438,11 +442,31 @@ def use_link_code(ctx: Ctx, code: str) -> str | None:
     return "linked"
 
 
+def city_cmd(ctx: Ctx, arg: str) -> str:
+    """/city Noida: where the user lives, for the weather on calls."""
+    from . import weather
+    assert ctx.tenant is not None
+    if not arg:
+        city = ctx.tenant.get("city")
+        ctx.reply(f"Your city is {city}. Change it with /city <name>." if city else
+                  "Tell me your city for the weather on calls, like /city Noida.")
+        return "city:status"
+    place = weather.find_city(arg)
+    if place is None:
+        ctx.reply("I couldn't find that city. Try adding the state or country, like /city Noida, India.")
+        return "city:not-found"
+    with ctx.store.tx(ctx.tenant["id"]) as tx:
+        tx.set_city(ctx.tenant["id"], place["label"], place["lat"], place["lon"])
+    ctx.reply(f"Got it: {place['label']}. Calls will start with the weather there.")
+    return "city:set"
+
+
 CALL_INTRO = ("Wake-up calls (beta): every morning at a time you pick, ATYA calls you on Telegram, goes over your "
               "day (calendar, what's due) and asks what you want to get done. What you say on the call is "
               "transcribed and saved like a voice note, and you get a summary in the chat afterwards.\n\n"
               "The call comes from a separate Telegram account{who}. If you don't pick up, it tries twice more, "
-              "10 minutes apart, then sends the brief instead. Calls are limited to {minutes} minutes a day.\n\n"
+              "10 minutes apart, then sends the brief instead. You can also ask for calls any time, in the chat or on a "
+              "call (\"call me at 4 to remind me to leave\").\n\n"
               "To try it, send /wakecall agree.")
 
 
@@ -465,7 +489,7 @@ def wakecall_cmd(ctx: Ctx, cmd: str, arg: str) -> str:
         if arg.lower() in ("agree", "yes", "i agree"):
             with ctx.store.tx(system=True) as tx:
                 taken = tx.count_call_beta(ctx.settings.owner_telegram_user_id)
-            if taken >= ctx.settings.call_beta_users:
+            if ctx.settings.call_beta_users and taken >= ctx.settings.call_beta_users:
                 ctx.reply("The wake-up call beta is full right now. I'll keep your spot in mind; try again later.")
                 return "wakecall:full"
             with ctx.store.tx(tid) as tx:
@@ -476,15 +500,15 @@ def wakecall_cmd(ctx: Ctx, cmd: str, arg: str) -> str:
         with ctx.store.tx(system=True) as tx:
             who = tx.get_state(wakecall.CALLER_KEY) or {}
         handle = f" (@{who['username']})" if who.get("username") else ""
-        ctx.reply(CALL_INTRO.format(who=handle, minutes=ctx.settings.daily_call_minutes))
+        ctx.reply(CALL_INTRO.format(who=handle))
         return "wakecall:intro"
     tz = current["timezone"]
     if cmd == "/callme":
         if wakecall.seconds_left(ctx.store, ctx.settings, current) < wakecall.MIN_CALL_SECONDS:
             ctx.reply(f"You've used today's {ctx.settings.daily_call_minutes} call minutes. Calls work again tomorrow.")
             return "wakecall:no-minutes"
-        with ctx.store.tx(system=True) as tx:
-            tx.set_state(wakecall.now_key(tid), dt.datetime.now(dt.timezone.utc).isoformat())
+        with ctx.store.tx(tid) as tx:
+            tx.add_call(tid, "now", dt.datetime.now(dt.timezone.utc))
         ctx.reply("Calling you on Telegram in a few seconds.")
         return "wakecall:now"
     if not arg or arg.lower() in ("agree", "yes"):
@@ -508,8 +532,10 @@ def wakecall_cmd(ctx: Ctx, cmd: str, arg: str) -> str:
         tx.set_wakecall(tid, at)
     first = "today"
     if now.time() >= at:                           # already past it today: start tomorrow
-        with ctx.store.tx(system=True) as tx:
-            tx.set_state(wakecall.day_key(tid, now.date()), {"attempts": 0, "done": "set after the time"})
+        with ctx.store.tx(tid) as tx:                # no call today: mark today's as not wanted
+            skip = tx.add_call(tid, "morning", dt.datetime.now(dt.timezone.utc), day=now.date())
+            if skip:
+                tx.finish_call(skip["id"], "cancelled")
         first = "tomorrow"
     ctx.reply(f"Done. I'll call you every morning at {briefs.fmt_time(at)} ({tz}), first {first}. "
               f"If you don't pick up I try twice more, {wakecall.RETRY_MINUTES} minutes apart, then send the brief.")

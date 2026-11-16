@@ -1,4 +1,5 @@
-"""The morning call: scheduling, retries, the brief fallback, commands, and saving what was said.
+"""Calls: the queue (morning, reminder, now), retries per call, declines, consent,
+falling back to messages, the opening prompt, weather, tools, and saving what was said.
 (The call itself needs real Telegram accounts; here it's a stub.)"""
 import asyncio
 import datetime as dt
@@ -6,10 +7,14 @@ import json
 
 import pytest
 
-from atya import processor, receiver, wakecall
+from atya import processor, receiver, reminders, wakecall, weather
 from atya.config import Settings
+from atya.schema import load_schema
 from atya.sonic import Sonic
 from tests.test_pipeline import OWNER, FakeLLM, FakeTelegram, owner_tenant, run_all
+
+S = load_schema("default")
+FRIEND, FRIEND2 = 777_000_501, 777_000_502
 
 
 @pytest.fixture
@@ -26,6 +31,7 @@ def owner(store, settings):
         if old:
             tx.delete_tenant(old["id"])
         tx.conn.execute("DELETE FROM service_state WHERE key LIKE 'wakecall:%%'")
+        tx.conn.execute("DELETE FROM calls")
         tx.set_state(receiver.OFFSET_KEY, None)
         for u in (FRIEND, FRIEND2):
             f = tx.tenant_by_telegram(u)
@@ -39,17 +45,16 @@ def owner(store, settings):
         tx.set_timezone(t["id"], "Asia/Kolkata")
     yield owner_tenant(store)
     with store.tx(system=True) as tx:
-        tx.conn.execute("DELETE FROM service_state WHERE key LIKE 'wakecall:%%'")
+        tx.conn.execute("DELETE FROM calls")
 
 
-FRIEND, FRIEND2 = 777_000_501, 777_000_502
-
-
-def friend(store, uid, name="Meera", username="meera_k"):
+def friend(store, uid, name="Meera", username="meera_k", consent=False):
     with store.tx(system=True) as tx:
         t = tx.create_tenant(telegram_user_id=uid, telegram_chat_id=uid, display_name=name, timezone="Asia/Kolkata")
         tx.set_tenant_status(t["id"], "active", actor="test")
         tx.conn.execute("UPDATE tenants SET telegram_username = %s WHERE id = %s", (username, t["id"]))
+        if consent:
+            tx.set_wakecall_consent(t["id"])
         return tx.tenant(t["id"])
 
 
@@ -61,10 +66,10 @@ def ist(h, m=0, day=16):
 class Phone:
     def __init__(self, *results):
         self.results = list(results)
-        self.calls = 0
+        self.calls = []
 
-    async def __call__(self, tenant):
-        self.calls += 1
+    async def __call__(self, tenant, call):
+        self.calls.append((call["kind"], call.get("about")))
         return self.results.pop(0)
 
 
@@ -74,46 +79,162 @@ def outbox(store, tid):
                                            (tid,))]
 
 
-def test_off_by_default_and_on_request(store, settings, owner):
-    phone = Phone("answered")
-    assert wakecall.tick(store, settings, phone, now=ist(6, 1)) is None
+def tenant(store, tid):
     with store.tx(system=True) as tx:
-        tx.set_state(wakecall.now_key(owner["id"]), "x")
-    assert wakecall.tick(store, settings, phone, now=ist(14)) == "on-request:answered"
-    assert wakecall.tick(store, settings, phone, now=ist(14)) is None and phone.calls == 1
+        return tx.tenant(tid)
 
 
-def test_retries_then_sends_the_brief(store, settings, owner):
+def test_morning_call_retries_then_sends_the_brief(store, settings, owner):
     with store.tx(owner["id"]) as tx:
         tx.set_wakecall(owner["id"], dt.time(6, 0))
     phone = Phone("missed", "missed", "missed")
     assert wakecall.tick(store, settings, phone, now=ist(5, 59)) is None
-    assert wakecall.tick(store, settings, phone, now=ist(6, 0)) == "missed:1"
-    assert wakecall.tick(store, settings, phone, now=ist(6, 5)) is None          # waits 10 minutes
-    assert wakecall.tick(store, settings, phone, now=ist(6, 11)) == "missed:2"
-    assert wakecall.tick(store, settings, phone, now=ist(6, 22)) == "missed:3"
-    assert wakecall.tick(store, settings, phone, now=ist(6, 40)) is None and phone.calls == 3
-    assert outbox(store, owner["id"])[-1].startswith(wakecall.MISSED_NOTE)
-    phone2 = Phone("answered")
-    assert wakecall.tick(store, settings, phone2, now=ist(9)) is None              # past the 2-hour window
-    assert wakecall.tick(store, settings, phone2, now=ist(6, 0, day=17)) == "answered:1"
-    assert wakecall.tick(store, settings, phone2, now=ist(6, 30, day=17)) is None
+    assert wakecall.tick(store, settings, phone, now=ist(6, 0)) == "morning:missed:retry"
+    assert wakecall.tick(store, settings, phone, now=ist(6, 5)) is None             # waits 10 minutes
+    assert wakecall.tick(store, settings, phone, now=ist(6, 11)) == "morning:missed:retry"
+    assert wakecall.tick(store, settings, phone, now=ist(6, 22)) == "morning:missed:missed"
+    assert wakecall.tick(store, settings, phone, now=ist(6, 40)) is None and len(phone.calls) == 3
+    assert outbox(store, owner["id"])[-1].startswith(wakecall.MISSED_MORNING)
+    assert wakecall.tick(store, settings, Phone("answered"), now=ist(6, 0, day=17)) == "morning:answered:answered"
 
 
-def test_commands(store, settings, owner):
+def test_declining_one_call_doesnt_cancel_the_next(store, settings, owner):
+    with store.tx(owner["id"]) as tx:
+        tx.set_wakecall(owner["id"], dt.time(9, 0))
+        tx.create_record(owner["id"], S, "task", title="Leave for the airport", enforce_verbatim=False, actor="t",
+                         fields={"Remind At": "2026-11-16T14:00", "Remind By": "call", "Status": "next"})
+    phone = Phone("declined", "answered")
+    assert wakecall.tick(store, settings, phone, now=ist(9, 0)) == "morning:declined:declined"
+    assert outbox(store, owner["id"])[-1].startswith(wakecall.DECLINED_MORNING)
+    assert wakecall.tick(store, settings, phone, now=ist(9, 15)) is None              # no retry after a decline
+    assert reminders.send_due_reminders(store, ist(14, 0), calls_on=True) >= 1
+    assert wakecall.tick(store, settings, phone, now=ist(14, 0)) == "reminder:answered:answered"
+    assert phone.calls == [("morning", None), ("reminder", "Leave for the airport")]
+
+
+def test_reminder_call_falls_back_to_a_message(store, settings, owner):
+    with store.tx(owner["id"]) as tx:
+        tx.create_record(owner["id"], S, "task", title="Pay rent", enforce_verbatim=False, actor="t",
+                         fields={"Remind At": "2026-11-16T10:00", "Remind By": "call", "Status": "next"})
+    reminders.send_due_reminders(store, ist(10, 0), calls_on=True)
+    assert outbox(store, owner["id"]) == []                                           # a call, not a message
+    assert wakecall.tick(store, settings, Phone("declined"), now=ist(10, 0)) == "reminder:declined:declined"
+    assert outbox(store, owner["id"])[-1].startswith("⏰ Pay rent") and "declined" in outbox(store, owner["id"])[-1]
+    with store.tx(owner["id"]) as tx:                                                  # calls not set up: a message
+        tx.create_record(owner["id"], S, "task", title="Call mom", enforce_verbatim=False, actor="t",
+                         fields={"Remind At": "2026-11-16T11:00", "Remind By": "call", "Status": "next"})
+    reminders.send_due_reminders(store, ist(11, 0), calls_on=False)
+    assert outbox(store, owner["id"])[-1].startswith("⏰ Call mom")
+
+
+def test_call_only_task_closes_after_the_call(store, settings, owner):
+    assert wakecall.schedule_call(store, owner, "2026-11-16T16:00", now=ist(15)) == "Scheduled: a call at 4:00 pm."
+    assert "already passed" in wakecall.schedule_call(store, owner, "2026-11-16T09:00", now=ist(15))
+    with store.tx(owner["id"]) as tx:
+        (t,) = tx._all("SELECT * FROM records WHERE tenant_id = %s AND type = 'task'", (owner["id"],))
+    assert t["title"] == "Call from ATYA" and t["fields"]["Remind By"] == "call"
+    reminders.send_due_reminders(store, ist(16, 0), calls_on=True)
+    assert wakecall.tick(store, settings, Phone("answered"), now=ist(16, 0)) == "reminder:answered:answered"
+    with store.tx(owner["id"]) as tx:
+        assert tx.record(owner["id"], t["id"])["fields"]["Status"] == "done"
+
+
+def test_callme_and_wakecall_commands(store, settings, owner):
     tg = FakeTelegram()
     tg._next = 5000                       # after the fixture's /start
     tg.push("/wakecall 6:30")
     tg.push("/callme")
     run_all(store, tg, FakeLLM(), settings)
-    assert owner_tenant(store)["wakecall_time"] == dt.time(6, 30), tg.sent
-    with store.tx(system=True) as tx:
-        assert tx.get_state(wakecall.now_key(owner["id"]))
+    assert owner_tenant(store)["wakecall_time"] == dt.time(6, 30)
+    with store.tx(owner["id"]) as tx:
+        assert "now" in [c["kind"] for c in tx.upcoming_calls(owner["id"])]
+    assert wakecall.tick(store, settings, Phone("missed"),
+                         now=dt.datetime.now(dt.timezone.utc)).startswith("now:missed:missed")
+    assert "couldn't reach you" in outbox(store, owner["id"])[-1]                    # no retries for /callme
     tg.push("/wakecall off")
     run_all(store, tg, FakeLLM(), settings)
     assert owner_tenant(store)["wakecall_time"] is None
-    texts = [text for _, text, _ in tg.sent]
-    assert any("Calling you" in t for t in texts) and any("turned off" in t for t in texts)
+
+
+def test_others_opt_in_and_unconsented_calls_become_messages(store, settings, owner):
+    from atya import commands
+    meera = friend(store, FRIEND)
+    with store.tx(system=True) as tx:
+        tx.set_state(wakecall.CALLER_KEY, {"username": "atya_caller", "name": "ATYA"})
+
+    def say(t, text):
+        tg = FakeTelegram()
+        ctx = commands.Ctx(store=store, tg=tg, settings=settings, tenant=t, channel="telegram",
+                           user_id=t["telegram_user_id"], chat_id=t["telegram_chat_id"], name=t["display_name"])
+        return commands.handle(ctx, text), [x for _, x, _ in tg.sent]
+
+    out, r = say(meera, "/callme")
+    assert out == "wakecall:intro" and "@atya_caller" in r[0] and "/wakecall agree" in r[0]
+    with store.tx(meera["id"]) as tx:                     # a call asked for in chat before agreeing
+        tx.create_record(meera["id"], S, "task", title="Stretch", enforce_verbatim=False, actor="t",
+                         fields={"Remind At": "2026-11-16T12:00", "Remind By": "call", "Status": "next"})
+    reminders.send_due_reminders(store, ist(12, 0), calls_on=True)
+    phone = Phone()
+    assert wakecall.tick(store, settings, phone, now=ist(12, 0)) == "reminder:no-consent:cancelled"
+    assert phone.calls == [] and "/wakecall" in outbox(store, meera["id"])[-1]
+    assert say(meera, "/wakecall agree")[0] == "wakecall:agreed"
+    assert say(tenant(store, meera["id"]), "/callme")[0] == "wakecall:now"
+    assert wakecall.tick(store, settings, Phone("unreachable"),
+                         now=dt.datetime.now(dt.timezone.utc)) == "now:unreachable:unreachable"
+    assert "@atya_caller" in outbox(store, meera["id"])[-1]
+
+
+def test_daily_call_minutes(store, settings, owner):
+    meera = friend(store, FRIEND, consent=True)
+    assert wakecall.seconds_left(store, settings, meera) == wakecall.MAX_CALL_SECONDS
+    wakecall.record_call(store, meera, 60 * 60 - 30)
+    assert wakecall.seconds_left(store, settings, meera) == 30
+    wakecall.record_call(store, owner, 10_000)
+    assert wakecall.seconds_left(store, settings, owner) == wakecall.MAX_CALL_SECONDS     # owner exempt
+
+
+def test_opening_prompt():
+    t = {"display_name": "Ankur Goel"}
+    local = dt.datetime(2026, 11, 16, 6, 0)
+    p = wakecall.build_prompt(t, {"kind": "morning"}, local, "BRIEF", "matthew", None)
+    assert "ask which city they're in" in p and "BRIEF" in p and "2026-11-16T06:00" in p
+    p = wakecall.build_prompt({**t, "city": "Noida"}, {"kind": "morning"}, local, "BRIEF", "matthew",
+                              "24°C and clear now; high 28, low 14.")
+    assert "24°C and clear" in p and "what would they like to focus on" in p and "stop and wait" in p.lower()
+    p = wakecall.build_prompt(t, {"kind": "reminder", "about": "leave for the airport"}, local, "B", "matthew", None)
+    assert 'asked to be reminded: "leave for the airport"' in p
+
+
+class FakeHTTP:
+    def __init__(self, routes):
+        self.routes = routes
+
+    def get(self, url, params=None, timeout=None):
+        body = self.routes[url]
+
+        class R:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return body
+        return R()
+
+
+def test_weather_and_save_city(store, owner):
+    http = FakeHTTP({
+        weather.GEOCODE: {"results": [{"name": "Noida", "admin1": "Uttar Pradesh", "country": "India",
+                                       "latitude": 28.58, "longitude": 77.33}]},
+        weather.FORECAST: {"current": {"temperature_2m": 23.6, "weather_code": 1},
+                           "daily": {"temperature_2m_max": [28.2], "temperature_2m_min": [14.4],
+                                     "precipitation_probability_max": [60]}}})
+    assert weather.today_line(28.58, 77.33, http=http) == \
+        "24°C and mostly clear now; high 28, low 14; 60% chance of rain."
+    out = wakecall.save_city(store, dict(owner), "noida", http=http)
+    assert out.startswith("Saved Noida, Uttar Pradesh, India. Weather there today: 24°C")
+    t = owner_tenant(store)
+    assert t["city"] == "Noida, Uttar Pradesh, India" and round(t["city_lat"], 2) == 28.58
+    assert weather.find_city("", http=http) is None
 
 
 def test_transcript_is_filed_and_summarised(store, settings, owner):
@@ -157,58 +278,6 @@ def test_sonic_runs_tools_and_returns_results():
     assert s.tool_calls[0][0] == "lookup"
 
 
-def test_others_opt_in_within_the_beta_cap(store, settings, owner):
-    from atya import commands
-    from dataclasses import replace
-    small = replace(settings, call_beta_users=1)
-    meera, ravi = friend(store, FRIEND), friend(store, FRIEND2, "Ravi", None)
-    with store.tx(system=True) as tx:
-        tx.set_state(wakecall.CALLER_KEY, {"username": "atya_caller", "name": "ATYA"})
-
-    def say(tenant, text):
-        tg = FakeTelegram()
-        ctx = commands.Ctx(store=store, tg=tg, settings=small, tenant=tenant, channel="telegram",
-                           user_id=tenant["telegram_user_id"], chat_id=tenant["telegram_chat_id"],
-                           name=tenant["display_name"])
-        return commands.handle(ctx, text), [t for _, t, _ in tg.sent]
-
-    out, r = say(meera, "/callme")
-    assert out == "wakecall:intro" and "@atya_caller" in r[0] and "/wakecall agree" in r[0]
-    assert say(meera, "/wakecall agree")[0] == "wakecall:agreed"
-    assert say(ravi, "/wakecall agree")[0] == "wakecall:full"               # cap of 1 (the owner doesn't count)
-    meera = tx_tenant(store, meera["id"])
-    assert say(meera, "/wakecall 7:15")[0] == "wakecall:set"
-    assert say(meera, "/callme")[0] == "wakecall:now"
-    with store.tx(system=True) as tx:
-        tx.set_state(wakecall.now_key(owner["id"]), None)
-    phone = Phone("unreachable")
-    assert wakecall.tick(store, small, phone, now=ist(14)) == "on-request:unreachable"
-    assert "@atya_caller" in outbox(store, meera["id"])[-1]
-
-
-def test_daily_call_minutes(store, settings, owner):
-    meera = friend(store, FRIEND)
-    assert wakecall.seconds_left(store, settings, meera) == wakecall.MAX_CALL_SECONDS
-    wakecall.record_call(store, meera, settings.daily_call_minutes * 60 - 30)
-    assert wakecall.seconds_left(store, settings, meera) == 30
-    wakecall.record_call(store, owner, 10_000)
-    assert wakecall.seconds_left(store, settings, owner) == wakecall.MAX_CALL_SECONDS     # owner exempt
-
-
-def test_scheduled_call_for_a_friend(store, settings, owner):
-    meera = friend(store, FRIEND)
-    with store.tx(meera["id"]) as tx:
-        tx.set_wakecall(meera["id"], dt.time(7, 0))
-    phone = Phone("answered")
-    assert wakecall.tick(store, settings, phone, now=ist(7, 1)) == "answered:1"
-    assert wakecall.tick(store, settings, phone, now=ist(7, 2)) is None
-
-
-def tx_tenant(store, tid):
-    with store.tx(system=True) as tx:
-        return tx.tenant(tid)
-
-
 def test_call_runs_in_its_own_process(monkeypatch):
     import sys
     script = "import sys; print('hello from the call'); print('RESULT: missed')"
@@ -217,4 +286,4 @@ def test_call_runs_in_its_own_process(monkeypatch):
     async def fake_exec(*args, **kw):
         return await real(sys.executable, "-c", script, **kw)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-    assert asyncio.run(wakecall.call_in_own_process({"telegram_user_id": 1, "id": "abcd"})) == "missed"
+    assert asyncio.run(wakecall.call_in_own_process({"telegram_user_id": 1, "id": "abcd"}, {"id": "c1"})) == "missed"

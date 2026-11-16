@@ -709,7 +709,8 @@ class Tx:
         """Open tasks with a Remind At not yet sent (system scope; caller checks the clock)."""
         return self._all(
             "SELECT r.id, r.tenant_id, r.seq, r.title, r.fields->>'Remind At' AS remind_at, "
-            "       t.timezone, t.telegram_chat_id, t.schema_name "
+            "       r.fields->>'Remind By' AS remind_by, "
+            "       t.timezone, t.telegram_chat_id, t.telegram_user_id, t.schema_name "
             "FROM records r JOIN tenants t ON t.id = r.tenant_id "
             "WHERE t.status = 'active' AND (t.telegram_chat_id IS NOT NULL OR t.whatsapp_phone IS NOT NULL) "
             "  AND r.type = 'task' "
@@ -1041,6 +1042,49 @@ class Tx:
         return self._all("SELECT id FROM records WHERE tenant_id = %s AND type = 'task' AND "
                          "(external_id LIKE 'gbday:%%' OR title ~* '^wish .* (a )?happy (birthday|anniversary)')",
                          (tenant_id,))
+
+    def set_city(self, tenant_id: uuid.UUID, city: str, lat: float, lon: float) -> None:
+        self.conn.execute("UPDATE tenants SET city = %s, city_lat = %s, city_lon = %s WHERE id = %s",
+                          (city, lat, lon, tenant_id))
+        self.audit(tenant_id, actor="commands", action="update", target_table="tenants", target_id=tenant_id,
+                   summary=f"city set to {city}")
+
+    # --- calls -----------------------------------------------------------------
+
+    def add_call(self, tenant_id: uuid.UUID, kind: str, due_at: dt.datetime, *, about: str | None = None,
+                 record_id: uuid.UUID | None = None, day: dt.date | None = None) -> dict | None:
+        """Queue a call. None if that morning call already exists."""
+        return self._one(
+            "INSERT INTO calls (tenant_id, kind, about, record_id, day, due_at) VALUES (%s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT DO NOTHING RETURNING *", (tenant_id, kind, about, record_id, day, due_at))
+
+    def claim_due_call(self, now: dt.datetime) -> dict | None:
+        """The next call whose time has come, marked 'calling' (system scope)."""
+        row = self._one(
+            "SELECT * FROM calls WHERE status = 'pending' AND coalesce(next_at, due_at) <= %s "
+            "ORDER BY coalesce(next_at, due_at) LIMIT 1 FOR UPDATE SKIP LOCKED", (now,))
+        if row is None:
+            return None
+        self.conn.execute("UPDATE calls SET status = 'calling', attempts = attempts + 1 WHERE id = %s", (row["id"],))
+        return {**row, "status": "calling", "attempts": row["attempts"] + 1}
+
+    def finish_call(self, call_id: uuid.UUID, status: str, *, next_at: dt.datetime | None = None) -> None:
+        if status == "pending":
+            self.conn.execute("UPDATE calls SET status = 'pending', next_at = %s WHERE id = %s", (next_at, call_id))
+        else:
+            self.conn.execute("UPDATE calls SET status = %s, next_at = NULL, finished_at = now() WHERE id = %s",
+                              (status, call_id))
+
+    def call(self, call_id) -> dict | None:
+        return self._one("SELECT * FROM calls WHERE id = %s", (call_id,))
+
+    def unstick_calls(self) -> int:
+        """After a restart: calls left 'calling' go back to pending (system scope)."""
+        return self.conn.execute("UPDATE calls SET status = 'pending' WHERE status = 'calling'").rowcount
+
+    def upcoming_calls(self, tenant_id: uuid.UUID) -> list[dict]:
+        return self._all("SELECT * FROM calls WHERE tenant_id = %s AND status = 'pending' "
+                         "ORDER BY coalesce(next_at, due_at)", (tenant_id,))
 
     def set_wakecall(self, tenant_id: uuid.UUID, at: dt.time | None) -> None:
         self.conn.execute("UPDATE tenants SET wakecall_time = %s WHERE id = %s", (at, tenant_id))

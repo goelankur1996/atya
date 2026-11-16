@@ -51,6 +51,7 @@ types:
       Area:         {type: select, options: {vocab: area}}
       Due Date:     {type: date}
       Remind At:    {type: date, description: "local date and time to send a reminder, YYYY-MM-DDTHH:MM, no offset"}
+      Remind By:    {type: select, options: [message, call], description: "how the reminder arrives; call = ATYA phones the user"}
       Completed At: {type: date}
       Notes:        {type: text}
       Project:      {type: relation, to: project}
@@ -317,6 +318,7 @@ rules:
     - Day narrative / diary entry → create a journal entry. Body = verbatim capture, one block (0a, 0b). Title = the written date. Date = when written; Covers = subject period if different (0c). Mood / Energy / Sleep / Highlights only if expressed. Per-day data (sleep, workouts) is also extracted to the relevant child trackers, dated to when it happened. Thoughts = atomic fragment; Journal = dated narrative; when ambiguous prefer Thoughts unless it is clearly a whole-day reflection.
       - Sleep: when sleep is mentioned in any capture, fill Journal.Sleep with as much detail as possible: bedtime, wake time, total duration, interruptions, quality signal. One-line vague entries ("slept well") are not enough.
     - Reminder request ("remind me to X at 2pm", "ping me tomorrow 9am about Y", "in 2 hours remind me...") → a task with Remind At = the exact local date and time (YYYY-MM-DDTHH:MM, no offset; code applies the owner's timezone) and Due Date = that date. If an open task for the same thing exists, update it instead (set Remind At) rather than creating a duplicate. Times relative to the capture time ("in 20 minutes", "in 2 hours") are added to it. Vague times: morning 09:00, noon 12:00, afternoon 14:00, evening 18:00, tonight 20:00, "later" = 3 hours from now. A time already past today with no day named means tomorrow. Never set Remind At unless the owner asked to be reminded.
+    - Call request ("call me at 4 to remind me to leave", "call me tomorrow 9am about the invoice", "call me in 20 minutes") → exactly like a reminder (a task with Remind At and Due Date), plus Remind By = call. With no topic ("call me at 5"), the title is "Call from ATYA". Only set Remind By = call when the owner asks to be called; "remind me" alone is a message.
     - Birthday ("Meera's birthday is on 14 March") → set the person's Birthday (MM-DD, or YYYY-MM-DD if the year is given; create the person if needed). Do NOT create a task for it: birthdays are shown on the day in the brief and answered when asked. Only if the owner explicitly asks to be reminded ("remind me to get her a gift a week before") create that task with Remind At.
     - Anniversary or other yearly occasion → an event with Start = the next occurrence (all day) and the occasion in the title ("Meera & Raj's anniversary"); again no task unless a reminder is asked for.
     - Trip or travel plan ("flying to Goa on the 20th") → a task "Trip: <place>" with Due Date = the departure date (Status next) and the dates and details in the body, plus a task for each preparation step mentioned (tickets, packing, visa), with due dates before departure.

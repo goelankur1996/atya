@@ -73,7 +73,14 @@ def buttons(record_id) -> list[list[tuple[str, str]]]:
     return [[("Done", f"rem:done:{rid}"), ("In 1 hour", f"rem:1h:{rid}"), ("Tomorrow 9am", f"rem:tmrw:{rid}")]]
 
 
-def send_due_reminders(store: Store, now: dt.datetime | None = None) -> int:
+def queue_message(tx, tenant_id, chat_id, record_id, title: str, ref: str, late: str = "") -> None:
+    tx.add_outbox(tenant_id, chat_id=chat_id, body=f"⏰ {title} ({ref}){late}", buttons=buttons(record_id),
+                  priority="alert", actor="reminders", kind="reminder")
+
+
+def send_due_reminders(store: Store, now: dt.datetime | None = None, *, calls_on: bool = False) -> int:
+    """Due reminders go out as a message, or as a call when the task says Remind By = call
+    (and calls are set up and the user is on Telegram; otherwise a message after all)."""
     now_utc = now or dt.datetime.now(dt.timezone.utc)
     with store.tx(system=True) as tx:
         candidates = tx.reminder_candidates(CLOSED_STATUSES)
@@ -88,11 +95,13 @@ def send_due_reminders(store: Store, now: dt.datetime | None = None) -> int:
             with store.tx(c["tenant_id"]) as tx:
                 if not tx.claim_reminder(c["tenant_id"], c["id"], c["remind_at"]):
                     continue
-                local_now = now_utc.astimezone(tz)
-                late = f"\n(was due {human(at, local_now)})" if now_utc - at > LATE_AFTER else ""
-                tx.add_outbox(c["tenant_id"], chat_id=c["telegram_chat_id"],
-                              body=f"⏰ {c['title']} ({prefix}-{c['seq']}){late}",
-                              buttons=buttons(c["id"]), priority="alert", actor="reminders", kind="reminder")
+                if calls_on and c.get("remind_by") == "call" and c.get("telegram_user_id"):
+                    tx.add_call(c["tenant_id"], "reminder", now_utc, about=c["title"], record_id=c["id"])
+                else:
+                    local_now = now_utc.astimezone(tz)
+                    late = f"\n(was due {human(at, local_now)})" if now_utc - at > LATE_AFTER else ""
+                    queue_message(tx, c["tenant_id"], c["telegram_chat_id"], c["id"], c["title"],
+                                  f"{prefix}-{c['seq']}", late)
             sent += 1
         except Exception:
             log.exception("reminder for task %s failed; will retry", c["id"])
@@ -114,5 +123,5 @@ def snooze_value(choice: str, tz: dt.tzinfo, now: dt.datetime | None = None) -> 
 def run(store: Store, settings: Settings) -> None:
     log.info("reminders started")
     while True:
-        send_due_reminders(store)
+        send_due_reminders(store, calls_on=settings.tg_caller_on)
         time.sleep(CHECK_SECONDS)

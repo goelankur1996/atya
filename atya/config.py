@@ -60,8 +60,8 @@ class Settings:
     daily_pdf_pages: int = 300
     daily_tokens: int = 1_500_000
     daily_research: int = 10
-    daily_call_minutes: int = 15           # wake-up call minutes per user per day (owner exempt)
-    call_beta_users: int = 5               # how many users (besides the owner) can opt in to calls
+    daily_call_minutes: int = 60           # call minutes per user per day, a safety cap (owner exempt)
+    call_beta_users: int = 0               # how many users (besides the owner) can opt in to calls; 0 = no cap
     # Web research (Nova web grounding): on when RESEARCH=on.
     research: bool = False
     research_model: str = "us.amazon.nova-2-lite-v1:0"
@@ -156,8 +156,8 @@ def load_settings() -> Settings:
         daily_tokens=num("LIMIT_DAILY_TOKENS", 1_500_000),
         daily_tokens_all=num("LIMIT_DAILY_TOKENS_ALL", 20_000_000),
         daily_research=num("LIMIT_DAILY_RESEARCH", 10),
-        daily_call_minutes=num("LIMIT_DAILY_CALL_MINUTES", 15),
-        call_beta_users=num("CALL_BETA_USERS", 5),
+        daily_call_minutes=num("LIMIT_DAILY_CALL_MINUTES", 60),
+        call_beta_users=num("CALL_BETA_USERS", 0),
         research=(os.environ.get("RESEARCH", "").strip().lower() in ("on", "1", "true", "yes")),
         research_model=os.environ.get("RESEARCH_MODEL", "").strip() or "us.amazon.nova-2-lite-v1:0",
         voice_notes=(os.environ.get("VOICE_NOTES", "").strip().lower() in ("on", "1", "true", "yes")),
