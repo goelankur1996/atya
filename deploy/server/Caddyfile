@@ -11,3 +11,8 @@
 	header -Server
 	header Strict-Transport-Security "max-age=31536000"
 }
+
+# The old address(es) and www forward here, keeping the path (old links keep working).
+www.{$WEB_DOMAIN}, {$WEB_REDIRECT_FROM:localhost} {
+	redir https://{$WEB_DOMAIN}{uri} permanent
+}

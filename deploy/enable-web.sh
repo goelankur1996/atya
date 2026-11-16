@@ -47,6 +47,11 @@ if [ -n "${1:-}" ]; then
     exit 1
   fi
 fi
+OLD=$(aws ssm get-parameter --name /atya/WEB_DOMAIN --with-decryption --query Parameter.Value --output text 2>/dev/null || true)
+if [ -n "$OLD" ] && [ "$OLD" != "$DOMAIN" ]; then      # moving: the old address forwards to the new one
+  aws ssm put-parameter --name /atya/WEB_REDIRECT_FROM --value "$OLD" --type SecureString --overwrite >/dev/null
+  echo "ok: $OLD will forward to $DOMAIN"
+fi
 aws ssm put-parameter --name /atya/WEB_DOMAIN --value "$DOMAIN" --type SecureString --overwrite >/dev/null
 aws ssm put-parameter --name /atya/WEB_BASE_URL --value "https://$DOMAIN" --type SecureString --overwrite >/dev/null
 echo "ok: stored in SSM"
@@ -59,6 +64,7 @@ echo $(b64 deploy/server/Caddyfile) | base64 -d > Caddyfile
 echo $(b64 deploy/server/update.sh) | base64 -d > update.sh
 chmod 700 update.sh
 ./update.sh
+docker compose --profile web up -d --force-recreate caddy
 docker compose ps"
 
 step "Waiting for the certificate (up to 2 min)"

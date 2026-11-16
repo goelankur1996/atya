@@ -59,6 +59,7 @@ services:
     ports: ["80:80", "443:443"]
     environment:
       WEB_DOMAIN: ${WEB_DOMAIN:-}
+      WEB_REDIRECT_FROM: ${WEB_REDIRECT_FROM:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -84,6 +85,11 @@ cat > Caddyfile <<'EOF'
 	}
 	header -Server
 	header Strict-Transport-Security "max-age=31536000"
+}
+
+# The old address(es) and www forward here, keeping the path (old links keep working).
+www.{$WEB_DOMAIN}, {$WEB_REDIRECT_FROM:localhost} {
+	redir https://{$WEB_DOMAIN}{uri} permanent
 }
 EOF
 
