@@ -44,6 +44,14 @@
       <input class="field" id="name" name="name" value="{{ me.display_name or '' }}" maxlength="80" required>
       <button class="btn" type="submit">Save</button>
     </form>
+    <form class="row static setting" action="{{ url_for('settings_language') }}" method="post">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label class="grow" for="language"><b>Call language</b><br><span class="muted small">What ATYA speaks on your calls (and writes when someone in your circle asks you something).</span></label>
+      <select class="field" id="language" name="language">
+        {% for key, label in languages %}<option value="{{ key }}"{% if key == me.call_language %} selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+      <button class="btn" type="submit">Save</button>
+    </form>
     <form class="row static setting" action="{{ url_for('settings_timezone') }}" method="post">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <label class="grow" for="timezone"><b>Timezone</b><br><span class="muted small">Used for reminders and the brief.</span></label>
@@ -61,6 +69,25 @@
       <button class="btn" type="submit">{{ "Save" if me.brief_time else "Turn on" }}</button>
       {% if me.brief_time %}<button class="linkbtn" type="submit" name="off" value="1">Turn off</button>{% endif %}
     </form>
+  </div>
+</section>
+
+<section id="circle">
+  <h2>Circle</h2>
+  <div class="box">
+    {% for p in circle %}
+    <form class="row static setting" action="{{ url_for('settings_circle_remove', other_id=p.id) }}" method="post">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <span class="grow"><b>{{ p.name }}</b><br><span class="muted small">
+        {% if p.out and p.in %}You can ask ATYA to call or message them, and they can ask it to reach you.
+        {% elif p.out %}You can ask ATYA to call or message them.
+        {% else %}They can ask ATYA to call or message you.{% endif %}</span></span>
+      <button class="linkbtn" type="submit">Remove</button>
+    </form>
+    {% else %}
+    <div class="row static"><span class="grow muted">No one yet.</span></div>
+    {% endfor %}
+    <div class="row static"><span class="grow muted small">People who let each other ask ATYA to call or message them, with the answer passed back. To add someone, send <b>/circle add &lt;name&gt;</b> to ATYA and forward them the link it gives you. Removing someone ends it both ways.</span></div>
   </div>
 </section>
 

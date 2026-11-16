@@ -51,9 +51,9 @@ def outbox_rows(store, tid):
         return tx._all("SELECT * FROM outbox WHERE tenant_id = %s ORDER BY created_at", (tid,))
 
 
-def invite(store, settings, owner, name="Dad", lang="hinglish"):
+def invite(store, settings, owner, name="Dad"):
     ctx, tg = ctx_for(store, settings, owner, OWNER, "Ankur")
-    assert circle.command(ctx, f"add {name} {lang}") == "circle:invite"
+    assert circle.command(ctx, f"add {name}") == "circle:invite"
     with store.tx(system=True) as tx:
         return tx._one("SELECT * FROM circle_invites WHERE from_tenant = %s ORDER BY created_at DESC LIMIT 1",
                        (owner["id"],))
@@ -73,8 +73,8 @@ def test_existing_user_agrees_both_ways(store, settings, owner):
     ctx, _ = ctx_for(store, settings, dad, DAD, "Rajesh")
     assert commands.start(ctx, inv["code"].lower()) == "circle:asked"
     ask = bodies(store, dad["id"])[-1]
-    assert ask.startswith("Ankur chahte hain") and "call ya message" in ask and "Allow karein?" in ask              # in his language
-    assert tap_last(store, dad, "Haan, allow") == "circle:allowed"
+    assert ask.startswith("Ankur would like ATYA to call or message you") and "Hinglish mein" in ask   # both
+    assert tap_last(store, dad, "Haan, Hinglish mein") == "circle:allowed"     # he picks his own language
     assert "Rajesh" not in bodies(store, owner["id"])[-2] and "Dad said yes" in bodies(store, owner["id"])[-2]
     assert tap_last(store, owner, "Yes") == "circle:back-allowed"
     with store.tx(system=True) as tx:
@@ -92,7 +92,7 @@ def test_existing_user_agrees_both_ways(store, settings, owner):
 
 
 def test_someone_new_joins_from_the_link(store, settings, owner):
-    inv = invite(store, settings, owner, "Meera", "english")
+    inv = invite(store, settings, owner, "Meera")
     ctx, tg = ctx_for(store, settings, None, NEW, "Meera")
     assert commands.start(ctx, inv["code"]) == "circle:joined-new"          # no waitlist
     assert tg.sent[-1][1] == commands.TZ_PROMPT
@@ -114,7 +114,7 @@ def linked_dad(store, settings, owner):
     inv = invite(store, settings, owner)
     ctx, _ = ctx_for(store, settings, dad, DAD)
     commands.start(ctx, inv["code"])
-    tap_last(store, dad, "Haan, allow")
+    tap_last(store, dad, "Haan, Hinglish mein")
     with store.tx(system=True) as tx:
         tx.conn.execute("DELETE FROM calls")
         return tx.tenant(dad["id"])
@@ -241,3 +241,25 @@ def test_names_come_from_the_profile_and_fix_links(store, settings, owner):
     with store.tx(system=True) as tx:
         assert tx.tenant(owner["id"])["display_name"] == "Ankur Goel"
         assert circle.called(tx, dad["id"], tx.tenant(owner["id"])) == "Ankur"
+
+
+def test_circle_on_the_settings_page(store, settings, owner):
+    from atya import web
+    from tests.test_web import csrf, sign_in
+    dad = linked_dad(store, settings, owner)
+    web_settings = Settings(**{**settings.__dict__, "web_base_url": "https://atya.test"})
+    app = web.create_app(store, web_settings)
+    app.testing = True
+    client, _ = sign_in(app, store, web_settings, owner)
+    page = client.get("/settings").get_data(as_text=True)
+    assert "<b>Dad</b>" in page and "You can ask ATYA to call or message them." in page
+    token = csrf(client, "/settings")
+    r = client.post("/settings/language", data={"csrf": token, "language": "hindi"})
+    assert r.status_code == 302
+    with store.tx(system=True) as tx:
+        assert tx.tenant(owner["id"])["call_language"] == "hindi"
+    r = client.post(f"/settings/circle/{dad['id']}/remove", data={"csrf": token})
+    assert r.status_code == 302 and "saved=" in r.headers["Location"]
+    with store.tx(system=True) as tx:
+        assert circle.find_link(tx, owner["id"], "dad") is None
+    assert bodies(store, dad["id"])[-1] == "Ankur ne check-in calls aur messages band kar diye hain."

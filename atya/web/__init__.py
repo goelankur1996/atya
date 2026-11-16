@@ -672,6 +672,16 @@ def create_app(store: Store, settings: Settings) -> Flask:
             me = t.tenant(tid)
             conn = t.connection(tid)
             events = t._one("SELECT count(*) AS n FROM records WHERE tenant_id = %s AND type = 'event'", (tid,))["n"]
+        from .. import circle
+        with store.tx(system=True) as st:
+            out, inn = circle.links(st, tid)
+            people: dict = {}
+            for r in out:
+                people.setdefault(r["callee"], {"id": r["callee"], "name": r["name"], "out": False, "in": False})["out"] = True
+            for r in inn:
+                p = people.setdefault(r["caller"], {"id": r["caller"], "name": circle.called(st, tid, st.tenant(r["caller"])),
+                                                    "out": False, "in": False})
+                p["in"] = True
         link = None
         if request.args.get("link"):
             code = request.args["link"]
@@ -684,7 +694,9 @@ def create_app(store: Store, settings: Settings) -> Flask:
                                saved=request.args.get("saved"), link=link,
                                wa_number=settings.whatsapp_number if settings.whatsapp_on else None,
                                tg_bot=telegram_bot(), zones=COMMON_ZONES,
-                               brief_label=brief_fmt(me["brief_time"]) if me.get("brief_time") else None)
+                               brief_label=brief_fmt(me["brief_time"]) if me.get("brief_time") else None,
+                               circle=sorted(people.values(), key=lambda p: p["name"].lower()),
+                               languages=[("english", "English"), ("hinglish", "Hinglish"), ("hindi", "Hindi")])
 
     def back_to_settings(saved: str | None = None, error: str | None = None, anchor: str = ""):
         args = {k: v for k, v in (("saved", saved), ("error", error)) if v}
@@ -700,6 +712,26 @@ def create_app(store: Store, settings: Settings) -> Flask:
         from .. import circle
         circle.set_name(store, g.tenant["id"], name)
         return back_to_settings(saved="Name saved.", anchor="#account")
+
+    @app.post("/settings/language")
+    def settings_language():
+        need_login()
+        check_csrf()
+        want = request.form.get("language", "")
+        if want not in ("english", "hinglish", "hindi"):
+            return back_to_settings(error="Pick a language.", anchor="#account")
+        with tx() as t:
+            t.conn.execute("UPDATE tenants SET call_language = %s WHERE id = %s", (want, g.tenant["id"]))
+        return back_to_settings(saved="Call language saved.", anchor="#account")
+
+    @app.post("/settings/circle/<uuid:other_id>/remove")
+    def settings_circle_remove(other_id):
+        need_login()
+        check_csrf()
+        from .. import circle
+        if not circle.end_between(store, g.tenant, other_id):
+            return back_to_settings(error="They weren't in your circle.", anchor="#circle")
+        return back_to_settings(saved="Removed from your circle, both ways.", anchor="#circle")
 
     @app.post("/settings/timezone")
     def settings_timezone():

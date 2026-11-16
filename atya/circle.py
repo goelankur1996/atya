@@ -128,8 +128,7 @@ def make_link(tx, caller_id, callee_id, name: str) -> dict:
 # --- /circle -----------------------------------------------------------------------
 
 USAGE = ("Circle: people who let you ask ATYA to call them (to check in on something), with a short report back "
-         "to you.\n\nAdd someone: /circle add <name>, e.g. /circle add Dad hinglish (the language their calls "
-         "should be in: english, hinglish or hindi).\nRemove: /circle remove <name>.\n\nThen just ask, e.g. "
+         "to you.\n\nAdd someone: /circle add <name>, e.g. /circle add Dad.\nRemove: /circle remove <name>.\n\nThen just ask, e.g. "
          "\"call Dad every day at 5:30 pm to check if he did his situps; motivate him if not\".")
 
 
@@ -155,12 +154,10 @@ def add(ctx, words: list[str]) -> str:
     if not (ctx.tenant.get("display_name") or "").strip():
         ctx.reply("First, what's your name? They'll be told who's asking. Send it like: /name Ankur")
         return "circle:no-own-name"
-    language = None
-    if words and words[-1].lower() in LANGUAGES:
-        language = words.pop().lower()
+    language = None                                # each person picks their own (/language, or when they agree)
     name = " ".join(words).strip()
     if not name:
-        ctx.reply("Who should it be? For example: /circle add Dad hinglish")
+        ctx.reply("Who should it be? For example: /circle add Dad")
         return "circle:no-name"
     code = CODE_PREFIX + secrets.token_hex(4).upper()
     with ctx.store.tx(system=True) as tx:
@@ -193,15 +190,27 @@ def remove(ctx, name: str) -> str:
         if other is None:
             ctx.reply(f"There's no one called {name} in your circle. Send /circle to see who's there.")
             return "circle:not-found"
-        tx.conn.execute("UPDATE circle_links SET status = 'ended', ended_at = now() WHERE status <> 'ended' "
-                        "AND ((caller = %s AND callee = %s) OR (caller = %s AND callee = %s))",
-                        (ctx.tenant["id"], other, other, ctx.tenant["id"]))
-        them = tx.tenant(other)
-    ctx.reply(f"Done: {name} is out of your circle, both ways. No more check-in calls between you.")
-    if them:
-        tell(ctx.store, them, f"{first(ctx.tenant)} ne check-in calls band kar di hain." if hindi(them) else
-             f"{first(ctx.tenant)} ended the check-in calls between you.")
+    end_between(ctx.store, ctx.tenant, other)
+    ctx.reply(f"Done: {name} is out of your circle, both ways. No more check-in calls or messages between you.")
     return "circle:removed"
+
+
+def end_between(store: Store, tenant: dict, other_id) -> bool:
+    """End the links both ways between this user and another (from /circle remove or the web), and tell them.
+    False if there were none."""
+    with store.tx(system=True) as tx:
+        n = tx.conn.execute("UPDATE circle_links SET status = 'ended', ended_at = now() WHERE status <> 'ended' "
+                            "AND ((caller = %s AND callee = %s) OR (caller = %s AND callee = %s))",
+                            (tenant["id"], other_id, other_id, tenant["id"])).rowcount
+        tx.conn.execute("UPDATE circle_asks SET status = 'expired' WHERE status = 'waiting' "
+                        "AND ((requester = %s AND callee = %s) OR (requester = %s AND callee = %s))",
+                        (tenant["id"], other_id, other_id, tenant["id"]))
+        them = tx.tenant(other_id)
+        who = called(tx, other_id, tenant)
+    if n and them:
+        tell(store, them, f"{who} ne check-in calls aur messages band kar diye hain." if hindi(them) else
+             f"{who} ended the check-in calls and messages between you.")
+    return bool(n)
 
 
 # --- joining and agreeing -------------------------------------------------------------
@@ -232,8 +241,6 @@ def join(ctx, code: str) -> str:
                                       display_name=ctx.name, status="invited", actor="circle")
             if whatsapp:
                 tx.conn.execute("UPDATE tenants SET whatsapp_last_inbound = now() WHERE id = %s", (tenant["id"],))
-            if inv["language"]:
-                tx.conn.execute("UPDATE tenants SET call_language = %s WHERE id = %s", (inv["language"], tenant["id"]))
             tx.waitlist_remove_person(whatsapp_phone=tenant.get("whatsapp_phone"),
                                       telegram_user_id=tenant.get("telegram_user_id"))
             tx.set_state(pending_key(tenant["id"]), {"code": code})
@@ -247,10 +254,6 @@ def join(ctx, code: str) -> str:
         from .commands import TZ_PROMPT, tz_buttons
         ctx.reply(TZ_PROMPT, buttons=tz_buttons())
         return "circle:joined-invited"
-    if inv["language"] and tenant.get("call_language") == "english":
-        with ctx.store.tx(system=True) as tx:
-            tx.conn.execute("UPDATE tenants SET call_language = %s WHERE id = %s", (inv["language"], tenant["id"]))
-            tenant = tx.tenant(tenant["id"])
     ask(ctx.store, tenant, inv)
     return "circle:asked"
 
@@ -284,8 +287,11 @@ def ask(store: Store, tenant: dict, inv: dict) -> None:
     else:
         body = (f"{who} would like ATYA to call or message you when they ask (for example, to check in on your "
                 f"exercise, or to ask you something), and to pass your answer or a short summary of the call back to "
-                f"them. Nothing else of yours is shared with {who}. Allow?")
-        buttons = [[("Allow", f"circle:allow:{inv['code']}"), ("Not now", f"circle:no:{inv['code']}")]]
+                f"them. Nothing else of yours is shared with {who}. Allow?\n\n"
+                f"{who} chahte hain ki ATYA unke kehne par aapko call ya message kare, aur aapka jawab unhe bheje. "
+                "Hindi/Hinglish mein baat karni ho to \"Haan, Hinglish mein\" dabaayein.")
+        buttons = [[("Allow", f"circle:allow:{inv['code']}"), ("Haan, Hinglish mein", f"circle:allowhi:{inv['code']}"),
+                    ("Not now", f"circle:no:{inv['code']}")]]
     tell(store, tenant, body, buttons)
 
 
@@ -295,6 +301,12 @@ def tap(store: Store, tenant: dict | None, data: str) -> str:
     if len(parts) != 3 or tenant is None or tenant["status"] != "active":
         return "ignored:circle"
     _, choice, ref = parts
+    if choice == "allowhi":                        # allow, and they'd like their calls and messages in Hinglish
+        with store.tx(system=True) as tx:
+            if tx._one("SELECT 1 AS x FROM circle_invites WHERE code = %s AND used_at IS NULL", (ref,)):
+                tx.conn.execute("UPDATE tenants SET call_language = 'hinglish' WHERE id = %s", (tenant["id"],))
+                tenant = tx.tenant(tenant["id"])
+        choice = "allow"
     if choice in ("allow", "no"):
         with store.tx(system=True) as tx:
             inv = tx._one("SELECT * FROM circle_invites WHERE code = %s AND used_at IS NULL", (ref,))
