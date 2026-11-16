@@ -128,8 +128,9 @@ def test_reminder_call_falls_back_to_a_message(store, settings, owner):
 
 
 def test_call_only_task_closes_after_the_call(store, settings, owner):
-    assert wakecall.schedule_call(store, owner, "2026-11-16T16:00", now=ist(15)) == "Scheduled: a call at 4:00 pm."
-    assert "already passed" in wakecall.schedule_call(store, owner, "2026-11-16T09:00", now=ist(15))
+    with store.tx(owner["id"]) as tx:                  # what filing makes of "call me at 4" (no other purpose)
+        tx.create_record(owner["id"], S, "task", title="Call from ATYA", enforce_verbatim=False, actor="t",
+                         fields={"Status": "next", "Remind At": "2026-11-16T16:00", "Remind By": "call"})
     with store.tx(owner["id"]) as tx:
         (t,) = tx._all("SELECT * FROM records WHERE tenant_id = %s AND type = 'task'", (owner["id"],))
     assert t["title"] == "Call from ATYA" and t["fields"]["Remind By"] == "call"
@@ -203,8 +204,8 @@ def test_opening_prompt():
     assert "24°C and clear" in p and "what would they like to focus on" in p and "stop and wait" in p.lower()
     p = wakecall.build_prompt(t, {"kind": "reminder", "about": "leave for the airport"}, local, "B", "matthew", None)
     assert 'asked to be reminded: "leave for the airport"' in p
-    # Changes happen after the call (one path, the same as a text); a varied filler before each lookup.
-    assert "You can't change records during the call" in p and "never ask them to do it themselves" in p
+    # Everything about their records goes to ATYA (the same path as a text); a varied filler before each.
+    assert "send it with atya" in p and "never say you can't make a change" in p
     assert len(wakecall.FILLERS) >= 40 and len(set(wakecall.FILLERS)) == len(wakecall.FILLERS)
     assert all(f'"{f}"' in p for f in wakecall.FILLERS) and "{fillers}" not in p
 
@@ -241,20 +242,45 @@ def test_weather_and_save_city(store, owner):
     assert weather.find_city("", http=http) is None
 
 
-def test_transcript_is_filed_and_summarised(store, settings, owner):
-    transcript = [("ASSISTANT", "Good morning Ankur. How did you sleep?"), ("USER", "fine"),
-                  ("ASSISTANT", "Anything for today?"), ("USER", "workout at seven and call Rahul about the audit")]
-    assert wakecall.save_transcript(store, owner, transcript, dt.datetime.now(dt.timezone.utc))
-    assert not wakecall.save_transcript(store, owner, [("ASSISTANT", "Hello?")], dt.datetime.now(dt.timezone.utc))
-    raw = "ATYA: Good morning Ankur. How did you sleep?\nAnkur: fine\nATYA: Anything for today?\n" \
-          "Ankur: workout at seven and call Rahul about the audit"
+def call_with_processor(store, settings, llm, tenant_, said):
+    """The call's atya tool and the processor at work together: returns what the tool would say back."""
+    import threading
+    requests, out = [], {}
+    t = threading.Thread(target=lambda: out.setdefault("reply", wakecall.ask_atya(
+        store, tenant_, said, requests, wait=5, poll=0.05)))
+    t.start()
+    while t.is_alive():
+        processor.process_once(store, llm, settings)
+    return out["reply"], requests
+
+
+def test_call_requests_go_through_the_same_processor(store, settings, owner):
     llm = FakeLLM()
-    llm.plans[raw] = {"writes": [{"type": "task", "title": "Call Rahul about the audit", "fields": {}}]}
-    while processor.process_once(store, llm, settings):
-        pass
-    assert llm.last_hint == processor.CALL_HINT
-    assert "From our call, saved:" in outbox(store, owner["id"])[-1]
-    assert "Call Rahul about the audit" in outbox(store, owner["id"])[-1]
+    llm.plans["Call Rahul about the audit tomorrow"] = {
+        "writes": [{"type": "task", "title": "Call Rahul about the audit", "fields": {}}]}
+    reply, requests = call_with_processor(store, settings, llm, owner, "Call Rahul about the audit tomorrow")
+    assert reply.startswith("Saved:") and "Call Rahul about the audit" in reply
+    assert outbox(store, owner["id"]) == [reply]          # spoken on the call (marked sent), not sent to the chat
+    with store.tx(owner["id"]) as tx:
+        assert tx._one("SELECT status FROM outbox WHERE inbox_id = %s", (requests[0],))["status"] == "sent"
+    sonic = type("S", (), {"transcript": [("ASSISTANT", "Morning!"), ("USER", "call rahul about the audit")],
+                           "tool_calls": [("atya", {}, reply)]})()
+    wakecall.finish_talk(store, owner, {"kind": "now"}, sonic, 42, dt.datetime.now(dt.timezone.utc), requests)
+    assert outbox(store, owner["id"])[-1].startswith("From our call:\n- ") and "Rahul" in outbox(store, owner["id"])[-1]
+    with store.tx(owner["id"]) as tx:                    # the transcript is kept, not filed again
+        (tr,) = tx._all("SELECT * FROM inbox WHERE tenant_id = %s AND sender = 'call'", (owner["id"],))
+    assert tr["status"] == "processed" and "Ankur: call rahul about the audit" in tr["raw_content"]
+
+
+def test_slow_call_request_answers_in_the_chat(store, settings, owner):
+    from atya.store import CALL_REQUEST_LATE
+    requests = []
+    assert wakecall.ask_atya(store, owner, "research AQI in Gurgaon", requests, wait=0.2, poll=0.05) == \
+        wakecall.LATE_REPLY
+    with store.tx(owner["id"]) as tx:
+        assert tx._one("SELECT sender FROM inbox WHERE id = %s", (requests[0],))["sender"] == CALL_REQUEST_LATE
+        tx.add_outbox(owner["id"], chat_id=OWNER, body="AQI is 180", inbox_id=requests[0])
+        assert tx._one("SELECT channel FROM outbox WHERE inbox_id = %s", (requests[0],))["channel"] != "call"
 
 
 def test_sonic_runs_tools_and_returns_results():
@@ -306,15 +332,14 @@ def test_setup_by_call(store, settings, owner):
     assert tenant(store, meera["id"])["wakecall_consent_at"] is not None              # the tap is the consent
     phone = Phone("answered")
     assert wakecall.tick(store, settings, phone, now=dt.datetime.now(dt.timezone.utc)) == "setup:answered:answered"
-    # The transcript comes back as a 'setup call' and ends with the usual summary and the 9 am brief.
-    wakecall.save_transcript(store, tenant(store, meera["id"]),
-                             [("ASSISTANT", "What's on this week?"), ("USER", "dentist on friday at 5")],
-                             dt.datetime.now(dt.timezone.utc), sender="setup call")
+    # What she says goes to ATYA during the call; afterwards the usual summary and the 9 am brief.
     llm = FakeLLM()
-    llm.plans["ATYA: What's on this week?\nMeera: dentist on friday at 5"] = {
-        "writes": [{"type": "task", "title": "Dentist", "fields": {}}]}
-    while processor.process_once(store, llm, settings):
-        pass
+    llm.plans["Dentist on Friday at 5"] = {"writes": [{"type": "task", "title": "Dentist", "fields": {}}]}
+    _, requests = call_with_processor(store, settings, llm, tenant(store, meera["id"]), "Dentist on Friday at 5")
+    sonic = type("S", (), {"transcript": [("ASSISTANT", "What's on this week?"), ("USER", "dentist on friday at 5")],
+                           "tool_calls": []})()
+    wakecall.finish_talk(store, tenant(store, meera["id"]), {"kind": "setup"}, sonic, 300,
+                         dt.datetime.now(dt.timezone.utc), requests)
     assert outbox(store, meera["id"])[-1].startswith("That's it, thanks. I've got: 1 task.")
     assert tenant(store, meera["id"])["brief_time"] == dt.time(9, 0)
 
@@ -332,6 +357,7 @@ def test_setup_call_not_answered_falls_back_to_messages(store, settings, owner):
 
 
 def test_set_morning_call_tool(store, owner):
-    assert wakecall.set_morning_call(store, owner, "6:45") == "Done: a call every morning at 6:45 am, starting tomorrow."
+    assert wakecall.set_morning_call(store, owner, "6:45", now=ist(9)) == \
+        "Done: a call every morning at 6:45 am (Asia/Kolkata), starting tomorrow."
     assert owner_tenant(store)["wakecall_time"] == dt.time(6, 45)
     assert wakecall.set_morning_call(store, owner, "off") == "Morning call turned off."

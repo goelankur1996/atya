@@ -25,6 +25,13 @@ from psycopg_pool import ConnectionPool
 from .schema import Schema
 
 
+
+# What the user asks on a live call goes into the inbox like any message, with this sender; its replies are
+# spoken on the call (outbox channel 'call') instead of sent. If the answer takes too long, the sender becomes
+# CALL_REQUEST_LATE and the reply goes to the chat.
+CALL_REQUEST = "call request"
+CALL_REQUEST_LATE = "call request (late)"
+
 class StoreError(Exception):
     pass
 
@@ -541,9 +548,11 @@ class Tx:
         once; no sender sees it), a WhatsApp message on WhatsApp. Without a
         message to answer, it goes to the channel the user last wrote from."""
         if channel is None and inbox_id is not None:
-            src = self._one("SELECT source FROM inbox WHERE id = %s", (inbox_id,))
+            src = self._one("SELECT source, sender FROM inbox WHERE id = %s", (inbox_id,))
             if src and src["source"] in ("web", "whatsapp", "telegram"):
                 channel = src["source"]
+            elif src and src["source"] == "call" and src["sender"] == CALL_REQUEST:
+                channel = "call"                     # said on a live call: the call reads it out
         if channel in (None, "whatsapp", "telegram"):
             t = self._one("SELECT channel, whatsapp_phone, telegram_chat_id FROM tenants WHERE id = %s",
                           (tenant_id,))
@@ -559,8 +568,8 @@ class Tx:
             "buttons, status, sent_at, kind) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (tenant_id, inbox_id, channel, chat_id or 0, reply_to_message_id, body, priority,
              Jsonb([[list(b) for b in r] for r in buttons]) if buttons else None,
-             "sent" if channel == "web" else "pending",
-             dt.datetime.now(dt.timezone.utc) if channel == "web" else None, kind))
+             "sent" if channel in ("web", "call") else "pending",
+             dt.datetime.now(dt.timezone.utc) if channel in ("web", "call") else None, kind))
         assert row is not None
         self.audit(tenant_id, actor=actor, action="create", target_table="outbox",
                    target_id=row["id"], summary="reply queued",
@@ -1076,6 +1085,19 @@ class Tx:
             self.conn.execute("UPDATE calls SET status = %s, next_at = NULL, finished_at = now() WHERE id = %s",
                               (status, call_id))
 
+    def call_replies(self, inbox_id) -> list[str]:
+        """Replies to a live-call request that are for the call (not ones sent to the chat after it was late)."""
+        return [r["body"] for r in self._all("SELECT body FROM outbox WHERE inbox_id = %s AND channel = 'call' "
+                                             "ORDER BY created_at", (inbox_id,))]
+
+    def release_call_request(self, inbox_id) -> bool:
+        """A call request whose answer is taking too long: its reply goes to the chat instead.
+        False if the reply is already there (read it with call_replies)."""
+        return self.conn.execute(
+            "UPDATE inbox SET sender = %s WHERE id = %s AND sender = %s "
+            "AND NOT EXISTS (SELECT 1 FROM outbox WHERE inbox_id = %s)",
+            (CALL_REQUEST_LATE, inbox_id, CALL_REQUEST, inbox_id)).rowcount == 1
+
     def call(self, call_id) -> dict | None:
         return self._one("SELECT * FROM calls WHERE id = %s", (call_id,))
 
@@ -1095,6 +1117,14 @@ class Tx:
         if not secret:
             return None
         return self._one("SELECT * FROM calls WHERE secret = %s AND status = 'calling'", (secret,))
+
+    def mark_call_picked_up(self, call_id) -> None:
+        self.conn.execute("UPDATE calls SET picked_up_at = coalesce(picked_up_at, now()) WHERE id = %s", (call_id,))
+
+    def ringing_phone_calls(self) -> list[dict]:
+        """Phone calls dialled and not yet answered or ended: the audio bridge gets their opening ready."""
+        return self._all("SELECT * FROM calls WHERE status = 'calling' AND line = 'phone' AND secret IS NOT NULL "
+                         "AND answered_at IS NULL AND hangup_cause IS NULL")
 
     def mark_call_answered(self, call_id) -> bool:
         """True the first time only: one audio stream per attempt."""

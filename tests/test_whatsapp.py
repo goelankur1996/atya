@@ -228,7 +228,7 @@ def test_invite_signup_onboarding_and_a_message_through_the_pipeline(store, sett
     deliver(store, wa, settings, event(FRIEND, tap="tz:Europe/London"))
     t = by_phone(store, FRIEND)
     assert t["status"] == "active" and t["timezone"] == "Europe/London"
-    assert wa.texts(FRIEND)[-1].startswith("Timezone set to Europe/London")
+    assert wa.texts(FRIEND)[-1].startswith("Got it: Europe/London")
     assert "what's on for you this week" in wa.texts(FRIEND)[-1]      # the setup interview starts
     with store.tx(system=True) as tx:
         tx.set_state(f"interview:{t['id']}", None)                     # (covered in test_interview)

@@ -31,7 +31,7 @@ class Settings:
     owner_telegram_user_id: int | None
     owner_timezone: str = "UTC"
     voyage_api_key: str | None = None
-    poll_interval: int = 5
+    poll_interval: int = 1
     reclaim_minutes: int = 5
     max_attempts: int = 3
     # Public address of the web view, e.g. https://atya.example.com. Unset: /web is off.
@@ -146,7 +146,7 @@ def load_settings() -> Settings:
         owner_telegram_user_id=int(owner) if owner.isdigit() else None,
         owner_timezone=os.environ.get("OWNER_TIMEZONE", "UTC").strip() or "UTC",
         voyage_api_key=os.environ.get("VOYAGE_API_KEY", "").strip() or None,
-        poll_interval=int(os.environ.get("POLL_INTERVAL_SECONDS", "5")),
+        poll_interval=int(os.environ.get("POLL_INTERVAL_SECONDS", "1")),
         reclaim_minutes=int(os.environ.get("PROCESSING_RECLAIM_MINUTES", "5")),
         max_attempts=int(os.environ.get("MAX_ATTEMPTS", "3")),
         web_base_url=os.environ.get("WEB_BASE_URL", "").strip().rstrip("/") or None,

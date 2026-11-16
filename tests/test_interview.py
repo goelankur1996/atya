@@ -64,7 +64,7 @@ def test_interview_files_answers_follows_up_and_wraps_up(store, settings, clean)
     tg, llm = FakeTelegram(), FakeLLM()
     t = join(store, settings, tg)
     first = to_friend(tg)[-1]
-    assert first.startswith("Timezone set to Asia/Kolkata") and interview.FIRST_QUESTION in first
+    assert first.startswith("Got it: Asia/Kolkata") and interview.FIRST_QUESTION in first
 
     a1 = "Pricing call with Meera on Thursday, and the export deck is due Friday"
     llm.plans[a1] = {"writes": [{"type": "person", "title": "Meera", "fields": {}},

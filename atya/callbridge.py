@@ -3,7 +3,9 @@
 Runs as its own service (`python -m atya.callbridge`, port 8099; Caddy sends /plivo/ws/* here),
 so it can move to a server in India if Plivo requires the audio to end there.
 
-Plivo opens wss://<domain>/plivo/ws/<secret> once the user picks up (see plivo.py), sends
+While the phone rings, the bridge opens the voice model and has it say the opening, holding the
+audio; it plays OPENING_DELAY after pickup. Plivo opens wss://<domain>/plivo/ws/<secret> once
+the user picks up (see plivo.py), sends
 `start`, then `media` events (16 kHz 16-bit PCM, base64) and `stop` when the call ends.
 We send `playAudio` events back (Sonic speaks at 24 kHz; resampled to 16 kHz) and
 `clearAudio` when the user talks over ATYA. When the talk is over we count the minutes,
@@ -29,6 +31,10 @@ PORT = 8099
 CHUNK_IN = 1024           # bytes of caller audio per Sonic event (32 ms at 16 kHz)
 CHUNK_OUT = 6400          # bytes of ATYA's speech per playAudio event (200 ms at 16 kHz)
 START_WAIT = 10           # seconds to wait for Plivo's `start` event
+OPENING_DELAY = 0.5       # seconds from pickup to ATYA's first word (the opening is generated while it rings)
+WATCH_SECONDS = 0.25      # how often to look for newly ringing calls
+KEEPALIVE_SECONDS = 0.5   # while ringing: silence to the voice model this often, and check the call is still on
+SILENCE = bytes(1600)     # 50 ms of silence at 16 kHz
 
 
 class Down24to16:
@@ -58,22 +64,105 @@ def play_event(pcm16: bytes) -> str:
                                                        "payload": base64.b64encode(pcm16).decode()}})
 
 
+class Session:
+    """One call's voice session. Opened while the phone rings, so the opening is ready at pickup."""
+
+    def __init__(self, call: dict, tenant: dict):
+        self.call, self.tenant = call, tenant
+        self.requests: list = []
+        self.outq: asyncio.Queue[bytes] = asyncio.Queue()
+        self.down = Down24to16()
+        self.state = {"stream_id": None, "call_uuid": None, "clear": False}
+        self.sonic = None
+        self.ready = asyncio.Event()          # Sonic open and the opening asked for (or failed)
+        self.failed = False
+        self.connected = False
+        self.budget = 0
+
+    def on_audio(self, pcm24: bytes) -> None:
+        pcm = self.down.feed(pcm24)
+        for i in range(0, len(pcm), CHUNK_OUT):
+            self.outq.put_nowait(pcm[i:i + CHUNK_OUT])
+
+    def on_interrupt(self) -> None:             # the user talked over ATYA: drop what's queued
+        self.down.clear()
+        while not self.outq.empty():
+            self.outq.get_nowait()
+        self.state["clear"] = True
+        self.outq.put_nowait(b"")               # wake the sender
+
+
 class Bridge:
-    def __init__(self, store: Store, settings: Settings, llm, embedder, sonic_factory=None):
+    def __init__(self, store: Store, settings: Settings, sonic_factory=None):
         self.store = store
         self.settings = settings
-        self.llm = llm
-        self.embedder = embedder
         self.sonic_factory = sonic_factory          # tests swap in a fake voice model
+        self.sessions: dict[str, Session] = {}      # by the attempt's secret
 
-    def claim(self, secret: str) -> tuple[dict, dict] | None:
+    # --- before pickup: get the opening ready ------------------------------------
+
+    async def watch(self) -> None:
+        """Start a session for every phone call that's ringing."""
+        while True:
+            try:
+                with self.store.tx(system=True) as tx:
+                    ringing = tx.ringing_phone_calls()
+                for call in ringing:
+                    if call["secret"] not in self.sessions:
+                        self.start(call)
+            except Exception:
+                log.exception("watching for ringing calls failed")
+            await asyncio.sleep(WATCH_SECONDS)
+
+    def start(self, call: dict) -> Session | None:
+        with self.store.tx(system=True) as tx:
+            tenant = tx.tenant(call["tenant_id"])
+        if tenant is None:
+            return None
+        sess = Session(call, tenant)
+        self.sessions[call["secret"]] = sess
+        asyncio.create_task(self.warm(sess))
+        return sess
+
+    async def warm(self, sess: Session) -> None:
+        secret = sess.call["secret"]
+        try:
+            sess.budget = wakecall.seconds_left(self.store, self.settings, sess.tenant)
+            prompt, tools = await wakecall.prepare(self.store, self.settings, sess.tenant, sess.call, sess.requests)
+            make = self.sonic_factory or _sonic
+            sess.sonic = make(prompt=prompt, voice=self.settings.tg_call_voice, region=self.settings.aws_region,
+                              tools=tools, on_audio=sess.on_audio, on_interrupt=sess.on_interrupt)
+            await sess.sonic.open()
+            await sess.sonic.say_first(wakecall.GREETING)
+        except Exception:
+            log.exception("voice model unavailable")
+            sess.failed = True
+        sess.ready.set()
+        # Ringing: keep the stream alive with silence until they pick up, or drop it if the call ends.
+        while not sess.connected and not sess.failed:
+            await asyncio.sleep(KEEPALIVE_SECONDS)
+            if sess.connected:
+                break
+            with self.store.tx(system=True) as tx:
+                row = tx.call(sess.call["id"])
+            if row is None or row["status"] != "calling" or row["hangup_cause"] or row["secret"] != secret:
+                log.info("call %s ended before pickup; dropping its voice session", str(sess.call["id"])[:8])
+                if sess.sonic is not None:
+                    await sess.sonic.close()
+                self.sessions.pop(secret, None)
+                return
+            if sess.sonic is not None:
+                await sess.sonic.send_audio(SILENCE)
+
+    # --- after pickup ---------------------------------------------------------------
+
+    def claim(self, secret: str) -> dict | None:
         """The call this stream is for, marked answered; None if unknown or already streaming."""
         with self.store.tx(system=True) as tx:
             call = tx.call_by_secret(secret)
             if call is None or not tx.mark_call_answered(call["id"]):
                 return None
-            tenant = tx.tenant(call["tenant_id"])
-        return (call, tenant) if tenant else None
+            return tx.call(call["id"])
 
     def report(self, call: dict, outcome: str) -> None:
         with self.store.tx(system=True) as tx:
@@ -81,43 +170,29 @@ class Bridge:
 
     async def handle(self, ws, path: str) -> None:
         secret = path.rstrip("/").rsplit("/", 1)[-1]
-        claimed = self.claim(secret)
-        if claimed is None:
+        call = self.claim(secret)
+        if call is None:
             log.warning("audio stream for an unknown or finished call; closing")
             await ws.close()
             return
-        call, tenant = claimed
+        sess = self.sessions.get(secret) or self.start(call)
+        if sess is None:
+            await ws.close()
+            return
+        sess.connected = True
         try:
-            await self.talk(ws, call, tenant)
+            await self.talk(ws, sess)
         except Exception:
             log.exception("phone call %s failed", str(call["id"])[:8])
             self.report(call, "failed")
+        finally:
+            self.sessions.pop(secret, None)
 
-    async def talk(self, ws, call: dict, tenant: dict) -> None:
+    async def talk(self, ws, sess: Session) -> None:
+        call, tenant, state = sess.call, sess.tenant, sess.state
         started = dt.datetime.now(dt.timezone.utc)
         answered = time.monotonic()
-        budget = wakecall.seconds_left(self.store, self.settings, tenant)
-        prompt, tools = await wakecall.prepare(self.store, self.settings, self.llm, self.embedder, tenant, call)
-        outq: asyncio.Queue[bytes] = asyncio.Queue()
-        down = Down24to16()
-        state = {"stream_id": None, "call_uuid": None, "clear": False}
-        started_ev = asyncio.Event()
-
-        def on_audio(pcm24: bytes) -> None:
-            pcm = down.feed(pcm24)
-            for i in range(0, len(pcm), CHUNK_OUT):
-                outq.put_nowait(pcm[i:i + CHUNK_OUT])
-
-        def on_interrupt() -> None:                  # the user talked over ATYA: drop what's queued
-            down.clear()
-            while not outq.empty():
-                outq.get_nowait()
-            state["clear"] = True
-            outq.put_nowait(b"")                     # wake the sender
-
-        make = self.sonic_factory or _sonic
-        sonic = make(prompt=prompt, voice=self.settings.tg_call_voice, region=self.settings.aws_region,
-                     tools=tools, on_audio=on_audio, on_interrupt=on_interrupt)
+        streaming = asyncio.Event()                  # Plivo's `start`: the line is ready for our audio
 
         async def receive():
             pending = bytearray()
@@ -134,22 +209,33 @@ class Bridge:
                     if state["call_uuid"]:
                         with self.store.tx(system=True) as tx:
                             tx.set_call_provider_uuid(call["id"], state["call_uuid"])
-                    started_ev.set()
+                    streaming.set()
                 elif kind == "media":
-                    started_ev.set()
+                    streaming.set()
                     media = ev.get("media") or {}
-                    if media.get("track", "inbound") != "inbound":
+                    if media.get("track", "inbound") != "inbound" or sess.sonic is None:
                         continue
                     pending.extend(base64.b64decode(media.get("payload", "")))
                     if len(pending) >= CHUNK_IN:
-                        await sonic.send_audio(bytes(pending))
+                        await sess.sonic.send_audio(bytes(pending))
                         pending.clear()
                 elif kind == "stop":
                     return
 
         async def send():
+            try:
+                await asyncio.wait_for(streaming.wait(), timeout=START_WAIT)
+            except asyncio.TimeoutError:
+                log.warning("no start event from Plivo; talking anyway")
+            picked = call.get("picked_up_at")
+            if picked is not None:                   # the opening starts OPENING_DELAY after pickup, not sooner
+                wait = OPENING_DELAY - (dt.datetime.now(dt.timezone.utc) - picked).total_seconds()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+            else:
+                await asyncio.sleep(OPENING_DELAY)
             while True:
-                chunk = await outq.get()
+                chunk = await sess.outq.get()
                 if state["clear"]:
                     state["clear"] = False
                     if state["stream_id"]:
@@ -157,29 +243,24 @@ class Bridge:
                 if chunk:
                     await ws.send(play_event(chunk))
 
-        try:
-            await sonic.open()
-        except Exception:
-            log.exception("voice model unavailable; hanging up")
+        receiver = asyncio.create_task(receive())
+        await sess.ready.wait()
+        if sess.failed:
+            receiver.cancel()
             self.report(call, "failed")
             await self.hang_up(ws, state)
             return
-        receiver = asyncio.create_task(receive())
         sender = asyncio.create_task(send())
-        try:
-            await asyncio.wait_for(started_ev.wait(), timeout=START_WAIT)
-        except asyncio.TimeoutError:
-            log.warning("no start event from Plivo; talking anyway")
-        await sonic.say_first(wakecall.GREETING)
-        done = asyncio.create_task(sonic.done.wait())
-        await asyncio.wait([receiver, done], timeout=budget, return_when=asyncio.FIRST_COMPLETED)
+        done = asyncio.create_task(sess.sonic.done.wait())
+        await asyncio.wait([receiver, done], timeout=sess.budget or None, return_when=asyncio.FIRST_COMPLETED)
         hung_up_by_user = receiver.done()
         for t in (receiver, sender, done):
             t.cancel()
-        await sonic.close()
+        await sess.sonic.close()
         if not hung_up_by_user:
             await self.hang_up(ws, state)
-        wakecall.finish_talk(self.store, tenant, call, sonic, time.monotonic() - answered, started)
+        wakecall.finish_talk(self.store, tenant, call, sess.sonic, time.monotonic() - answered, started,
+                             sess.requests)
         self.report(call, "answered")
 
     async def hang_up(self, ws, state: dict) -> None:
@@ -209,7 +290,7 @@ async def serve(bridge: Bridge, port: int = PORT) -> None:
 
     async with websockets.serve(handler, "0.0.0.0", port, max_size=2 ** 20, ping_interval=20):
         log.info("audio bridge listening on :%d", port)
-        await asyncio.Future()
+        await bridge.watch()
 
 
 def main() -> int:
@@ -223,8 +304,7 @@ def main() -> int:
         while True:
             time.sleep(3600)
     store = Store(settings.database_url)
-    llm, embedder = wakecall.make_models(settings)
-    asyncio.run(serve(Bridge(store, settings, llm, embedder)))
+    asyncio.run(serve(Bridge(store, settings)))
     return 0
 
 

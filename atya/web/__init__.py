@@ -388,6 +388,9 @@ def create_app(store: Store, settings: Settings) -> Flask:
         call = plivo_call()
         if call is None:
             log.warning("plivo answer for an unknown call")
+        else:
+            with store.tx(system=True) as tx:
+                tx.mark_call_picked_up(call["id"])
         return Response(plivo.answer_xml(settings, secret if call else None), mimetype="application/xml")
 
     @app.post("/plivo/hangup/<secret>")

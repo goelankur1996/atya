@@ -80,14 +80,8 @@ def test_a_miss_asks_and_restart_moves_day_one(store, user, hard):
 def test_call_tool_and_context(store, user, hard):
     with store.tx(user["id"]) as tx:
         ctx = routines.call_context(tx, user, dt.date(2026, 11, 16))
-    assert "75 Hard, day 2 of 75" in ctx and "Yesterday: not reported" in ctx and "log_routine" in ctx
-    out = routines.log_from_call(store, user, {"routine": "75 hard", "day": "2026-11-16", "result": "missed",
-                                               "missed": "reading", "restart": False})
-    assert out == "Logged 75 Hard, day 2 of 75: missed."
-    out = routines.log_from_call(store, user, {"routine": "75", "day": "2026-11-16", "result": "partial",
-                                               "restart": True})
-    assert "Restarted: day 1 is Tuesday 17 November" in out
-    assert routines.log_from_call(store, user, {"routine": "x", "result": "great"}).startswith("Result must be")
+    # On a call, check-ins and restarts go to ATYA like a text (the atya tool), not a routine tool of their own.
+    assert "75 Hard, day 2 of 75" in ctx and "Yesterday: not reported" in ctx and "atya tool" in ctx
 
 
 def test_finishes_after_the_last_day(store, user):
@@ -102,7 +96,8 @@ def test_finishes_after_the_last_day(store, user):
 
 def test_filing_sees_active_routines_and_recent_days(store, user, hard):
     from atya import processor
-    routines.log_from_call(store, user, {"routine": "75 Hard", "day": "2026-11-15", "result": "done"})
+    with store.tx(user["id"]) as tx:
+        routines.log_day(tx, user, hard, dt.date(2026, 11, 15), "done", "", actor="t")
     with store.tx(user["id"]) as tx:
         ctx = processor.fanout_context(tx, user["id"])
     (r,) = ctx["Active routines (recent check-ins: date result (id))"]

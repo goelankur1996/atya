@@ -83,13 +83,8 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
         else:
             return commands.stranger(ctx, text)
     if tenant["status"] == "invited":
-        zone = commands.match_timezone(text)
         ctx.tenant = tenant
-        if zone:
-            commands.finish_onboarding(ctx, zone)
-            return "onboarded"
-        ctx.reply(commands.TZ_PROMPT, buttons=commands.tz_buttons())
-        return "prompted:timezone"
+        return commands.onboard_text(ctx, text)
     if tenant["status"] != "active":
         return "dropped:inactive-tenant"
     doc = msg.get("document")

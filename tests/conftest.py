@@ -45,3 +45,12 @@ def tenant(store: Store) -> dict:
     with store.tx(system=True) as tx:
         return tx.create_tenant(telegram_user_id=int(uuid.uuid4().int % 10**12),
                                 telegram_chat_id=1, display_name="test")
+
+
+@pytest.fixture(autouse=True)
+def no_city_lookups(monkeypatch):
+    """Typed onboarding answers are looked up as cities; tests have no network, so nothing is found
+    unless a test sets weather.find_city itself."""
+    from atya import weather
+    real = weather.find_city
+    monkeypatch.setattr(weather, "find_city", lambda name, **kw: real(name, **kw) if "http" in kw else None)

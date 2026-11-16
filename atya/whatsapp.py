@@ -220,12 +220,7 @@ def handle_message(store: Store, wa, settings: Settings, msg: dict, name: str | 
     if tenant is None:
         return commands.stranger(ctx, text)
     if tenant["status"] == "invited":
-        zone = commands.match_timezone(text)
-        if zone:
-            commands.finish_onboarding(ctx, zone)
-            return "onboarded"
-        ctx.reply(commands.TZ_PROMPT, buttons=commands.tz_buttons())
-        return "prompted:timezone"
+        return commands.onboard_text(ctx, text)
     if tenant["status"] != "active":
         return "dropped:inactive-tenant"
 

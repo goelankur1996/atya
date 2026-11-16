@@ -79,7 +79,7 @@ def test_owner_start_and_invite_flow(store, settings, clean):
     poll(store, tg, settings)
     t = tenant_of(store, FRIEND)
     assert t["status"] == "active" and t["timezone"] == "Europe/London"
-    assert texts(tg, 777)[-1].startswith("Timezone set to Europe/London")
+    assert texts(tg, 777)[-1].startswith("Got it: Europe/London")
 
     # The code is single-use.
     tg.push(f"/start {code}", user_id=STRANGER, chat_id=999)

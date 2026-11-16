@@ -3,6 +3,7 @@ and the audio bridge between Plivo's stream and the voice model (both faked here
 import array
 import asyncio
 import base64
+import datetime as dt
 import json
 
 import pytest
@@ -224,11 +225,14 @@ def test_bridge_streams_both_ways_and_saves_the_call(store, settings, owner, mon
     with store.tx(system=True) as tx:
         tx.start_phone_attempt(call["id"], "s" * 32)
     monkeypatch.setattr(wakecall, "prepare", lambda *a: asyncio.sleep(0, result=("prompt", [])))
+    monkeypatch.setattr(wakecall, "finish_talk", lambda store_, tenant_, call_, sonic, *a: wakecall.save_transcript(
+        store_, tenant_, sonic.transcript, dt.datetime.now(dt.timezone.utc)))
     pcm = base64.b64encode(bytes(1280)).decode()     # 40 ms at 16 kHz
     ws = FakeWS([{"event": "start", "start": {"streamId": "st-1", "callId": "c-9"}},
                  *[{"event": "media", "media": {"track": "inbound", "payload": pcm}} for _ in range(3)],
                  {"event": "stop"}])
-    bridge = callbridge.Bridge(store, settings, llm=None, embedder=None, sonic_factory=FakeSonic)
+    monkeypatch.setattr(callbridge, "OPENING_DELAY", 0.01)
+    bridge = callbridge.Bridge(store, settings, sonic_factory=FakeSonic)
     asyncio.run(bridge.handle(ws, "/plivo/ws/" + "s" * 32))
     plays = [m for m in ws.sent if m["event"] == "playAudio"]
     assert plays and all(m["media"]["sampleRate"] == 16000 for m in plays)
@@ -244,3 +248,27 @@ def test_bridge_streams_both_ways_and_saves_the_call(store, settings, owner, mon
     again = FakeWS([])
     asyncio.run(bridge.handle(again, "/plivo/ws/" + "s" * 32))
     assert again.closed and not again.sent
+
+
+def test_opening_is_ready_before_pickup_and_dropped_if_unanswered(store, settings, owner, monkeypatch):
+    t = with_phone(store, owner)
+    call = claim(store, t)
+    with store.tx(system=True) as tx:
+        tx.start_phone_attempt(call["id"], "r" * 32)
+        tx.set_call_line(call["id"], "phone")
+    monkeypatch.setattr(wakecall, "prepare", lambda *a: asyncio.sleep(0, result=("prompt", [])))
+    monkeypatch.setattr(callbridge, "KEEPALIVE_SECONDS", 0.05)
+    bridge = callbridge.Bridge(store, settings, sonic_factory=FakeSonic)
+
+    async def scenario():
+        watcher = asyncio.create_task(bridge.watch())
+        await asyncio.sleep(0.4)
+        sess = bridge.sessions["r" * 32]
+        assert sess.ready.is_set() and not sess.outq.empty()          # the opening is waiting for pickup
+        assert len(sess.sonic.heard) > 0                               # kept alive with silence while ringing
+        with store.tx(system=True) as tx:
+            tx.set_call_hangup(call["id"], "no-answer|NO_ANSWER|No Answer||")
+        await asyncio.sleep(0.3)
+        assert "r" * 32 not in bridge.sessions and sess.sonic.done.is_set()
+        watcher.cancel()
+    asyncio.run(scenario())

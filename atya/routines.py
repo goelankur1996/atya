@@ -140,34 +140,9 @@ def call_context(tx: Tx, tenant: dict, today: dt.date) -> str:
         return ""
     return ("Routines they asked to be checked on:\n" + "\n".join(lines) +
             "\nIf a day isn't reported, ask about it once, briefly, near the end of the call (for a morning call, "
-            "yesterday is the day to ask about). Record what they say with log_routine. If they missed something, "
-            "don't decide for them: ask whether they want to restart from day 1 or keep going, and pass their "
-            "answer as restart.")
-
-
-def log_from_call(store: Store, tenant: dict, args: dict) -> str:
-    """The log_routine tool: {"routine", "day": "today"|"yesterday"|YYYY-MM-DD, "result", "missed", "restart"}."""
-    today = briefs.local_now(tenant["timezone"]).date()
-    raw_day = str(args.get("day") or "today").lower()
-    day = today - dt.timedelta(days=1) if raw_day == "yesterday" else today
-    if raw_day not in ("today", "yesterday"):
-        try:
-            day = dt.date.fromisoformat(raw_day[:10])
-        except ValueError:
-            pass
-    result = str(args.get("result") or "").lower()
-    if result not in ("done", "partial", "missed"):
-        return "Result must be done, partial or missed."
-    with store.tx(tenant["id"]) as tx:
-        r = find(tx, tenant["id"], str(args.get("routine") or ""))
-        if r is None:
-            return "No matching active routine."
-        log_day(tx, tenant, r, day, result, str(args.get("missed") or ""), actor="call")
-        msg = f"Logged {label(r, day)}: {result}."
-        if result != "done" and args.get("restart") is True:
-            new = restart(tx, tenant, r, day)
-            msg += f" Restarted: day 1 is {new.strftime('%A %-d %B')}."
-    return msg
+            "yesterday is the day to ask about). Send what they say to ATYA with the atya tool (e.g. '75 Hard "
+            "yesterday: done'). If they missed something, don't decide for them: ask whether they want to restart "
+            "from day 1 or keep going, and send their answer the same way.")
 
 
 # --- the daily check-in message --------------------------------------------------

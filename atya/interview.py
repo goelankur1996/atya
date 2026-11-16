@@ -157,8 +157,10 @@ question: what's on for them this week? Then stop and wait."""
 
 def call_plan() -> str:
     areas = "\n".join(f"- {v}" for v in AREAS.values())
-    return ("Setup plan. Cover these, one question at a time, in roughly this order, following up on what they say "
-            "to get concrete details (days, times, names, dates):\n" + areas +
+    return ("Setup plan. If you don't know their city yet, ask it first and save it with save_city. Then cover "
+            "these, one question at a time, in roughly this order, following up on what they say to get concrete "
+            "details (days, times, names, dates). Send each concrete thing they tell you to ATYA with the atya tool "
+            "as you go (one message per thing):\n" + areas +
             f"\nAim for at least {TARGET_RECORDS} concrete things worth saving. Move on if they have nothing for "
             "an area. After about ten minutes, or whenever they want to stop, wrap up: ask whether they'd like "
             "ATYA to call every morning (if yes, at what time: use set_morning_call), then thank them and say a "

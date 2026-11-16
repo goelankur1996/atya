@@ -44,7 +44,8 @@ def find_city(name: str, http=requests) -> dict | None:
         return None
     h = hits[0]
     label = ", ".join(x for x in (h.get("name"), h.get("admin1"), h.get("country")) if x)
-    return {"name": h.get("name") or name, "lat": float(h["latitude"]), "lon": float(h["longitude"]), "label": label}
+    return {"name": h.get("name") or name, "lat": float(h["latitude"]), "lon": float(h["longitude"]), "label": label,
+            "timezone": h.get("timezone")}
 
 
 def today_line(lat: float, lon: float, http=requests) -> str | None:
@@ -68,3 +69,15 @@ def today_line(lat: float, lon: float, http=requests) -> str | None:
     if rain is not None and rain >= 40:
         line += f"; {round(rain)}% chance of rain"
     return line + "."
+
+
+def set_city(store, tenant: dict, text: str, **kw) -> dict | None:
+    """Where the user lives (for the weather on calls). The one function behind /city, the call's save_city and
+    the setup interview. Returns the place, or None if it wasn't found."""
+    place = find_city(text, **kw)
+    if place is None:
+        return None
+    with store.tx(tenant["id"]) as tx:
+        tx.set_city(tenant["id"], place["label"], place["lat"], place["lon"])
+    tenant.update(city=place["label"], city_lat=place["lat"], city_lon=place["lon"])
+    return place

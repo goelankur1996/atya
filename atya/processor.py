@@ -140,6 +140,7 @@ class FanoutExecutor:
         self.by_title: dict[tuple[str, str], uuid.UUID] = {}
         self.notes: list[str] = []
         self.written: list[str] = []
+        self.changed: list[str] = []          # existing records changed, for the reply ("- TSK-8 Gym (changed: …)")
 
     def run(self, plan: dict) -> str:
         for u in plan.get("updates", []) or []:
@@ -188,6 +189,8 @@ class FanoutExecutor:
             return
         self.notes += self.tx.update_record(self.tid, self.schema, rec["id"], fields)
         self.written.append(f"{record_ref(self.schema, rec)} (updated)")
+        self.changed.append(f"{record_ref(self.schema, rec)} {rec['title']} (changed: "
+                            + ", ".join(f"{k} → {v}" for k, v in fields.items()) + ")")
 
     def _type_key(self, w: dict) -> str | None:
         t = self.schema.type(str(w.get("type") or w.get("database") or ""))
@@ -225,6 +228,7 @@ class FanoutExecutor:
             dropped = self.tx.update_record(self.tid, self.schema, existing["id"], fields)
             self._remember(key, title, existing["id"])
             self.written.append(f"{record_ref(self.schema, existing)} (updated)")
+            self.changed.append(f"{record_ref(self.schema, existing)} {existing['title']} (updated)")
             self.notes += dropped
             return
 
@@ -654,9 +658,6 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                 tx.finish_inbox(row["id"], status="failed", notes="empty content")
             return "failed"
 
-        if row["source"] == "call" and not research.explicit(raw):
-            return call_turn(store, llm, row, tenant, schema, tz, raw)
-
         with store.tx(row["tenant_id"]) as tx:
             files = tx.attachments_for([row["id"]])
         audio = [f for f in files if (f["mime_type"] or "").startswith("audio/")]
@@ -708,12 +709,14 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                                    captured_local=local_label(row["captured_at"], tz), context=context,
                                    hint=hint)
             with store.tx(row["tenant_id"]) as tx:
-                notes = FanoutExecutor(tx, schema, tenant, row).run(plan)
-                if heard is not None:                 # say what was saved, so the transcript is visible
+                executor = FanoutExecutor(tx, schema, tenant, row)
+                notes = executor.run(plan)
+                if heard is not None or row["source"] == "call":   # say what was saved (a voice note, a call)
                     made = tx.records_from_inbox(tenant["id"], row["id"])
-                    saved = "\n".join(f"- {record_ref(schema, r)} {r['title']}" for r in made)
+                    lines = [f"- {record_ref(schema, r)} {r['title']}" for r in made]
+                    lines += [f"- {c}" for c in executor.changed]
                     tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"],
-                                  body=with_heard(heard, f"Saved:\n{saved}" if made else "Noted."),
+                                  body=with_heard(heard, "Saved:\n" + "\n".join(lines) if lines else "Noted."),
                                   inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]))
                 confirm_reminders(tx, schema, tenant, row)
                 tx.finish_inbox(row["id"], status="processed", notes=notes, intent="log")
@@ -763,39 +766,6 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
                          target_id=row["id"], summary=f"attempt {row['attempts']} failed; will retry",
                          source_data={"error": str(e)[:1000]})
         return "failed" if final else "retry"
-
-
-CALL_HINT = ("This is the transcript of my phone call with my assistant ATYA (lines starting 'ATYA:' are the "
-             "assistant; the other lines are me). File what I said that's worth keeping: tasks, plans for today, "
-             "reminders, notes, people, and make the changes I asked for. Change an existing record only when I "
-             "clearly asked for that change to that record; never change records I only asked about. If ATYA sums "
-             "up the changes near the end and I agree (or correct it), do exactly that list, as corrected. ATYA's "
-             "own offers, guesses or refusals are not instructions. Ignore small talk and greetings. If nothing is "
-             "worth saving, save nothing.")
-
-
-def call_turn(store: Store, llm: LLM, row: dict, tenant: dict, schema: Schema, tz, raw: str) -> str:
-    """A call transcript: always filed (never answered as a question), then a short summary on Telegram."""
-    with store.tx(row["tenant_id"]) as tx:
-        context = fanout_context(tx, tenant["id"])
-    plan = llm.plan_fanout(schema=schema, raw_content=raw, captured_local=local_label(row["captured_at"], tz),
-                           context=context, hint=CALL_HINT)
-    with store.tx(row["tenant_id"]) as tx:
-        notes = FanoutExecutor(tx, schema, tenant, row).run(plan)
-        made = tx.records_from_inbox(tenant["id"], row["id"])
-        if row.get("sender") == "setup call":
-            counts: dict[str, int] = {}
-            for r in made:
-                counts[r["type"]] = counts.get(r["type"], 0) + 1
-            body = interview.done_by_call(tx, tx.tenant(tenant["id"]), counts)
-        else:
-            body = ("From our call, saved:\n" + "\n".join(f"- {record_ref(schema, r)} {r['title']}"
-                                                          for r in made)
-                    if made else "From our call: nothing needed saving.")
-        tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=body, inbox_id=row["id"])
-        confirm_reminders(tx, schema, tenant, row)
-        tx.finish_inbox(row["id"], status="processed", notes=notes, intent="log")
-    return "processed"
 
 
 def interview_turn(store: Store, llm: LLM, row: dict, tenant: dict, schema: Schema, tz, raw: str,

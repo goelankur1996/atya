@@ -78,10 +78,10 @@ WAITLIST_THANKS = ("Thanks, noted. You're #{n} on the list. I'll message you her
                    "To leave the list, send STOP.")
 WAITLIST_WAITING = ("You're on the ATYA waitlist, #{n}. I'll message you here when your spot opens. "
                     "If someone gave you an invite code, send: /start <code>")
-SPOT_OPEN = ("Your spot on ATYA is open. Welcome.\n\nOne question first: which timezone are you in? "
-             "It's used for dates like \"by Friday\". Tap one, or type its name (for example Europe/Paris).")
-TZ_PROMPT = ("Welcome. One question first: which timezone are you in? It's used for dates like "
-             "\"by Friday\". Tap one, or type its name (for example Europe/Paris).")
+SPOT_OPEN = ("Your spot on ATYA is open. Welcome.\n\nOne question first: which city do you live in? It sets your "
+             "timezone (for dates like \"by Friday\") and the weather on calls. Type it, or tap a timezone.")
+TZ_PROMPT = ("Welcome. One question first: which city do you live in? It sets your timezone (for dates like "
+             "\"by Friday\") and the weather on calls. Type it, or tap a timezone.")
 
 
 @dataclass
@@ -142,13 +142,33 @@ def match_timezone(text: str) -> str | None:
     return None
 
 
+def onboard_text(ctx: Ctx, text: str) -> str:
+    """A typed answer to the first question: a timezone name, or (usually) their city, which sets both the
+    timezone and the city for the weather."""
+    from . import weather
+    zone = match_timezone(text)
+    if zone is None and text.strip() and not text.strip().startswith("/"):
+        place = weather.find_city(text)
+        if place and place.get("timezone") and match_timezone(place["timezone"]):
+            with ctx.store.tx(ctx.tenant["id"]) as tx:
+                tx.set_city(ctx.tenant["id"], place["label"], place["lat"], place["lon"])
+            zone = match_timezone(place["timezone"])
+    if zone:
+        finish_onboarding(ctx, zone)
+        return "onboarded"
+    ctx.reply("I couldn't place that. " + TZ_PROMPT.split(" ", 1)[1] if text.strip() else TZ_PROMPT,
+              buttons=tz_buttons())
+    return "prompted:timezone"
+
+
 def finish_onboarding(ctx: Ctx, zone: str) -> None:
     assert ctx.tenant is not None
     with ctx.store.tx(ctx.tenant["id"]) as tx:
         tx.set_timezone(ctx.tenant["id"], zone, actor="commands")
         tx.set_tenant_status(ctx.tenant["id"], "active", actor="commands")
         tenant = tx.tenant(ctx.tenant["id"])
-    offer_setup(ctx, tenant, head=f"Timezone set to {zone}. You're in.")
+    where = f"{tenant['city']} ({zone})" if tenant.get("city") else zone
+    offer_setup(ctx, tenant, head=f"Got it: {where}. You're in.")
 
 
 def can_call(settings: Settings, tenant: dict) -> bool:
@@ -504,19 +524,17 @@ def city_cmd(ctx: Ctx, arg: str) -> str:
         ctx.reply(f"Your city is {city}. Change it with /city <name>." if city else
                   "Tell me your city for the weather on calls, like /city Noida.")
         return "city:status"
-    place = weather.find_city(arg)
+    place = weather.set_city(ctx.store, dict(ctx.tenant), arg)
     if place is None:
         ctx.reply("I couldn't find that city. Try adding the state or country, like /city Noida, India.")
         return "city:not-found"
-    with ctx.store.tx(ctx.tenant["id"]) as tx:
-        tx.set_city(ctx.tenant["id"], place["label"], place["lat"], place["lon"])
     ctx.reply(f"Got it: {place['label']}. Calls will start with the weather there.")
     return "city:set"
 
 
 CALL_INTRO = ("Calls (beta): every morning at a time you pick, ATYA calls you {how}, goes over your "
-              "day (calendar, what's due) and asks what you want to get done. What you say on the call is "
-              "transcribed and saved like a voice note, and you get a summary in the chat afterwards.\n\n"
+              "day (calendar, what's due) and asks what you want to get done. Anything you ask or tell it on the call "
+              "is handled exactly like a message, and you get a summary of the changes in the chat afterwards.\n\n"
               "{line}If you don't pick up, it tries twice more, 10 minutes apart, then sends the brief instead. You can "
               "also ask for calls any time, in the chat or on a call (\"call me at 4 to remind me to leave\").\n\n"
               "To try it, send /wakecall agree.")
@@ -577,26 +595,15 @@ def wakecall_cmd(ctx: Ctx, cmd: str, arg: str) -> str:
                   "/callme calls you now.")
         return "wakecall:status"
     if arg.lower() in ("off", "stop", "no", "none"):
-        with ctx.store.tx(tid) as tx:
-            tx.set_wakecall(tid, None)
+        wakecall.set_morning_call(ctx.store, current, "off")
         ctx.reply("Morning call turned off. /wakecall on turns it back on.")
         return "wakecall:off"
-    at = wakecall.DEFAULT_TIME if arg.lower() in ("on", "start") else briefs.parse_time(arg)
-    if at is None:
+    if briefs.parse_time(arg) is None and arg.lower() not in ("on", "start"):
         ctx.reply("I didn't understand that time. Try /wakecall 6am or /wakecall 6:30.")
         return "wakecall:bad-time"
-    now = briefs.local_now(tz)
-    with ctx.store.tx(tid) as tx:
-        tx.set_wakecall(tid, at)
-    first = "today"
-    if now.time() >= at:                           # already past it today: start tomorrow
-        with ctx.store.tx(tid) as tx:                # no call today: mark today's as not wanted
-            skip = tx.add_call(tid, "morning", dt.datetime.now(dt.timezone.utc), day=now.date())
-            if skip:
-                tx.finish_call(skip["id"], "cancelled")
-        first = "tomorrow"
-    ctx.reply(f"Done. I'll call you every morning at {briefs.fmt_time(at)} ({tz}), first {first}. "
-              f"If you don't pick up I try twice more, {wakecall.RETRY_MINUTES} minutes apart, then send the brief.")
+    done = wakecall.set_morning_call(ctx.store, current, arg)
+    ctx.reply(f"{done} If you don't pick up I try twice more, {wakecall.RETRY_MINUTES} minutes apart, "
+              "then send the brief.")
     return "wakecall:set"
 
 
