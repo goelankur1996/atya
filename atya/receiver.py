@@ -39,6 +39,9 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
 
     with store.tx(system=True) as tx:
         tenant = tx.tenant_by_telegram(user_id)
+    from . import circle
+    profile = " ".join(filter(None, [sender.get("first_name"), sender.get("last_name")])) or None
+    tenant = circle.fill_name(store, tenant, profile)              # no name stored yet: take the profile's
     ctx = commands.Ctx(store=store, tg=tg, settings=settings, user_id=user_id, chat_id=chat_id,
                        name=sender.get("first_name") or sender.get("username"), tenant=tenant)
 

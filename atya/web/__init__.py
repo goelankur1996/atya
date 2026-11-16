@@ -697,10 +697,8 @@ def create_app(store: Store, settings: Settings) -> Flask:
         name = " ".join(request.form.get("name", "").split())[:80]
         if not name:
             return back_to_settings(error="Your name can't be empty.", anchor="#account")
-        with tx() as t:
-            t.conn.execute("UPDATE tenants SET display_name = %s WHERE id = %s", (name, g.tenant["id"]))
-            t.audit(g.tenant["id"], actor="web", action="update", target_table="tenants", target_id=g.tenant["id"],
-                    summary="name changed")
+        from .. import circle
+        circle.set_name(store, g.tenant["id"], name)
         return back_to_settings(saved="Name saved.", anchor="#account")
 
     @app.post("/settings/timezone")

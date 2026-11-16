@@ -232,6 +232,7 @@ def test_bridge_streams_both_ways_and_saves_the_call(store, settings, owner, mon
                  *[{"event": "media", "media": {"track": "inbound", "payload": pcm}} for _ in range(3)],
                  {"event": "stop"}])
     monkeypatch.setattr(callbridge, "OPENING_DELAY", 0.01)
+    monkeypatch.setattr(callbridge, "OPENING_GAP", 0.02)
     bridge = callbridge.Bridge(store, settings, sonic_factory=FakeSonic)
     asyncio.run(bridge.handle(ws, "/plivo/ws/" + "s" * 32))
     plays = [m for m in ws.sent if m["event"] == "playAudio"]

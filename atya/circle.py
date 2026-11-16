@@ -36,6 +36,43 @@ def first(tenant: dict | None, fallback: str = "someone") -> str:
     return name.split()[0] if name else fallback
 
 
+def usable_name(name: str | None) -> str | None:
+    """A profile name worth using ("Ankur Goel"), not an emoji or a number."""
+    name = " ".join((name or "").split())[:80]
+    return name if re.search(r"[^\W\d_]", name) else None
+
+
+def fill_name(store: Store, tenant: dict | None, profile_name: str | None) -> dict | None:
+    """Someone with no name stored: take it from their WhatsApp/Telegram profile, and fix circle links that
+    had to be saved without it. Returns the tenant as it now is."""
+    name = usable_name(profile_name)
+    if tenant is None or (tenant.get("display_name") or "").strip() or not name:
+        return tenant
+    set_name(store, tenant["id"], name)
+    tenant = {**tenant, "display_name": name}
+    return tenant
+
+
+def set_name(store: Store, tenant_id, name: str) -> None:
+    """The one place a user's name changes (profile fill-in, /name, the web settings page)."""
+    with store.tx(system=True) as tx:
+        tx.conn.execute("UPDATE tenants SET display_name = %s WHERE id = %s", (name, tenant_id))
+        tx.conn.execute("UPDATE circle_links SET name = %s WHERE callee = %s AND name IN ('them', 'someone')",
+                        (name.split()[0], tenant_id))
+        tx.audit(tenant_id, actor="commands", action="update", target_table="tenants", target_id=tenant_id,
+                 summary="name set")
+
+
+def called(tx, viewer_id, person: dict | None, fallback: str = "someone") -> str:
+    """What `viewer` calls `person`: their circle name for them if there is one, else person's first name."""
+    if person is not None:
+        link = tx._one("SELECT name FROM circle_links WHERE caller = %s AND callee = %s AND status = 'active'",
+                       (viewer_id, person["id"]))
+        if link and link["name"] not in ("them", "someone"):
+            return link["name"]
+    return first(person, fallback)
+
+
 def hindi(tenant: dict | None) -> bool:
     return (tenant or {}).get("call_language") in ("hinglish", "hindi")
 
@@ -115,6 +152,9 @@ def command(ctx, arg: str) -> str:
 
 
 def add(ctx, words: list[str]) -> str:
+    if not (ctx.tenant.get("display_name") or "").strip():
+        ctx.reply("First, what's your name? They'll be told who's asking. Send it like: /name Ankur")
+        return "circle:no-own-name"
     language = None
     if words and words[-1].lower() in LANGUAGES:
         language = words.pop().lower()
@@ -136,8 +176,8 @@ def add(ctx, words: list[str]) -> str:
         ways.append(f"On Telegram: {tg}?start={code}")
     ctx.reply(f"Send {name} this link (works once, for {INVITE_DAYS} days). They open it and send the message it "
               f"fills in; they don't need to be on ATYA already.\n\n" + "\n".join(ways) +
-              f"\n\nATYA then asks {name} whether you may ask it to call them, and to send you a short summary "
-              "of those calls. Nothing else of theirs is shared with you.", preview=False)
+              f"\n\nATYA then asks {name} whether you may ask it to call or message them, and to pass their answers "
+              "back to you. Nothing else of theirs is shared with you.", preview=False)
     return "circle:invite"
 
 
@@ -266,14 +306,15 @@ def tap(store: Store, tenant: dict | None, data: str) -> str:
             link = make_link(tx, inviter["id"], tenant["id"], inv["name"]) if choice == "allow" else None
         if link is None:
             tell(store, tenant, "Theek hai, koi call nahi hogi." if hindi(tenant) else "Okay, no calls then.")
-            tell(store, inviter, f"{inv['name']} said not now to check-in calls.")
+            tell(store, inviter, f"{inv['name']} said not now to calls and messages from you through ATYA.")
             return "circle:declined"
-        tell(store, tenant, f"Ho gaya. {first(inviter)} ab ATYA se aapko call karwa sakte hain. Band karne ke liye "
-                            "/circle bhejein." if hindi(tenant) else
-             f"Done. {first(inviter)} can now ask ATYA to call you. Send /circle any time to see or end it.")
-        tell(store, inviter, f"{inv['name']} said yes. Ask me things like \"call {inv['name']} every day at 5:30 pm to "
-                             f"check …\" or \"call {inv['name']} tomorrow at 1 to ask …\". You'll get a short report "
-                             "after each call.")
+        tell(store, tenant, f"Ho gaya. {first(inviter)} ab ATYA se aapko call ya message karwa sakte hain. Band karne "
+                            "ke liye /circle bhejein." if hindi(tenant) else
+             f"Done. {first(inviter)} can now ask ATYA to call or message you. Send /circle any time to see or end "
+             "it.")
+        tell(store, inviter, f"{inv['name']} said yes. Ask me things like \"ask {inv['name']} what they'd like for "
+                             f"dinner\", \"message {inv['name']} every day at 5:30 pm to check …\" or \"call "
+                             f"{inv['name']} tomorrow at 1 to ask …\". Their answer comes back to you.")
         tell(store, inviter, f"Should {first(tenant, inv['name'])} be able to ask ATYA to call you too?",
              [[("Yes", f"circle:back:{link['id']}"), ("No", f"circle:backno:{link['id']}")]])
         return "circle:allowed"
@@ -286,12 +327,12 @@ def tap(store: Store, tenant: dict | None, data: str) -> str:
             other = tx.tenant(link["callee"])
             if choice == "backno":
                 return "circle:back-declined"
-            make_link(tx, other["id"], tenant["id"], first(tenant, "them"))
-        tell(store, tenant, f"Done: {link['name']} can ask ATYA to call you too.")
-        tell(store, other, f"{first(tenant)} ne bhi allow kiya hai: aap ATYA se unhe call karwa sakte hain, jaise "
-                           f"\"{first(tenant)} ko kal 9 baje call karke yaad dilao …\"." if hindi(other) else
-             f"{first(tenant)} allowed it too: you can ask ATYA to call them, e.g. \"call {first(tenant)} tomorrow "
-             "at 9 to remind them …\".")
+            make_link(tx, other["id"], tenant["id"], first(tenant, link["name"]))
+        tell(store, tenant, f"Done: {link['name']} can ask ATYA to call or message you too.")
+        tell(store, other, f"{first(tenant)} ne bhi allow kiya hai: aap ATYA se unhe call ya message karwa sakte hain, "
+                           f"jaise \"{first(tenant)} se poochho …\"." if hindi(other) else
+             f"{first(tenant)} allowed it too: you can ask ATYA to call or message them, e.g. \"ask {first(tenant)} "
+             "…\".")
         return "circle:back-allowed"
     return "ignored:circle"
 
@@ -399,7 +440,8 @@ def send_ask(store: Store, llm, rec: dict, requester: dict, callee: dict, link: 
     already sent today."""
     f = rec["fields"]
     purpose = str(f.get("Purpose") or "").strip() or rec["title"]
-    who = first(requester)
+    with store.tx(system=True) as tx:
+        who = called(tx, callee["id"], requester)
     text = None
     if llm is not None:
         try:
@@ -455,11 +497,12 @@ def maybe_answer(store: Store, llm, tenant: dict, inbox_id, text: str) -> bool:
                 reply = llm.call_report(transcript=text, purpose=ask["question"], name=ask["name"])
             except Exception:
                 reply = reply[:SHORT_ANSWER] + "…"
-        tell(store, requester, f"💬 {ask['name']}, on \"{ask['question']}\":\n{reply}")
+        tell(store, requester, f"💬 {ask['name']} ({_lower_first(ask['question'])}):\n{reply}")
+        with store.tx(system=True) as tx:
+            who = called(tx, tenant["id"], requester)
         with store.tx(tenant["id"]) as tx:
             tx.add_outbox(tenant["id"], chat_id=tenant.get("telegram_chat_id") or 0, inbox_id=inbox_id,
-                          body=f"{first(requester)} ko bata diya." if hindi(tenant) else
-                          f"Passed on to {first(requester)}.")
+                          body=f"{who} ko bata diya." if hindi(tenant) else f"Passed on to {who}.")
         return True
     return False
 
@@ -474,8 +517,8 @@ def expire_asks(store: Store, now: dt.datetime) -> int:
             requester = tx.tenant(a["requester"])
         if requester:
             hours = max(1, round((a["wait_until"] - a["sent_at"]).total_seconds() / 3600))
-            tell(store, requester, f"💬 {a['name']} hasn't replied to \"{a['question']}\" "
-                                   f"({hours} hour{'s' if hours != 1 else ''}).")
+            tell(store, requester, f"💬 {a['name']} hasn't replied ({_lower_first(a['question'])}) "
+                                   f"after {hours} hour{'s' if hours != 1 else ''}.")
     return len(rows)
 
 
@@ -514,13 +557,18 @@ def report(store: Store, llm, call: dict, callee: dict, result: str) -> None:
             except Exception:
                 log.exception("check-in report failed")
         body = body or f"{name} picked up, but I couldn't summarise the call."
-        tell(store, requester, f"📞 {name}, {about}:\n{body}")
+        tell(store, requester, f"📞 {name} ({_lower_first(about)}):\n{body}")
         return
     what = {"declined": f"{name} declined the call", "no-line": f"I have no way to call {name}",
             "no-consent": f"{name} is no longer in your circle", "no-minutes": f"{name} is out of call minutes today",
             "unreachable": f"I couldn't reach {name}'s phone"}.get(result, f"I couldn't reach {name}")
-    tries = f" ({call.get('attempts', 1)} tries)" if result == "missed" else ""
-    tell(store, requester, f"📞 {what}{tries}, for: {about}.")
+    tries = f" after {call.get('attempts', 1)} tries" if result == "missed" else ""
+    tell(store, requester, f"📞 {what}{tries} ({_lower_first(about)}).")
+
+
+def _lower_first(text: str) -> str:
+    text = (text or "").strip().rstrip(".")
+    return text[:1].lower() + text[1:] if text[:2] != text[:2].upper() else text
 
 
 def run(store: Store, llm) -> None:

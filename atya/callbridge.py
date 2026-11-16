@@ -35,6 +35,9 @@ OPENING_DELAY = 0.5       # seconds from pickup to ATYA's first word (the openin
 WATCH_SECONDS = 0.25      # how often to look for newly ringing calls
 KEEPALIVE_SECONDS = 0.5   # while ringing: silence to the voice model this often, and check the call is still on
 SILENCE = bytes(1600)     # 50 ms of silence at 16 kHz
+BYTES_PER_SECOND = 32000  # 16 kHz, 16-bit
+OPENING_GAP = 0.8         # this long with no new speech after some: the opening turn is done
+OPENING_MAX_SECONDS = 12  # never stop listening for longer than this at the start
 
 
 class Down24to16:
@@ -78,6 +81,9 @@ class Session:
         self.failed = False
         self.connected = False
         self.budget = 0
+        # While the opening plays, what the person says (usually "hello?") isn't passed on, so it can't cut
+        # the opening off and make it start again. None = not known yet (the opening hasn't finished).
+        self.listen_from: float | None = None
 
     def on_audio(self, pcm24: bytes) -> None:
         pcm = self.down.feed(pcm24)
@@ -215,7 +221,13 @@ class Bridge:
                     media = ev.get("media") or {}
                     if media.get("track", "inbound") != "inbound" or sess.sonic is None:
                         continue
-                    pending.extend(base64.b64decode(media.get("payload", "")))
+                    pcm = base64.b64decode(media.get("payload", ""))
+                    now = time.monotonic()
+                    if sess.listen_from is None and now - answered > OPENING_MAX_SECONDS:
+                        sess.listen_from = now                 # the opening never came: listen anyway
+                    if sess.listen_from is None or now < sess.listen_from:
+                        pcm = bytes(len(pcm))                  # during the opening: silence instead
+                    pending.extend(pcm)
                     if len(pending) >= CHUNK_IN:
                         await sess.sonic.send_audio(bytes(pending))
                         pending.clear()
@@ -234,6 +246,18 @@ class Bridge:
                     await asyncio.sleep(wait)
             else:
                 await asyncio.sleep(OPENING_DELAY)
+            started_playing, opening_bytes = time.monotonic(), 0
+            while sess.listen_from is None:            # the opening: queue it, then work out when it ends
+                try:
+                    chunk = await asyncio.wait_for(sess.outq.get(), timeout=OPENING_GAP)
+                except asyncio.TimeoutError:
+                    if opening_bytes:                  # a pause after speech: the opening is over
+                        sess.listen_from = started_playing + opening_bytes / BYTES_PER_SECOND + 0.3
+                    continue
+                state["clear"] = False
+                if chunk:
+                    opening_bytes += len(chunk)
+                    await ws.send(play_event(chunk))
             while True:
                 chunk = await sess.outq.get()
                 if state["clear"]:

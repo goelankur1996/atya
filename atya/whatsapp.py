@@ -201,6 +201,8 @@ def handle_message(store: Store, wa, settings: Settings, msg: dict, name: str | 
         return f"ignored:{kind}"
     with store.tx(system=True) as tx:
         tenant = tx.tenant_by_whatsapp(phone)
+    from . import circle
+    tenant = circle.fill_name(store, tenant, name)                  # no name stored yet: take the profile's
     ctx = commands.Ctx(store=store, tg=wa, settings=settings, user_id=int(phone), chat_id=int(phone),
                        name=name, tenant=tenant, channel="whatsapp", telegram=telegram)
     captured_at = dt.datetime.fromtimestamp(int(msg.get("timestamp") or time.time()), tz=dt.timezone.utc)

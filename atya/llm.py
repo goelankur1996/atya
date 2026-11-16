@@ -319,7 +319,8 @@ class PromptLLM:
                   "hindi": "simple Hindi in Latin script, warm and respectful (aap, ji)"}.get(language, "English")
         system = (f"{requester} asked their assistant ATYA to message {name}. Write the message ATYA sends to {name}, "
                   f"in {tongue}: one or two short sentences that say {requester} is asking, then the question "
-                  f"itself, rewritten to address {name} directly ('I' in the request means {requester}). If the "
+                  f"itself, rewritten to address {name} directly ('I', 'me', 'my' or 'the user' in the request all mean "
+                  f"{requester}). If the "
                   "request says how to respond (e.g. motivate if not done), only ask the question now. No greeting "
                   "line, no sign-off, plain text.")
         return self._call(model=self.fast_model, system=system, user=f"Request: {purpose}", max_tokens=200,

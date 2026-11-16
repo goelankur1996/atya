@@ -59,6 +59,7 @@ Commands:
 /city Noida - your city, for the weather on calls
 /circle - people who let you ask me to call them (e.g. check in on dad's exercise), with a report back to you
 /language hinglish - the language I use on your calls: english, hinglish or hindi
+/name Ankur - what I (and people in your circle) call you
 /web - a one-time link to browse, search and edit your records in a browser
 /link - use me on both Telegram and WhatsApp, with the same records
 /usage - how much you've used today, and the daily limits
@@ -370,6 +371,8 @@ def handle(ctx: Ctx, text: str) -> str:
         return circle.command(ctx, arg)
     if cmd == "/language":
         return language_cmd(ctx, arg)
+    if cmd == "/name":
+        return name_cmd(ctx, arg)
     if cmd in ("/wakecall", "/callme"):
         return wakecall_cmd(ctx, cmd, arg)
     if cmd == "/export":
@@ -525,6 +528,21 @@ def use_link_code(ctx: Ctx, code: str) -> str | None:
     ctx.reply(f"Connected. {name} now uses your existing account: same records, same reminders. "
               "Reminders and the morning brief go to wherever you last wrote to me.\n\nSend /help for the commands.")
     return "linked"
+
+
+def name_cmd(ctx: Ctx, arg: str) -> str:
+    """/name Ankur Goel: what ATYA (and people in your circle) call you."""
+    from . import circle
+    assert ctx.tenant is not None
+    name = circle.usable_name(arg)
+    if not name:
+        current = (ctx.tenant.get("display_name") or "").strip()
+        ctx.reply(f"I call you {current}. Change it with /name <your name>." if current else
+                  "What should I call you? Send it like: /name Ankur")
+        return "name:status"
+    circle.set_name(ctx.store, ctx.tenant["id"], name)
+    ctx.reply(f"Got it, {name.split()[0]}.")
+    return "name:set"
 
 
 def language_cmd(ctx: Ctx, arg: str) -> str:

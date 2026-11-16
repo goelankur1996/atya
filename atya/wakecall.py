@@ -58,7 +58,8 @@ RULES = """Rules for the whole call:
   things (tasks, people, birthdays, notes, routines, the calendar on any day), want something saved or changed (add,
   edit, move, copy, mark done, delete, a reminder, "call me at 4 to ..."), report a routine day, or mention
   something worth keeping (a plan, a date, a person's details), send it with atya, in their words as a complete
-  message with dates written out ("tasks on Thursday 2026-11-19"). Then tell them ATYA's reply in a few words.
+  message with dates written out ("tasks on Thursday 2026-11-19"), in their first person ("ask Shivani if she can
+  order my medicines"), never "the user". Then tell them ATYA's reply in a few words.
   Questions the records below already answer (what's on a day, what's due, someone's birthday), answer
   straight away without atya. Use atya for anything not there or that needs more detail, and for every change.
   After a change, don't trust the records below for that item. Never say you can't make a change, never ask them
@@ -69,6 +70,8 @@ RULES = """Rules for the whole call:
   guess at those. Send "research <what they want>" with atya; the answer comes in the chat.
 - Talk about tasks and records by name only, in plain words. Never say reference codes (like TSK-12), statuses,
   priority codes (like P1) or app words like "inbox", even if ATYA's reply has them.
+- Never promise what another person will do. If ATYA asked someone something for them, say you've asked and
+  will pass on the answer, nothing more.
 - When they're done, say a short goodbye and that a summary will be in the chat."""
 
 FILLERS = ["Let me check.", "One moment.", "Give me a second.", "Checking now.", "Let me look.", "Just a sec.",
@@ -349,10 +352,10 @@ async def prepare(store: Store, settings: Settings, tenant: dict, call: dict,
         forecast = await asyncio.to_thread(wx.today_line, tenant["city_lat"], tenant["city_lon"])
     extra = call_extra(store, tenant, call)
     if call.get("requested_by"):
-        from .circle import first
+        from .circle import called
         with store.tx(system=True) as tx:
             requester = tx.tenant(call["requested_by"])
-        call = {**call, "requester_name": first(requester)}
+            call = {**call, "requester_name": called(tx, tenant["id"], requester)}
     return (build_prompt(tenant, call, local, brief, voice_for(settings, tenant), forecast, extra, records),
             call_tools(store, tenant, requests))
 

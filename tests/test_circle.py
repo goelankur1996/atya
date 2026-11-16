@@ -143,7 +143,7 @@ def test_daily_checkin_calls_dad_and_reports_back(store, settings, owner):
     assert wakecall.tick(store, settings, answered, now=ist(17, 31), llm=llm) == "checkin:answered:answered"
     assert seen == [(dad["id"], "checkin", "did he do his situps; motivate him if not")]
     assert "abhi nahi kiya" in llm.report_args[0] and llm.report_args[2] == "Dad"
-    assert bodies(store, owner["id"])[-1] == ("📞 Dad, did he do his situps; motivate him if not:\n"
+    assert bodies(store, owner["id"])[-1] == ("📞 Dad (did he do his situps; motivate him if not):\n"
                                               "Not done yet; he'll do them after the guests leave.")
     assert wakecall.tick(store, settings, answered, now=ist(17, 40), llm=llm) is None         # once a day
 
@@ -155,8 +155,8 @@ def test_unanswered_checkin_retries_then_tells_you(store, settings, owner):
     assert wakecall.tick(store, settings, phone, now=ist(17, 30)) == "checkin:missed:retry"
     assert wakecall.tick(store, settings, phone, now=ist(17, 41)) == "checkin:missed:retry"
     assert wakecall.tick(store, settings, phone, now=ist(17, 52)) == "checkin:missed:missed"
-    assert bodies(store, owner["id"])[-1] == "📞 I couldn't reach Dad (3 tries), for: did he do his situps; " \
-                                             "motivate him if not."
+    assert bodies(store, owner["id"])[-1] == "📞 I couldn't reach Dad after 3 tries (did he do his situps; " \
+                                             "motivate him if not)."
     with store.tx(owner["id"]) as tx:                                    # a one-off is done once queued
         (rec,) = tx._all("SELECT * FROM records WHERE tenant_id = %s AND type = 'checkin'", (owner["id"],))
     assert rec["fields"]["Status"] == "done"
@@ -206,7 +206,7 @@ def test_ask_by_message_and_the_reply_goes_back(store, settings, owner):
                                                                       "fields": {}}]}
     while processor.process_once(store, llm, settings):
         pass
-    assert bodies(store, owner["id"])[-1] == ('💬 Dad, on "which ice cream should I bring on the way back":\n'
+    assert bodies(store, owner["id"])[-1] == ("💬 Dad (which ice cream should I bring on the way back):\n"
                                               "butterscotch, aur mummy ke liye kulfi")
     assert bodies(store, dad["id"])[-1] == "Ankur ko bata diya."
     with store.tx(dad["id"]) as tx:
@@ -224,4 +224,20 @@ def test_unanswered_question_is_reported(store, settings, owner):
     assert bodies(store, dad["id"])[-1].startswith("Ankur pooch rahe hain: did he eat eggs today")
     assert circle.expire_asks(store, now + dt.timedelta(hours=1)) == 0
     assert circle.expire_asks(store, now + dt.timedelta(hours=2, minutes=1)) == 1
-    assert bodies(store, owner["id"])[-1] == '💬 Dad hasn\'t replied to "did he eat eggs today" (2 hours).'
+    assert bodies(store, owner["id"])[-1] == "💬 Dad hasn't replied (did he eat eggs today) after 2 hours."
+
+
+def test_names_come_from_the_profile_and_fix_links(store, settings, owner):
+    dad = linked_dad(store, settings, owner)
+    with store.tx(system=True) as tx:
+        tx.conn.execute("UPDATE tenants SET display_name = NULL WHERE id = %s", (dad["id"],))
+        tx.conn.execute("UPDATE circle_links SET name = 'them' WHERE caller = %s", (dad["id"],))
+        dad = tx.tenant(dad["id"])
+    assert circle.fill_name(store, dad, "💎")["display_name"] is None                  # not a name
+    assert circle.fill_name(store, dad, "Rajesh Goel")["display_name"] == "Rajesh Goel"
+    ctx, _ = ctx_for(store, settings, {**owner, "display_name": None}, OWNER)
+    assert circle.command(ctx, "add Mom") == "circle:no-own-name"                       # who's asking?
+    assert commands.name_cmd(ctx, "Ankur Goel") == "name:set"
+    with store.tx(system=True) as tx:
+        assert tx.tenant(owner["id"])["display_name"] == "Ankur Goel"
+        assert circle.called(tx, dad["id"], tx.tenant(owner["id"])) == "Ankur"
