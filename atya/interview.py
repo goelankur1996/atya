@@ -1,9 +1,12 @@
-"""The setup interview: a short conversation right after sign-up (or /setup).
+"""The setup interview: the onboarding conversation right after sign-up (or /setup).
 
-By phone where possible: if the user is on Telegram and calls are set up, ATYA
-offers a setup call ("Call me now" doubles as agreeing to calls). The call covers
-the same AREAS; its transcript is filed like any call, then the usual summary.
-If they choose text, or the call doesn't happen, it's the message interview below.
+Before it, in chat: their name, then their language (commands.onboarding_prompt).
+By phone where possible ("Call me now" doubles as agreeing to calls): the call
+follows CALL_OPENING + call_plan(): city and weather, what ATYA does, broad
+questions, zooming in (saying why), habits, a recap. What they say is noted
+through ATYA in the background; afterwards the chat lists it by name.
+If they choose text, or the call doesn't happen, it's the message interview below
+(the same arc: city, what ATYA does, broad questions, then deeper ones).
 
 ATYA asks one question at a time, by text; the user answers by voice note or
 text. Each answer is filed straight away like any message, and the next
@@ -42,11 +45,15 @@ EXPIRE_AFTER = dt.timedelta(hours=24)
 STOP_WORDS = {"stop", "done", "later", "finish", "end", "that's all", "thats all", "enough", "no more"}
 SKIP_WORDS = {"skip", "pass", "next", "skip it", "no idea", "not sure"}
 
-INTRO = ("Let's set you up so I'm useful from day one: about 10 minutes, one question at a time. Answer each "
-         "with a voice note (easiest) or text, as much as you like; the more you tell me, the more I can "
-         "remind you of. Everything goes into your records. Say \"skip\" to skip one, or \"stop\" to "
-         "finish any time.")
-FIRST_QUESTION = "First, what's on for you this week? Meetings, deadlines, calls, anything with a day attached."
+INTRO = ("Let's set you up so I'm useful from day one. Quickly, what I do for you:\n"
+         "- I remember anything you tell me, by message, voice note or call.\n"
+         "- I remind you at the right moment, by message or with a call.\n"
+         "- A short morning message (or call) about your day.\n"
+         "- I coordinate with your friends and family: ask them things for you, or check in on them.\n\n"
+         "A few questions now, one at a time, about 10 minutes. Answer by voice note (easiest) or text. "
+         "Say \"skip\" to skip one, or \"stop\" to finish any time.")
+FIRST_QUESTION = "First, the small stuff: which city do you live in?"
+SECOND_QUESTION = ("Thanks! Now, what does a normal week look like for you? Work, home, anything you're juggling.")
 
 
 def key(tenant_id: uuid.UUID | str) -> str:
@@ -56,7 +63,7 @@ def key(tenant_id: uuid.UUID | str) -> str:
 def begin(tx: Tx, tenant_id: uuid.UUID) -> str:
     """Start (or restart) the interview. Returns the message to send."""
     now = dt.datetime.now(dt.timezone.utc).isoformat()
-    tx.set_state(key(tenant_id), {"turns": [{"q": FIRST_QUESTION, "area": "week"}], "started": now, "asked": now,
+    tx.set_state(key(tenant_id), {"turns": [{"q": FIRST_QUESTION, "area": "city"}], "started": now, "asked": now,
                                   "inbox": [], "covered": [], "saved": 0})
     return f"{INTRO}\n\n{FIRST_QUESTION}"
 
@@ -103,8 +110,9 @@ def summary(counts: dict[str, int], suggest: str) -> str:
     lines = [head]
     if counts:
         lines.append(f"Try asking me: “{suggest or 'What do I need to do this week?'}”")
-        lines.append("Every morning I'll send you a short brief of what's due (change it with /brief). "
-                     "From here on, just message me anything worth remembering. /help lists everything.")
+        lines.append("Would you like a short message about your day every morning? Send /brief 9am (any time works). "
+                     "From here on, just message me anything worth remembering; /circle lets me ask a friend or "
+                     "family member something for you. /help lists everything.")
     return "\n\n".join(lines)
 
 
@@ -142,29 +150,70 @@ def fallback_question(area: str | None) -> str:
 
 # --- by phone -------------------------------------------------------------------
 
-CALL_OFFER = ("Let's set you up so I'm useful from day one. The easiest way is a quick call: I'll ring you "
-              "{how} and ask about your week, people, plans and anything coming up (about 10 minutes). "
-              "Everything you tell me goes into your records.")
+CALL_OFFER = ("Let's get you set up. The easiest way is a 10-minute call: I'll tell you what I can do for you and "
+              "learn a little about your life, so I'm useful from day one. I'll ring you {how}.\n\n"
+              "Tapping \"Call me now\" also means you're okay with ATYA calling you; you can turn calls off any time.")
+CALL_OFFER_HI = ("Chaliye aapko set up karte hain. Sabse aasaan hai 10 minute ki ek call: main bataunga ki main aapke "
+                 "liye kya kar sakta hoon, aur aapke baare mein thoda jaanunga. Main aapko {how} call karunga.\n\n"
+                 "\"Call karo\" dabane ka matlab hai aap ATYA ki calls ke liye haan keh rahe hain; calls kabhi bhi band "
+                 "kar sakte hain.")
 CALL_BUTTONS = [[("Call me now", "setup:call"), ("Text instead", "setup:text")]]
-CALL_SOON = ("Calling you {how} in a few seconds. (By tapping that you've also agreed to calls from ATYA; "
-             "/wakecall has the details.)")
+CALL_BUTTONS_HI = [[("Call karo", "setup:call"), ("Message pe karein", "setup:text")]]
+CALL_SOON = "Calling you {how} in a few seconds."
+CALL_SOON_HI = "Kuch hi second mein aapko {how} call kar raha hoon."
 TEXT_INSTEAD = "No problem, let's do it by message instead."
 
-CALL_OPENING = """This is {name}'s setup call: they just joined ATYA, and this call fills ATYA in so it's useful from day one.
-Open with ONE short turn: greet {name} warmly, say this is a quick setup chat of about ten minutes, and ask the first
-question: what's on for them this week? Then stop and wait."""
+CALL_OPENING = """This is {name}'s setup call. They just joined ATYA (their personal assistant) and chose to set it up by
+phone. This is their onboarding: make it feel like a friendly first conversation, not a form. It has six parts, in
+order; the plan below has the rest.
+
+Part 1, hello and the small stuff (about a minute). Open with ONE short turn: greet {name} warmly by name, say this is
+a quick setup chat of about ten minutes, and {city_ask} Then stop and wait."""
+
+CITY_ASK = ("ask which city they live in. When they answer, call save_city with it; it returns today's weather, which "
+            "you mention in a few words (a small first taste of what you do).")
+CITY_KNOWN = "ask how their day is going."
 
 
 def call_plan() -> str:
-    areas = "\n".join(f"- {v}" for v in AREAS.values())
-    return ("Setup plan. If you don't know their city yet, ask it first and save it with save_city. Then cover "
-            "these, one question at a time, in roughly this order, following up on what they say to get concrete "
-            "details (days, times, names, dates). Send each concrete thing they tell you to ATYA with the atya tool "
-            "as you go (one message per thing):\n" + areas +
-            f"\nAim for at least {TARGET_RECORDS} concrete things worth saving. Move on if they have nothing for "
-            "an area. After about ten minutes, or whenever they want to stop, wrap up: ask whether they'd like "
-            "ATYA to call every morning (if yes, at what time: use set_morning_call), then thank them and say a "
-            "summary will be in the chat and they can message ATYA anything from now on.")
+    return f"""Setup plan, after part 1:
+
+Part 2, what ATYA does (about a minute). In two or three short turns (this part may run a little longer than your
+usual one or two sentences), tell them the four things ATYA does for them:
+- Remembers anything they tell it, by message, voice note, or on a call like this one.
+- Reminds them at the right moment, by message or with a call.
+- A short morning message or a morning call about their day.
+- Coordinates with their friends and family: asks someone something for them, or checks in on them, and passes
+  the answer back.
+Then ask: which of these sounds most useful to them? Use the answer to decide where to spend the rest of the call.
+
+Part 3, broad questions (about three minutes). Ask what a normal week looks like for them: work, home, anything
+they're juggling. Listen, reflect it back in one sentence, then ask one or two more broad questions: what's coming
+up soon, and what's been on their mind.
+
+Part 4, zoom in, saying why (about four minutes). Pick the two or three threads from what they said that matter most
+to them, and go deeper, one question at a time. When you zoom in, sometimes say why, briefly and naturally, for
+example:
+- "Who's involved in that? I'll remember them, so I can remind you when something's open with them."
+- "That sounds like a bigger project. If you give me the main pieces, I can break it down and keep track of each."
+- "When is that due? So I can remind you at the right time, not too early and not too late."
+- "Any birthdays or anniversaries coming up? I'll make sure you don't miss them."
+Depth on what matters to them beats covering every topic. Don't ask everything; don't repeat a reason.
+
+All through the call, whenever they tell you something worth keeping (a task, a date, a person and who they are, a
+project and its pieces, a plan, a birthday), send it to ATYA with the atya tool as a complete message in their first
+person, with expects_reply false: it's saved in the background, so don't wait, don't use a filler, and don't
+announce each save; just carry on the conversation. One message per thing.
+
+Part 5, habits (about a minute). Ask whether they'd like a short morning message about their day, or a quick morning
+call like this one, and at what time. Set only what they choose: set_morning_brief for the message,
+set_morning_call for the call. If family or friends came up, mention that ATYA can ask them things or check in on
+them, and that the chat will say how.
+
+Part 6, wrap up (half a minute). Recap three or four things you noted, in plain words. Then: from now on they can
+just message ATYA anything, and a summary is in their chat. Say a warm goodbye.
+
+Aim for about ten to twelve minutes in all. If they want to stop early, skip to part 6."""
 
 
 def call_fallback(store, settings, tenant: dict, result: str) -> None:
@@ -176,11 +225,19 @@ def call_fallback(store, settings, tenant: dict, result: str) -> None:
                       actor="interview")
 
 
-def done_by_call(tx: Tx, tenant: dict, counts: dict[str, int]) -> str:
-    """The message after a setup call's transcript is filed, plus the first habit (the 9 am brief)."""
-    if tenant.get("brief_time") is None:
-        at = dt.time(9, 0)
-        from zoneinfo import ZoneInfo
-        local_now = dt.datetime.now(ZoneInfo(tenant["timezone"] or "UTC"))
-        tx.set_brief(tenant["id"], at, skip_until=local_now.date() if local_now.time() >= at else None)
-    return summary(counts, "")
+def done_by_call(tenant: dict, noted: list[str]) -> str:
+    """The chat message after the setup call: what was noted (by name), what's set up, what to try."""
+    from .briefs import fmt_time
+    hi = tenant.get("call_language") in ("hinglish", "hindi")
+    parts = [("Call ke liye shukriya! Maine yeh note kiya:" if hi else "Thanks for the call! Here's what I noted:")
+             + ("\n" + "\n".join(noted) if noted else ("\n(abhi kuch nahi)" if hi else "\n(nothing yet)"))]
+    habits = []
+    if tenant.get("brief_time"):
+        habits.append(f"a morning message at {fmt_time(tenant['brief_time'])} (/brief to change)")
+    if tenant.get("wakecall_time"):
+        habits.append(f"a morning call at {fmt_time(tenant['wakecall_time'])} (/wakecall to change)")
+    parts.append("Set up: " + "; ".join(habits) + "." if habits else
+                 "No morning message yet: send /brief 9am if you'd like one.")
+    parts.append("Try asking me: \"What's due this week?\" or \"Remind me to call Mom on Sunday at 6.\" "
+                 "To have me ask a friend or family member something for you, send /circle.")
+    return "\n\n".join(parts)

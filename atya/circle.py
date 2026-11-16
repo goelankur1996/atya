@@ -232,7 +232,7 @@ def join(ctx, code: str) -> str:
         ctx.reply("That's your own invite link: send it to the person you want to add.")
         return "circle:own-code"
     if tenant is None:
-        from .commands import TZ_PROMPT, tz_buttons
+        from .commands import ask_onboarding
         with ctx.store.tx(system=True) as tx:
             whatsapp = ctx.channel == "whatsapp"
             tenant = tx.create_tenant(telegram_user_id=None if whatsapp else ctx.user_id,
@@ -246,13 +246,14 @@ def join(ctx, code: str) -> str:
             tx.set_state(pending_key(tenant["id"]), {"code": code})
         ctx.tenant = tenant
         log.info("circle: new account %s from an invite", str(tenant["id"])[:4])
-        ctx.reply(TZ_PROMPT, buttons=tz_buttons())
+        ask_onboarding(ctx, tenant)
         return "circle:joined-new"
     if tenant["status"] == "invited":
         with ctx.store.tx(system=True) as tx:
             tx.set_state(pending_key(tenant["id"]), {"code": code})
-        from .commands import TZ_PROMPT, tz_buttons
-        ctx.reply(TZ_PROMPT, buttons=tz_buttons())
+        from .commands import ask_onboarding
+        ctx.tenant = tenant
+        ask_onboarding(ctx, tenant)
         return "circle:joined-invited"
     ask(ctx.store, tenant, inv)
     return "circle:asked"

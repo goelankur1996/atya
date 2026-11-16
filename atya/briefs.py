@@ -250,6 +250,24 @@ def call_records(tx: Tx, schema: Schema, tenant_id, today: dt.date) -> str:
     return text
 
 
+def set_morning_brief(store: Store, tenant: dict, when: str, now: dt.datetime | None = None) -> str:
+    """The daily brief's time, or 'off'. The one function behind /brief and the call's tool."""
+    tid = tenant["id"]
+    if when.strip().lower() in ("off", "stop", "no", "none"):
+        with store.tx(tid) as tx:
+            tx.set_brief(tid, None)
+        return "Morning brief turned off."
+    at = parse_time(when)
+    if at is None:
+        return "That time wasn't clear. Try a time like 9am, 8:30 or 19:00."
+    local = local_now(tenant.get("timezone") or "UTC", now)
+    skip = local.date() if local.time() >= at else None     # already past it today: start tomorrow
+    with store.tx(tid) as tx:
+        tx.set_brief(tid, at, skip_until=skip)
+    return (f"Done. Every day at {fmt_time(at)} ({tenant.get('timezone') or 'UTC'}) I'll send what's overdue, due "
+            f"today and due this week. First one {'tomorrow' if skip else 'today'}.")
+
+
 def send_due_briefs(store: Store, now: dt.datetime | None = None) -> int:
     """Queue every brief that's due right now. Returns how many were queued."""
     with store.tx(system=True) as tx:

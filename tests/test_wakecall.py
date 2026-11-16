@@ -327,7 +327,7 @@ def test_setup_by_call(store, settings, owner):
                        user_id=FRIEND, chat_id=FRIEND, name="Meera")
     assert commands.offer_setup(ctx, meera, head="You're in.") == "setup:offered"
     text = tg.sent[-1][1]
-    assert "quick call" in text and [b[1] for b in tg.last_buttons[0]] == ["setup:call", "setup:text"]
+    assert "10-minute call" in text and [b[1] for b in tg.last_buttons[0]] == ["setup:call", "setup:text"]
     assert commands.setup_choice(store, settings, meera, FRIEND, "call", channel="telegram") == "setup:call"
     assert tenant(store, meera["id"])["wakecall_consent_at"] is not None              # the tap is the consent
     phone = Phone("answered")
@@ -340,8 +340,9 @@ def test_setup_by_call(store, settings, owner):
                            "tool_calls": []})()
     wakecall.finish_talk(store, tenant(store, meera["id"]), {"kind": "setup"}, sonic, 300,
                          dt.datetime.now(dt.timezone.utc), requests)
-    assert outbox(store, meera["id"])[-1].startswith("That's it, thanks. I've got: 1 task.")
-    assert tenant(store, meera["id"])["brief_time"] == dt.time(9, 0)
+    done = outbox(store, meera["id"])[-1]
+    assert done.startswith("Thanks for the call! Here's what I noted:\n- TSK-1 Dentist") and "/brief 9am" in done
+    assert tenant(store, meera["id"])["brief_time"] is None                        # only if they ask for it
 
 
 def test_setup_call_not_answered_falls_back_to_messages(store, settings, owner):
@@ -390,3 +391,34 @@ def test_call_questions_plan_with_the_fast_model(store, settings, owner):
     llm.query_plans["What's on Friday 2026-11-20?"] = {"types": ["task"], "search": "friday"}
     reply, _ = call_with_processor(store, settings, llm, owner, "What's on Friday 2026-11-20?")
     assert reply and llm.last_fast is True
+
+
+def test_onboarding_asks_name_then_language_then_offers_the_call(store, settings, owner):
+    from atya import commands
+    with store.tx(system=True) as tx:
+        t = tx.create_tenant(telegram_user_id=FRIEND2, telegram_chat_id=FRIEND2, display_name=None, status="invited")
+    tg = FakeTelegram()
+    ctx = commands.Ctx(store=store, tg=tg, settings=settings, tenant=t, channel="telegram",
+                       user_id=FRIEND2, chat_id=FRIEND2, name="Rajesh")
+    assert commands.ask_onboarding(ctx, t) == "prompted:onboarding"
+    assert tg.sent[-1][1] == commands.TZ_PROMPT and tg.last_buttons == [[("Rajesh", "onb:name:Rajesh")]]
+    assert commands.onboard_text(ctx, "Rajesh ji") == "prompted:onboarding"               # typed name
+    assert tg.sent[-1][1].startswith("Nice to meet you, Rajesh.") and tg.last_buttons == commands.LANG_BUTTONS
+    assert commands.onboard_text(ctx, "Hinglish") == "onboarded"
+    t = tenant(store, t["id"])
+    assert t["status"] == "active" and t["call_language"] == "hinglish" and t["display_name"] == "Rajesh ji"
+    assert t["timezone"] == "Asia/Kolkata"                         # until the call learns the city
+    offer = tg.sent[-1][1]
+    assert offer.startswith("Bahut badhiya") and "10 minute ki ek call" in offer
+    assert [b[0] for b in tg.last_buttons[0]] == ["Call karo", "Message pe karein"]
+
+
+def test_noting_things_on_a_call_doesnt_wait(store, owner):
+    requests = []
+    t0 = dt.datetime.now()
+    out = wakecall.ask_atya(store, owner, "Mom's birthday is on 3 December", requests, expects_reply=False)
+    assert "background" in out and (dt.datetime.now() - t0).total_seconds() < 1 and len(requests) == 1
+    p = wakecall.build_prompt({"display_name": "Meera"}, {"kind": "setup"}, dt.datetime(2026, 11, 17, 10), "B",
+                              "matthew", None, extra=__import__("atya.interview", fromlist=["x"]).call_plan())
+    assert "ask which city they live in" in p and "Coordinates with their friends and family" in p
+    assert "expects_reply false" in p

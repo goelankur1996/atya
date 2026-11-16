@@ -211,7 +211,7 @@ def test_let_in_on_whatsapp_keeps_the_24_hour_window(store, settings, clean):
     assert dt.datetime.now(dt.timezone.utc) - t["whatsapp_last_inbound"] > dt.timedelta(days=2)
     with store.tx(system=True) as tx:
         out = tx._one("SELECT body, channel FROM outbox WHERE tenant_id = %s", (tenant["id"],))
-    assert out == {"body": commands.SPOT_OPEN, "channel": "whatsapp"}
+    assert out == {"body": commands.SPOT_OPEN, "channel": "whatsapp"}           # what should I call you?
 
 
 def test_invite_signup_onboarding_and_a_message_through_the_pipeline(store, settings, clean):
@@ -223,13 +223,15 @@ def test_invite_signup_onboarding_and_a_message_through_the_pipeline(store, sett
     t = by_phone(store, FRIEND)
     assert t["status"] == "invited" and t["display_name"] == "Ravi" and t["channel"] == "whatsapp"
     assert t["telegram_user_id"] is None
-    assert wa.sent[-1][2] == commands.tz_buttons()          # the timezone picker
+    assert wa.sent[-1][2] == [[("Ravi", "onb:name:Ravi")]]   # what should I call you? (their profile name)
 
-    deliver(store, wa, settings, event(FRIEND, tap="tz:Europe/London"))
+    deliver(store, wa, settings, event(FRIEND, tap="onb:name:Ravi"))
+    assert wa.sent[-1][2] == commands.LANG_BUTTONS             # then: which language?
+    deliver(store, wa, settings, event(FRIEND, text="english"))
     t = by_phone(store, FRIEND)
-    assert t["status"] == "active" and t["timezone"] == "Europe/London"
-    assert wa.texts(FRIEND)[-1].startswith("Got it: Europe/London")
-    assert "what's on for you this week" in wa.texts(FRIEND)[-1]      # the setup interview starts
+    assert t["status"] == "active" and t["call_language"] == "english" and t["display_name"] == "Ravi"
+    assert wa.texts(FRIEND)[-1].startswith("Great, you're in.")
+    assert "which city do you live in" in wa.texts(FRIEND)[-1]       # the setup interview starts
     with store.tx(system=True) as tx:
         tx.set_state(f"interview:{t['id']}", None)                     # (covered in test_interview)
 

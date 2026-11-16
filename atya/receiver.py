@@ -174,6 +174,10 @@ def handle_callback(store: Store, tg: TelegramAPI, settings: Settings, cq: dict)
     if data.startswith("rtn:"):
         from . import routines
         return routines.tap(store, tenant, chat_id, data, channel="telegram")
+    if data.startswith("onb:"):
+        ctx = commands.Ctx(store=store, tg=tg, settings=settings, user_id=user_id, chat_id=chat_id,
+                           name=None, tenant=tenant)
+        return commands.onboard_choice(ctx, data)
     if data.startswith("circle:"):
         from . import circle
         return circle.tap(store, tenant, data)

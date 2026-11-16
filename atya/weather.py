@@ -77,7 +77,12 @@ def set_city(store, tenant: dict, text: str, **kw) -> dict | None:
     place = find_city(text, **kw)
     if place is None:
         return None
+    import zoneinfo
+    zone = place.get("timezone")
     with store.tx(tenant["id"]) as tx:
         tx.set_city(tenant["id"], place["label"], place["lat"], place["lon"])
+        if zone and zone in zoneinfo.available_timezones() and zone != tenant.get("timezone"):
+            tx.set_timezone(tenant["id"], zone, actor="weather")      # the city decides the timezone
+            tenant["timezone"] = zone
     tenant.update(city=place["label"], city_lat=place["lat"], city_lon=place["lon"])
     return place

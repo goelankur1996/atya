@@ -338,6 +338,8 @@ def handle_tap(store: Store, ctx: commands.Ctx, data: str) -> str:
     if data.startswith("rtn:"):
         from . import routines
         return routines.tap(store, tenant, ctx.chat_id, data, channel="whatsapp")
+    if data.startswith("onb:"):
+        return commands.onboard_choice(ctx, data)
     if data.startswith("circle:"):
         from . import circle
         return circle.tap(store, tenant, data)

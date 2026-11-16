@@ -57,14 +57,16 @@ RULES = """Rules for the whole call:
 - ATYA (the atya tool) holds all their records and does everything with them. Whenever they ask about their own
   things (tasks, people, birthdays, notes, routines, the calendar on any day), want something saved or changed (add,
   edit, move, copy, mark done, delete, a reminder, "call me at 4 to ..."), report a routine day, or mention
-  something worth keeping (a plan, a date, a person's details), send it with atya, in their words as a complete
+  something worth keeping (a plan, a date, a person's details; for these set expects_reply false and carry on
+  without waiting), send it with atya, in their words as a complete
   message with dates written out ("tasks on Thursday 2026-11-19"), in their first person ("ask Shivani if she can
   order my medicines"), never "the user". Then tell them ATYA's reply in a few words.
   Questions the records below already answer (what's on a day, what's due, someone's birthday), answer
   straight away without atya. Use atya for anything not there or that needs more detail, and for every change.
   After a change, don't trust the records below for that item. Never say you can't make a change, never ask them
   to do it themselves. If the reply says it's still working, say it'll be in the chat and go on.
-- Before each atya call, say one short filler so they aren't left in silence. Use a different one each time, never
+- Before each atya call that waits for a reply, say one short filler so they aren't left in silence (not for things
+  you're only noting with expects_reply false). Use a different one each time, never
   the same one twice in a call, for example: {fillers}
 - You have no live information except the weather given below: no news, prices, traffic, AQI or internet. Never
   guess at those. Send "research <what they want>" with atya; the answer comes in the chat.
@@ -174,7 +176,8 @@ def build_prompt(tenant: dict, call: dict, local: dt.datetime, brief: str, voice
                                          about=call.get("about") or "how they're doing")
     elif call["kind"] == "setup":
         from . import interview
-        opening = interview.CALL_OPENING.format(name=name)
+        opening = interview.CALL_OPENING.format(
+            name=name, city_ask=interview.CITY_KNOWN if tenant.get("city") else interview.CITY_ASK)
     elif weather or tenant.get("city"):
         opening = OPENING_KNOWN_CITY.format(name=name, clock=clock,
                                             weather=weather or "weather unavailable today: skip it")
@@ -188,6 +191,12 @@ def build_prompt(tenant: dict, call: dict, local: dt.datetime, brief: str, voice
                          extra=f"\n\n{extra}" if extra else "", records=records or "(none loaded)")
 
 
+def call_budget(store: Store, settings: Settings, tenant: dict, call: dict) -> int:
+    """How long this call may run: the day's minutes left, and at most SETUP_MAX_SECONDS for the setup call."""
+    budget = seconds_left(store, settings, tenant)
+    return min(budget, SETUP_MAX_SECONDS) if call.get("kind") == "setup" else budget
+
+
 def seconds_left(store: Store, settings: Settings, tenant: dict) -> int:
     """How long this user's next call may last today (a safety cap, not a count)."""
     if limits.is_owner(tenant, settings) or not settings.daily_call_minutes:
@@ -198,13 +207,15 @@ def seconds_left(store: Store, settings: Settings, tenant: dict) -> int:
     return max(0, min(MAX_CALL_SECONDS, settings.daily_call_minutes * 60 - used))
 
 
+SAVE_WAIT_SECONDS = 120          # after a call, how long to wait for things noted in the background
+SETUP_MAX_SECONDS = 20 * 60      # the setup call's hard limit
 ASK_WAIT_SECONDS = 25             # how long the call waits for ATYA's reply before saying it'll come in the chat
 LATE_REPLY = ("ATYA is still working on it; the result will be sent in the chat. Tell them that in a few words "
               "and carry on.")
 
 
 def ask_atya(store: Store, tenant: dict, message: str, requests: list, *, wait: float = ASK_WAIT_SECONDS,
-             poll: float = 0.3) -> str:
+             poll: float = 0.3, expects_reply: bool = True) -> str:
     """What the user said on the call goes to ATYA exactly like a text message (same processor, same
     records); the reply comes back to be spoken. Too slow: the reply goes to the chat instead."""
     from .store import CALL_REQUEST
@@ -215,6 +226,8 @@ def ask_atya(store: Store, tenant: dict, message: str, requests: list, *, wait: 
         inbox_id = tx.add_inbox(tenant["id"], source="call", raw_content=message, sender=CALL_REQUEST,
                                 actor="wakecall")
     requests.append(inbox_id)
+    if not expects_reply:                           # something to note: saved in the background, no waiting
+        return "Sent to ATYA; it's being saved in the background. Carry on the conversation."
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
         time.sleep(poll)
@@ -306,14 +319,15 @@ def call_extra(store: Store, tenant: dict, call: dict) -> str:
 
 def call_tools(store: Store, tenant: dict, requests: list) -> list[dict]:
     """The call's tools. Everything about their records goes through `atya`, the same way as a text message;
-    the other two are the same functions as the /city and /wakecall commands."""
+    the others are the same functions as the /brief, /wakecall and /city commands."""
     def text_tool(fn):
         async def run(args: dict) -> str:
             return await asyncio.to_thread(fn, args)
         return run
 
     return [
-        {"name": "atya", "run": text_tool(lambda a: ask_atya(store, tenant, str(a.get("message", "")), requests)),
+        {"name": "atya", "run": text_tool(lambda a: ask_atya(store, tenant, str(a.get("message", "")), requests,
+                                                             expects_reply=a.get("expects_reply") is not False)),
          "description": "Send something to ATYA exactly as if the user had texted it, and get ATYA's reply. Use it "
                         "for everything about their records: questions (tasks, people, birthdays, notes, documents, "
                         "routines, the calendar on any day), anything to save (a task, note, reminder, a person's "
@@ -324,8 +338,16 @@ def call_tools(store: Store, tenant: dict, requests: list) -> list[dict]:
              "type": "string", "description": "The message as the user would text it: complete on its own, in "
                             "their words, with dates written out, e.g. 'What's on my calendar on Thursday "
                             "2026-11-19?', 'Mark the Storytelling with Data workshop on 2026-11-19 done', "
-                            "'Call me at 2026-11-17 16:00 to leave for the airport'"}},
+                            "'Call me at 2026-11-17 16:00 to leave for the airport'"},
+             "expects_reply": {"type": "boolean", "description": "true (default) when they asked something or you "
+                               "need ATYA's answer to go on; false when they just told you something to note (it's "
+                               "saved in the background and you carry on without waiting)"}},
                     "required": ["message"]}},
+        {"name": "set_morning_brief", "run": text_tool(lambda a: briefs.set_morning_brief(
+            store, tenant, str(a.get("time", "")))),
+         "description": "Turn on (or move) the short morning message about their day, at a local time, or 'off'.",
+         "schema": {"type": "object", "properties": {"time": {
+             "type": "string", "description": "Local time like '8:30' or '9am', or 'off'"}}, "required": ["time"]}},
         {"name": "set_morning_call", "run": text_tool(lambda a: set_morning_call(store, tenant, str(a.get("time", "")))),
          "description": "Turn on (or move) the daily morning call from ATYA, at a local time, or 'off' to stop it.",
          "schema": {"type": "object", "properties": {"time": {
@@ -369,17 +391,21 @@ def finish_talk(store: Store, tenant: dict, call: dict, sonic, seconds: float, s
     if saved and call.get("id"):
         with store.tx(system=True) as tx:
             tx.set_call_transcript(call["id"], saved)
+    deadline = time.monotonic() + SAVE_WAIT_SECONDS          # things noted in the background: let them finish
+    while requests and time.monotonic() < deadline:
+        with store.tx(tenant["id"]) as tx:
+            busy = tx._one("SELECT count(*) AS n FROM inbox WHERE id = ANY(%s) AND status IN ('pending', 'processing')",
+                           (list(requests),))["n"]
+        if not busy:
+            break
+        time.sleep(1)
     with store.tx(tenant["id"]) as tx:
-        made = [r for i in requests for r in tx.records_from_inbox(tenant["id"], i)]
         changes = [line for i in requests
                    if (tx._one("SELECT intent FROM inbox WHERE id = %s", (i,)) or {}).get("intent") == "log"
                    for body in tx.call_replies(i) for line in body.splitlines() if line.startswith("- ")]
         if setup:
-            counts: dict[str, int] = {}
-            for r in made:
-                counts[r["type"]] = counts.get(r["type"], 0) + 1
             from . import interview
-            body = interview.done_by_call(tx, tx.tenant(tenant["id"]), counts)
+            body = interview.done_by_call(tx.tenant(tenant["id"]), changes)
         elif changes:
             body = "From our call:\n" + "\n".join(changes)
         else:
@@ -395,7 +421,7 @@ async def place_call(store: Store, settings: Settings, llm, embedder, tenant: di
     from .sonic import Sonic
     from .tgcall import Caller, converse, up_from_24k
 
-    budget = seconds_left(store, settings, tenant)
+    budget = call_budget(store, settings, tenant, call)
     if budget < MIN_CALL_SECONDS:
         return "no-minutes"
     user_id = tenant["telegram_user_id"]

@@ -79,7 +79,7 @@ def test_owner_start_and_invite_flow(store, settings, clean):
     poll(store, tg, settings)
     t = tenant_of(store, FRIEND)
     assert t["status"] == "active" and t["timezone"] == "Europe/London"
-    assert texts(tg, 777)[-1].startswith("Got it: Europe/London")
+    assert texts(tg, 777)[-1].startswith("Great, you're in.")
 
     # The code is single-use.
     tg.push(f"/start {code}", user_id=STRANGER, chat_id=999)
@@ -166,7 +166,10 @@ def onboard_friend(store, tg, settings):
     tg.push(f"/start {code}", user_id=FRIEND, chat_id=777)
     tg.push_tap("tz:Asia/Kolkata", user_id=FRIEND, chat_id=777)
     poll(store, tg, settings)
-    return tenant_of(store, FRIEND)
+    t = tenant_of(store, FRIEND)
+    with store.tx(system=True) as tx:
+        tx.set_state(f"interview:{t['id']}", None)          # skip the setup interview (see test_interview)
+    return t
 
 
 def test_export_contains_everything_and_only_mine(store, settings, clean):

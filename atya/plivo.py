@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 API = "https://api.plivo.com/v1/Account/{auth_id}/Call/"
 RING_SECONDS = 45                 # how long the phone rings before it counts as not answered
-SETTLE_SECONDS = 60               # after hangup, how long to wait for the bridge to finish saving
+SETTLE_SECONDS = 180              # after hangup, how long to wait for the bridge to finish saving
 STREAM_RATE = 16000               # Plivo <-> bridge audio: 16 kHz, 16-bit, mono (Sonic's input rate)
 
 

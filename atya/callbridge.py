@@ -133,7 +133,7 @@ class Bridge:
     async def warm(self, sess: Session) -> None:
         secret = sess.call["secret"]
         try:
-            sess.budget = wakecall.seconds_left(self.store, self.settings, sess.tenant)
+            sess.budget = wakecall.call_budget(self.store, self.settings, sess.tenant, sess.call)
             prompt, tools = await wakecall.prepare(self.store, self.settings, sess.tenant, sess.call, sess.requests)
             make = self.sonic_factory or _sonic
             sess.sonic = make(prompt=prompt, voice=wakecall.voice_for(self.settings, sess.tenant), region=self.settings.aws_region,
@@ -283,8 +283,8 @@ class Bridge:
         await sess.sonic.close()
         if not hung_up_by_user:
             await self.hang_up(ws, state)
-        wakecall.finish_talk(self.store, tenant, call, sess.sonic, time.monotonic() - answered, started,
-                             sess.requests)
+        await asyncio.to_thread(wakecall.finish_talk, self.store, tenant, call, sess.sonic,
+                                time.monotonic() - answered, started, sess.requests)
         self.report(call, "answered")
 
     async def hang_up(self, ws, state: dict) -> None:

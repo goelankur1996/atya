@@ -791,6 +791,27 @@ def interview_turn(store: Store, llm: LLM, row: dict, tenant: dict, schema: Sche
     tid = tenant["id"]
     kind = interview.classify_reply(raw)
     turns = st["turns"]
+    if turns[-1].get("area") == "city":              # the first, small question: their city (sets the timezone)
+        from . import weather
+        place = weather.set_city(store, dict(tenant), raw) if kind == "answer" else None
+        if kind == "answer" and place is None:
+            body = "I couldn't find that city. Try adding the state or country, like: Noida, India"
+        else:
+            turns[-1]["a"] = raw[:200] if place else None
+            st["covered"] = sorted(set(st.get("covered", [])) | {"city"})
+            turns.append({"q": interview.SECOND_QUESTION})
+            st["asked"] = dt.datetime.now(dt.timezone.utc).isoformat()
+            body = (f"Got it: {place['label']}.\n\n" if place else "") + interview.SECOND_QUESTION
+        with store.tx(tid) as tx:
+            if kind != "stop":
+                tx.set_state(interview.key(tid), st)
+            else:
+                tx.set_state(interview.key(tid), None)
+                body = interview.summary({}, "")
+            tx.add_outbox(tid, chat_id=tenant["telegram_chat_id"], body=with_heard(heard, body), inbox_id=row["id"],
+                          reply_to_message_id=_reply_target(row["source_message_id"]))
+            tx.finish_inbox(row["id"], status="processed", intent="log", notes="setup interview: city")
+        return "processed"
     saved_line = ""
     notes = "setup interview: " + kind
     if kind == "answer":
@@ -839,10 +860,6 @@ def interview_turn(store: Store, llm: LLM, row: dict, tenant: dict, schema: Sche
             counts = {r["type"]: r["n"] for r in rows}
             body = interview.summary(counts if answered else {}, nxt.get("suggest", ""))
             tx.set_state(interview.key(tid), None)
-            if answered and tenant.get("brief_time") is None:     # the first habit: a brief every morning
-                at = dt.time(9, 0)
-                local_now = dt.datetime.now(dt.timezone.utc).astimezone(tz)
-                tx.set_brief(tid, at, skip_until=local_now.date() if local_now.time() >= at else None)
         else:
             turns.append({"q": nxt["question"], **({"area": nxt["area"]} if nxt.get("area") else {})})
             st["asked"] = dt.datetime.now(dt.timezone.utc).isoformat()

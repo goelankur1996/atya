@@ -81,10 +81,13 @@ WAITLIST_THANKS = ("Thanks, noted. You're #{n} on the list. I'll message you her
                    "To leave the list, send STOP.")
 WAITLIST_WAITING = ("You're on the ATYA waitlist, #{n}. I'll message you here when your spot opens. "
                     "If someone gave you an invite code, send: /start <code>")
-SPOT_OPEN = ("Your spot on ATYA is open. Welcome.\n\nOne question first: which city do you live in? It sets your "
-             "timezone (for dates like \"by Friday\") and the weather on calls. Type it, or tap a timezone.")
-TZ_PROMPT = ("Welcome. One question first: which city do you live in? It sets your timezone (for dates like "
-             "\"by Friday\") and the weather on calls. Type it, or tap a timezone.")
+SPOT_OPEN = "Your spot on ATYA is open. Welcome!\n\nFirst things first: what should I call you?"
+TZ_PROMPT = "Welcome to ATYA. First things first: what should I call you?"      # the first onboarding question
+LANG_PROMPT = ("Nice to meet you, {name}. Which language would you like me to use, on calls and here?\n"
+               "Aap kis bhasha mein baat karna pasand karenge?")
+LANG_BUTTONS = [[("English", "onb:lang:english"), ("Hinglish", "onb:lang:hinglish"), ("Hindi", "onb:lang:hindi")]]
+LANG_WORDS = {"english": "english", "eng": "english", "en": "english", "hinglish": "hinglish", "hindi": "hindi",
+              "हिंदी": "hindi", "हिन्दी": "hindi"}
 
 
 @dataclass
@@ -145,33 +148,98 @@ def match_timezone(text: str) -> str | None:
     return None
 
 
+def onboard_key(tenant_id) -> str:
+    return f"onboard:{tenant_id}"
+
+
+def onboarding_prompt(store: Store, tenant: dict, profile_name: str | None = None, *, opened: bool = False):
+    """The next onboarding question for an invited account, as (body, buttons): their name, then their
+    language. (City comes on the setup call; the timezone meanwhile follows their phone number.)"""
+    from .circle import usable_name
+    with store.tx(system=True) as tx:
+        st = tx.get_state(onboard_key(tenant["id"])) or {}
+        if not st:
+            st = {"step": "name", "suggest": (usable_name(profile_name or tenant.get("display_name")) or "").split(" ")[0]}
+            tx.set_state(onboard_key(tenant["id"]), st)
+    if st["step"] == "language":
+        return LANG_PROMPT.format(name=(tenant.get("display_name") or "").split(" ")[0] or "there"), LANG_BUTTONS
+    body = SPOT_OPEN if opened else TZ_PROMPT
+    buttons = [[(st["suggest"], f"onb:name:{st['suggest'][:40]}")]] if st.get("suggest") else None
+    return body, buttons
+
+
+def ask_onboarding(ctx: Ctx, tenant: dict) -> str:
+    body, buttons = onboarding_prompt(ctx.store, tenant, ctx.name)
+    ctx.reply(body, buttons=buttons)
+    return "prompted:onboarding"
+
+
 def onboard_text(ctx: Ctx, text: str) -> str:
-    """A typed answer to the first question: a timezone name, or (usually) their city, which sets both the
-    timezone and the city for the weather."""
-    from . import weather
+    """A typed answer during onboarding: their name, then their language."""
+    from .circle import usable_name, set_name
+    tenant = ctx.tenant
+    with ctx.store.tx(system=True) as tx:
+        st = tx.get_state(onboard_key(tenant["id"])) or {"step": "name"}
     zone = match_timezone(text)
-    if zone is None and text.strip() and not text.strip().startswith("/"):
-        place = weather.find_city(text)
-        if place and place.get("timezone") and match_timezone(place["timezone"]):
-            with ctx.store.tx(ctx.tenant["id"]) as tx:
-                tx.set_city(ctx.tenant["id"], place["label"], place["lat"], place["lon"])
-            zone = match_timezone(place["timezone"])
-    if zone:
+    if zone:                                       # an old-style answer (a timezone name) still works
         finish_onboarding(ctx, zone)
         return "onboarded"
-    ctx.reply("I couldn't place that. " + TZ_PROMPT.split(" ", 1)[1] if text.strip() else TZ_PROMPT,
-              buttons=tz_buttons())
-    return "prompted:timezone"
+    if st["step"] == "name":
+        name = usable_name(text)
+        if not name or len(name.split()) > 4:
+            ctx.reply("Just your name is enough, the way you'd like me to call you. For example: Ankur")
+            return "prompted:onboarding"
+        return onboard_choice(ctx, f"onb:name:{name}")
+    want = LANG_WORDS.get(text.strip().lower())
+    if want is None:
+        body, buttons = onboarding_prompt(ctx.store, tenant)
+        ctx.reply("Tap one, or type English, Hinglish or Hindi.\n\n" + body, buttons=buttons)
+        return "prompted:onboarding"
+    return onboard_choice(ctx, f"onb:lang:{want}")
 
 
-def finish_onboarding(ctx: Ctx, zone: str) -> None:
+def onboard_choice(ctx: Ctx, data: str) -> str:
+    """onb:name:<name> / onb:lang:<language>, tapped or typed."""
+    from .circle import set_name, LANGUAGES
+    tenant = ctx.tenant
+    if tenant is None or tenant["status"] != "invited":
+        return "ignored:onboarding"
+    _, what, value = (data.split(":", 2) + ["", ""])[:3]
+    if what == "name" and value.strip():
+        set_name(ctx.store, tenant["id"], value.strip()[:80])
+        with ctx.store.tx(system=True) as tx:
+            tx.set_state(onboard_key(tenant["id"]), {"step": "language"})
+            ctx.tenant = tenant = tx.tenant(tenant["id"])
+        return ask_onboarding(ctx, tenant)
+    if what == "lang" and value in LANGUAGES:
+        with ctx.store.tx(system=True) as tx:
+            tx.conn.execute("UPDATE tenants SET call_language = %s WHERE id = %s", (value, tenant["id"]))
+            tx.set_state(onboard_key(tenant["id"]), None)
+            ctx.tenant = tx.tenant(tenant["id"])
+        finish_onboarding(ctx, None)
+        return "onboarded"
+    return "ignored:onboarding"
+
+
+def default_timezone(settings: Settings, tenant: dict) -> str:
+    """Until the setup call learns their city: from their phone number (+91 is India), else the owner's."""
+    phone = tenant.get("whatsapp_phone") or ""
+    if phone.startswith("91"):
+        return "Asia/Kolkata"
+    if tenant.get("timezone") and tenant["timezone"] != "UTC":
+        return tenant["timezone"]
+    return settings.owner_timezone or "UTC"
+
+
+def finish_onboarding(ctx: Ctx, zone: str | None) -> None:
     assert ctx.tenant is not None
     with ctx.store.tx(ctx.tenant["id"]) as tx:
-        tx.set_timezone(ctx.tenant["id"], zone, actor="commands")
+        tx.set_timezone(ctx.tenant["id"], zone or default_timezone(ctx.settings, ctx.tenant), actor="commands")
         tx.set_tenant_status(ctx.tenant["id"], "active", actor="commands")
         tenant = tx.tenant(ctx.tenant["id"])
-    where = f"{tenant['city']} ({zone})" if tenant.get("city") else zone
-    offer_setup(ctx, tenant, head=f"Got it: {where}. You're in.")
+    ctx.tenant = tenant
+    offer_setup(ctx, tenant, head="Bahut badhiya, aap andar hain." if tenant.get("call_language") in ("hinglish", "hindi")
+                else "Great, you're in.")
     from . import circle
     circle.after_onboarding(ctx.store, tenant)
 
@@ -191,16 +259,22 @@ def caller_handle(store: Store) -> str:
 def call_how(store: Store, settings: Settings, tenant: dict) -> str:
     """How a call reaches this user, for messages: 'on your phone from +91 …' or 'on Telegram from @…'."""
     from . import plivo
+    hi = tenant.get("call_language") in ("hinglish", "hindi")
     if plivo.line_for(settings, tenant) == "phone":
-        return f"on your phone from {plivo.display_number(settings)} (save it as ATYA)"
-    return "on Telegram" + caller_handle(store)
+        n = plivo.display_number(settings)
+        return f"aapke phone par {n} se (ATYA naam se save kar lijiye)" if hi else \
+            f"on your phone from {n} (save it as ATYA)"
+    return ("Telegram par" if hi else "on Telegram") + caller_handle(store)
 
 
 def offer_setup(ctx: Ctx, tenant: dict, head: str = "") -> str:
     """The setup interview: offered as a call when possible, otherwise by message."""
     if can_call(ctx.settings, tenant):
-        body = interview.CALL_OFFER.format(how=call_how(ctx.store, ctx.settings, tenant))
-        ctx.reply(f"{head}\n\n{body}" if head else body, buttons=interview.CALL_BUTTONS)
+        hi = tenant.get("call_language") in ("hinglish", "hindi")
+        body = (interview.CALL_OFFER_HI if hi else interview.CALL_OFFER).format(
+            how=call_how(ctx.store, ctx.settings, tenant))
+        ctx.reply(f"{head}\n\n{body}" if head else body,
+                  buttons=interview.CALL_BUTTONS_HI if hi else interview.CALL_BUTTONS)
         return "setup:offered"
     with ctx.store.tx(tenant["id"]) as tx:
         opening = interview.begin(tx, tenant["id"])
@@ -221,7 +295,8 @@ def setup_choice(store: Store, settings: Settings, tenant: dict | None, chat_id:
             if tenant.get("wakecall_consent_at") is None:
                 tx.set_wakecall_consent(tid)
             tx.add_call(tid, "setup", dt.datetime.now(dt.timezone.utc))
-            tx.add_outbox(tid, chat_id=chat_id, body=interview.CALL_SOON.format(how=call_how(store, settings, tenant)),
+            soon = interview.CALL_SOON_HI if tenant.get("call_language") in ("hinglish", "hindi") else interview.CALL_SOON
+            tx.add_outbox(tid, chat_id=chat_id, body=soon.format(how=call_how(store, settings, tenant)),
                           actor="commands", channel=channel)
         return "setup:call"
     with store.tx(tid) as tx:
@@ -320,9 +395,10 @@ def admit(store: Store, entry_id) -> dict | None:
             fresh = False
         tx.waitlist_remove(e["id"])
     if fresh:
+        body, buttons = onboarding_prompt(store, tenant, e.get("display_name"), opened=True)
         with store.tx(tenant["id"]) as tx:
             tx.add_outbox(tenant["id"], chat_id=int(e["whatsapp_phone"]) if whatsapp else e["telegram_chat_id"],
-                          body=SPOT_OPEN, channel=e["channel"], buttons=tz_buttons(), actor="web")
+                          body=body, channel=e["channel"], buttons=buttons, actor="web")
     log.info("let in %s from the waitlist (%s)", str(tenant["id"])[:4], e["channel"])
     return tenant
 
@@ -338,8 +414,7 @@ def handle(ctx: Ctx, text: str) -> str:
     if ctx.tenant is None:
         return stranger(ctx, cmd if cmd in LEAVE_WORDS else None)
     if ctx.tenant["status"] == "invited":
-        ctx.reply(TZ_PROMPT, buttons=tz_buttons())
-        return "prompted:timezone"
+        return ask_onboarding(ctx, ctx.tenant)
     if ctx.tenant["status"] != "active":
         return "dropped:inactive"
     if cmd == "/help":
@@ -395,8 +470,7 @@ def start(ctx: Ctx, code: str) -> str:
             return linked
     if ctx.tenant is not None:
         if ctx.tenant["status"] == "invited":
-            ctx.reply(TZ_PROMPT, buttons=tz_buttons())
-            return "prompted:timezone"
+            return ask_onboarding(ctx, ctx.tenant)
         ctx.reply("You're already set up.\n\n" + HELP)
         return "already-active"
     if ctx.is_owner and ctx.channel == "telegram":
@@ -422,7 +496,7 @@ def start(ctx: Ctx, code: str) -> str:
         tx.use_invite(code, tenant["id"])
     log.info("new user %s joined with an invite on %s", tenant["id"], ctx.channel)
     ctx.tenant = tenant
-    ctx.reply(TZ_PROMPT, buttons=tz_buttons())
+    ask_onboarding(ctx, tenant)
     return "created:invited"
 
 
@@ -668,23 +742,13 @@ def brief(ctx: Ctx, arg: str) -> str:
                       "every day at that time I'll send what's overdue, due today and due this week.")
         return "brief:status"
     if arg.lower() in ("off", "stop", "no", "none"):
-        with ctx.store.tx(tid) as tx:
-            tx.set_brief(tid, None)
+        briefs.set_morning_brief(ctx.store, current or ctx.tenant, "off")
         ctx.reply("Morning brief turned off. /brief 9am turns it back on.")
         return "brief:off"
-    at = briefs.parse_time(arg)
-    if at is None:
+    if briefs.parse_time(arg) is None:
         ctx.reply("I didn't understand that time. Try /brief 9am, /brief 8:30 or /brief 19:00.")
         return "brief:bad-time"
-    now = briefs.local_now(current["timezone"] if current else "UTC")
-    # Already past that time today: start tomorrow rather than sending one right now.
-    skip = now.date() if now.time() >= at else None
-    with ctx.store.tx(tid) as tx:
-        tx.set_brief(tid, at, skip_until=skip)
-    when = "tomorrow" if skip else "today"
-    ctx.reply(f"Done. Every day at {briefs.fmt_time(at)} ({current['timezone'] if current else 'UTC'}) "
-              f"I'll send what's overdue, due today and due this week. First one {when}. "
-              "/brief off stops it.")
+    ctx.reply(briefs.set_morning_brief(ctx.store, current or ctx.tenant, arg) + " /brief off stops it.")
     return "brief:on"
 
 

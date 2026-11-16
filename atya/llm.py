@@ -213,7 +213,8 @@ Areas (key: what to find out):
 {areas}
 
 How to ask:
-- One question per turn, short (under 30 words), warm and plain, like a sharp assistant on their first day.
+- This is their onboarding: start broad (what a normal week looks like, what's coming up, what's on their mind), then zoom into the two or three things that matter most to them. When you zoom in, sometimes add a short reason, naturally: so you can remember the people involved and remind them when something's open, so you can break a bigger project into pieces and track each, so you can remind them at the right time. Don't repeat a reason.
+- One question per turn, short (under 40 words), warm and plain, like a sharp assistant on their first day.
 - Go after concrete facts with dates: who, what, which day, what time. If something time-bound came without a date (a birthday, a trip, a deadline, a bill), ask for the date next.
 - Follow up on specifics they just gave when something useful is missing: a person with no context, a task with no next step. Use their own words and names. Two follow-ups on one thread at most, then move on.
 - Then move to an area still open (listed in the message), in the order given, phrased naturally.

@@ -64,7 +64,10 @@ def test_interview_files_answers_follows_up_and_wraps_up(store, settings, clean)
     tg, llm = FakeTelegram(), FakeLLM()
     t = join(store, settings, tg)
     first = to_friend(tg)[-1]
-    assert first.startswith("Got it: Asia/Kolkata") and interview.FIRST_QUESTION in first
+    assert first.startswith("Great, you're in.") and interview.FIRST_QUESTION in first
+    assert "coordinate with your friends and family" in first
+    say(store, tg, llm, settings, "skip")                    # the city (covered in test_city_first)
+    assert to_friend(tg)[-1] == interview.SECOND_QUESTION
 
     a1 = "Pricing call with Meera on Thursday, and the export deck is due Friday"
     llm.plans[a1] = {"writes": [{"type": "person", "title": "Meera", "fields": {}},
@@ -74,7 +77,7 @@ def test_interview_files_answers_follows_up_and_wraps_up(store, settings, clean)
     say(store, tg, llm, settings, a1)
     reply = to_friend(tg)[-1]
     assert reply.startswith("Saved ") and "(2 so far)" in reply and reply.endswith("What time is the call with Meera?")
-    assert llm.interview_seen["still_open"][0] == "urgent" and llm.interview_seen["target"] == interview.TARGET_RECORDS
+    assert llm.interview_seen["still_open"][0] == "week" and llm.interview_seen["target"] == interview.TARGET_RECORDS
 
     # The model says it's done, but only 2 questions in and 2 things saved: it must keep going.
     say(store, tg, llm, settings, "skip")
@@ -90,7 +93,8 @@ def test_interview_files_answers_follows_up_and_wraps_up(store, settings, clean)
     assert "What do I owe Meera?" in end
     with store.tx(t["id"]) as tx:
         assert tx.get_state(interview.key(t["id"])) is None
-        assert tx.tenant(t["id"])["brief_time"] == dt.time(9, 0)           # the morning brief is now on
+        assert tx.tenant(t["id"])["brief_time"] is None                   # only on if they ask (/brief)
+    assert "/brief 9am" in end
 
     llm.intent["hi"] = "chat"
     say(store, tg, llm, settings, "hi")
@@ -100,6 +104,7 @@ def test_interview_files_answers_follows_up_and_wraps_up(store, settings, clean)
 def test_open_areas_get_asked_when_the_model_gives_up(store, settings, clean):
     tg, llm = FakeTelegram(), FakeLLM()
     join(store, settings, tg)
+    say(store, tg, llm, settings, "skip")                    # the city
     llm.interview_script = [nxt("", ["week", "urgent"], done=True)]
     say(store, tg, llm, settings, "skip")
     assert to_friend(tg)[-1] == interview.FALLBACK["occasions"]
@@ -113,8 +118,9 @@ def test_model_error_falls_back_to_fixed_questions(store, settings, clean):
             raise L.LLMError("non-JSON response")
     llm = Broken()
     join(store, settings, tg)
-    say(store, tg, llm, settings, "skip")                    # 'week' skipped, so 'urgent' is next
-    assert to_friend(tg)[-1] == interview.FALLBACK["urgent"]
+    say(store, tg, llm, settings, "skip")                    # the city
+    say(store, tg, llm, settings, "skip")                    # the broad question; nothing covered yet
+    assert to_friend(tg)[-1] == interview.FALLBACK["week"]
 
 
 def test_stop_ends_early_and_setup_restarts(store, settings, clean):
@@ -136,7 +142,7 @@ def test_hard_stop_and_abandoned_interview(store, settings, clean):
     for _ in range(interview.MAX_TURNS):
         say(store, tg, llm, settings, "skip")
     assert to_friend(tg)[-1].startswith("No problem")         # stopped at MAX_TURNS
-    assert llm.interview_calls == interview.MAX_TURNS - 1
+    assert llm.interview_calls == interview.MAX_TURNS - 2         # the city question needs no model
 
     with store.tx(t["id"]) as tx:
         interview.begin(tx, t["id"])
@@ -178,3 +184,18 @@ def test_schema_has_birthdays():
     s = load_schema("default")
     assert "Birthday" in s.types["person"].fields
     assert "Do NOT create a task for it" in s.rules_routing and "Trip:" in s.rules_routing
+
+
+def test_city_first(store, settings, clean, monkeypatch):
+    from atya import weather
+    tg, llm = FakeTelegram(), FakeLLM()
+    t = join(store, settings, tg)
+    monkeypatch.setattr(weather, "find_city", lambda name, **kw: {
+        "name": "Gurgaon", "label": "Gurgaon, Haryana, India", "lat": 28.46, "lon": 77.03,
+        "timezone": "Asia/Kolkata"} if "gurgaon" in name.lower() else None)
+    say(store, tg, llm, settings, "nowhere-ville")
+    assert to_friend(tg)[-1].startswith("I couldn't find that city")
+    say(store, tg, llm, settings, "Gurgaon")
+    assert to_friend(tg)[-1] == "Got it: Gurgaon, Haryana, India.\n\n" + interview.SECOND_QUESTION
+    with store.tx(t["id"]) as tx:
+        assert tx.tenant(t["id"])["city"] == "Gurgaon, Haryana, India"
