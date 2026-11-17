@@ -143,7 +143,7 @@ def test_non_pdf_and_bad_pdf_rejected_politely(store, settings, clean):
     tg.push_document(b"%PDF-1.4 broken", name="broken.pdf")
     run_all(store, tg, llm, settings)
     texts = [m[1] for m in tg.sent]
-    assert any("only save PDF" in m for m in texts)
+    assert any("I can save PDFs and photos" in m for m in texts)
     t = owner_tenant(store)
     with store.tx(system=True) as tx:
         att = tx._one("SELECT * FROM attachments WHERE tenant_id = %s", (t["id"],))

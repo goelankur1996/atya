@@ -11,7 +11,7 @@ import logging
 import time
 import uuid
 
-from . import commands, documents, reminders, transcribe
+from . import commands, documents, images, reminders, transcribe
 from .config import Settings
 from .schema import CLOSED_STATUSES, load_schema
 from .store import Store
@@ -94,7 +94,26 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
     voice = msg.get("voice") or msg.get("audio")
     file_data: bytes | None = None
     audio: dict | None = None            # {"data", "mime", "seconds", "filename"} for a voice note
-    if voice:
+    photo: dict | None = None            # {"data", "mime", "filename"} for a photo or screenshot
+    pic = None
+    if msg.get("photo"):                 # Telegram sends several sizes: the largest that isn't huge
+        sizes = [p for p in msg["photo"] if (p.get("file_size") or 0) <= images.MAX_BYTES] or msg["photo"][:1]
+        pic = {"file_id": sizes[-1]["file_id"], "mime": "image/jpeg", "name": "photo.jpg"}
+    elif doc and images.is_image(doc.get("mime_type") or "", doc.get("file_name") or ""):
+        pic = {"file_id": doc["file_id"], "mime": images.mime_for(doc.get("mime_type") or "", doc.get("file_name") or ""),
+               "name": doc.get("file_name") or "photo"}
+        doc = None
+    if pic is not None:
+        try:
+            data = tg.download_file(pic["file_id"], images.MAX_BYTES)   # failure: the update is retried
+            images.check(data)
+        except images.ImageError as e:
+            ctx.reply(str(e))
+            return "skipped:bad-photo"
+        photo = {"data": data, "mime": pic["mime"], "filename": pic["name"]}
+        if not text.strip():
+            text = images.PLACEHOLDER
+    elif voice:
         mime = voice.get("mime_type") or ("audio/ogg" if msg.get("voice") else "")
         seconds = voice.get("duration")
         if not transcribe.supported(mime):
@@ -110,7 +129,7 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
     elif doc:
         name = doc.get("file_name") or "file.pdf"
         if not (doc.get("mime_type") == "application/pdf" or name.lower().endswith(".pdf")):
-            ctx.reply("I can only save PDF files for now. Other files and photos are coming later.")
+            ctx.reply("I can save PDFs and photos; other kinds of files are coming later.")
             return "skipped:not-pdf"
         if (doc.get("file_size") or 0) > documents.MAX_BYTES:
             ctx.reply("That file is over 20 MB, the most a bot can receive. Send a smaller copy.")
@@ -124,8 +143,8 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
         # A download failure (TelegramError) propagates: the update is retried.
         if not text.strip():
             text = f"[PDF] {name}"          # the message is the file itself
-    elif msg.get("photo") or msg.get("video") or msg.get("video_note"):
-        ctx.reply("I can only save text, voice notes and PDF files for now. Photos and videos are coming later.")
+    elif msg.get("video") or msg.get("video_note"):
+        ctx.reply("I can save text, voice notes, photos and PDFs. Videos are coming later.")
         return "skipped:media"
     if not text.strip():
         return "skipped:no-text"
@@ -145,6 +164,9 @@ def handle_update(store: Store, tg: TelegramAPI, settings: Settings, update: dic
         if audio is not None:
             tx.add_attachment(tenant["id"], inbox_id=inbox_id, filename=audio["filename"], mime_type=audio["mime"],
                               data=audio["data"], sha256=documents.sha256(audio["data"]), seconds=audio["seconds"])
+        if photo is not None:
+            tx.add_attachment(tenant["id"], inbox_id=inbox_id, filename=photo["filename"], mime_type=photo["mime"],
+                              data=photo["data"], sha256=documents.sha256(photo["data"]))
         tx.note_inbound(tenant["id"], "telegram")
         uname = (sender.get("username") or "").lower() or None
         if tenant.get("telegram_username") != uname:          # for signing in on the web by @username

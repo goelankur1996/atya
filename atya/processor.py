@@ -17,7 +17,7 @@ import uuid
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import documents, interview, limits, reminders, research, transcribe
+from . import documents, images, interview, limits, reminders, research, transcribe
 from .config import Settings
 from .embeddings import Embedder, EmbeddingError
 from .llm import LLM
@@ -549,6 +549,32 @@ def with_heard(heard: str | None, body: str) -> str:
     return f"Heard: \u201c{shown}\u201d\n\n{body}".strip()
 
 
+def photo_text(store: Store, llm: LLM, row: dict, tenant: dict, att: dict) -> dict | None:
+    """Read a photo (what it shows, and the text in it), keep that with the file for search, and return
+    {"id", "description", "message"}: the message being the caption plus the reading, which the rest of the
+    pipeline handles like a typed message. None (after telling the user) if the photo can't be read."""
+    tid = tenant["id"]
+    caption = "" if row["raw_content"].strip() == images.PLACEHOLDER else row["raw_content"]
+    with store.tx(tid) as tx:
+        data = bytes(tx.attachment(tid, att["id"], with_data=True)["data"])
+    try:
+        image, fmt = images.for_model(data, att["mime_type"] or "image/jpeg")
+    except images.ImageError as e:
+        with store.tx(tid) as tx:
+            tx.save_extraction(tid, att["id"], pages=1, extraction="none", text="", chunks=[])
+            tx.add_outbox(tid, chat_id=tenant["telegram_chat_id"], body=str(e), inbox_id=row["id"],
+                          reply_to_message_id=_reply_target(row["source_message_id"]))
+            tx.finish_inbox(row["id"], status="responded", notes="photo couldn't be opened")
+        return None
+    reading = llm.read_image(image=image, fmt=fmt, caption=caption)
+    seen = "\n".join(x for x in (reading["description"], reading["text"]) if x)
+    with store.tx(tid) as tx:
+        tx.save_extraction(tid, att["id"], pages=1, extraction="vision", text=seen[:documents.MAX_TEXT_CHARS],
+                           chunks=documents.text_chunks(seen) if seen else [])
+    log.info("photo read (%s): %d chars of text", str(row["id"])[:8], len(reading["text"]))
+    return {"id": att["id"], "description": reading["description"], "message": images.as_message(caption, reading)}
+
+
 def voice_text(store: Store, row: dict, tenant: dict, att: dict,
                transcriber: transcribe.Transcriber | None) -> str | None:
     """The transcript of a voice note (made now, or kept from an earlier attempt).
@@ -670,12 +696,19 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
         with store.tx(row["tenant_id"]) as tx:
             files = tx.attachments_for([row["id"]])
         audio = [f for f in files if (f["mime_type"] or "").startswith("audio/")]
+        photos = [f for f in files if (f["mime_type"] or "").startswith("image/")]
         heard: str | None = None
+        photo: dict | None = None                     # the photo's attachment row, plus what it showed
         if audio:                                     # a voice note: work on what was said
             heard = voice_text(store, row, tenant, audio[0], transcriber)
             if heard is None:
                 return "responded"
             raw = heard
+        elif photos:                                  # a photo: work on the caption plus what's in it
+            photo = photo_text(store, llm, row, tenant, photos[0])
+            if photo is None:
+                return "responded"
+            raw = photo["message"]
         elif files:                                   # a PDF is always a capture
             return process_files(store, llm, row, tenant, schema, tz, files)
 
@@ -728,12 +761,17 @@ def _process_row(store: Store, llm: LLM, row: dict, settings: Settings,
             with store.tx(row["tenant_id"]) as tx:
                 executor = FanoutExecutor(tx, schema, tenant, row)
                 notes = executor.run(plan)
-                if heard is not None or row["source"] == "call":   # say what was saved (a voice note, a call)
-                    made = tx.records_from_inbox(tenant["id"], row["id"])
+                made = tx.records_from_inbox(tenant["id"], row["id"])
+                if photo is not None and made:        # the photo stays with what it became
+                    tx.link_attachment(photo["id"], made[0]["id"])
+                if heard is not None or photo is not None or row["source"] == "call":   # say what was saved
                     lines = [f"- {record_ref(schema, r)} {r['title']}" for r in made]
                     lines += [f"- {c}" for c in executor.changed]
+                    body = "Saved:\n" + "\n".join(lines) if lines else "Noted."
+                    if photo is not None and photo["description"]:
+                        body = f"\U0001F4F7 {photo['description']}\n\n{body}"
                     tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"],
-                                  body=with_heard(heard, "Saved:\n" + "\n".join(lines) if lines else "Noted."),
+                                  body=with_heard(heard, body),
                                   inbox_id=row["id"], reply_to_message_id=_reply_target(row["source_message_id"]))
                 confirm_reminders(tx, schema, tenant, row)
                 tx.finish_inbox(row["id"], status="processed", notes=notes, intent="log")

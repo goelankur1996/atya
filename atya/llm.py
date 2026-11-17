@@ -48,6 +48,7 @@ class LLM(Protocol):
     def read_document(self, *, filename: str, caption: str, text: str | None = None,
                       pdf: bytes | None = None) -> dict: ...
     def call_report(self, *, transcript: str, purpose: str, name: str) -> str: ...
+    def read_image(self, *, image: bytes, fmt: str, caption: str) -> dict: ...
     def relay_question(self, *, purpose: str, requester: str, name: str, language: str) -> str: ...
     def is_answer(self, *, question: str, message: str) -> bool: ...
 
@@ -339,6 +340,18 @@ class PromptLLM:
     def _call_pdf(self, *, model: str, system: str, intro: str, pdf: bytes, max_tokens: int) -> str:
         raise NotImplementedError
 
+    def _call_image(self, *, model: str, system: str, intro: str, image: bytes, fmt: str, max_tokens: int) -> str:
+        raise NotImplementedError
+
+    def read_image(self, *, image: bytes, fmt: str, caption: str) -> dict:
+        """A photo or screenshot: what it shows, and every bit of text in it (OCR)."""
+        intro = f'The person\'s caption: "{caption}"' if caption else "No caption."
+        raw = self._call_image(model=self.fast_model, system=READ_IMAGE_SYSTEM, intro=intro, image=image, fmt=fmt,
+                               max_tokens=4000)
+        obj = parse_json(raw)
+        return {"description": str(obj.get("description") or "").strip()[:500],
+                "text": str(obj.get("text") or "").strip()[:20000]}
+
     def classify(self, text: str) -> dict:
         raw = self._call(model=self.fast_model, system=CLASSIFY_SYSTEM,
                          user=text or "(empty)", max_tokens=120, cache=False)
@@ -477,6 +490,14 @@ class ClaudeLLM(PromptLLM):
             sys_block[0]["cache_control"] = {"type": "ephemeral"}
         return self._send(model=model, system=sys_block, content=user, max_tokens=max_tokens)
 
+    def _call_image(self, *, model: str, system: str, intro: str, image: bytes, fmt: str, max_tokens: int) -> str:
+        content = [
+            {"type": "image", "source": {"type": "base64", "media_type": f"image/{fmt}",
+                                         "data": base64.b64encode(image).decode()}},
+            {"type": "text", "text": intro},
+        ]
+        return self._send(model=model, system=system, content=content, max_tokens=max_tokens)
+
     def _call_pdf(self, *, model: str, system: str, intro: str, pdf: bytes, max_tokens: int) -> str:
         content = [
             {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
@@ -528,9 +549,22 @@ class BedrockLLM(PromptLLM):
     def _call(self, *, model: str, system: str, user: str, max_tokens: int, cache: bool = True) -> str:
         return self._converse(model=model, system=system, content=[{"text": user}], max_tokens=max_tokens)
 
+    def _call_image(self, *, model: str, system: str, intro: str, image: bytes, fmt: str, max_tokens: int) -> str:
+        img = {"image": {"format": fmt, "source": {"bytes": image}}}
+        return self._converse(model=model, system=system, content=[img, {"text": intro}], max_tokens=max_tokens)
+
     def _call_pdf(self, *, model: str, system: str, intro: str, pdf: bytes, max_tokens: int) -> str:
         doc = {"document": {"format": "pdf", "name": "document", "source": {"bytes": pdf}}}
         return self._converse(model=model, system=system, content=[doc, {"text": intro}], max_tokens=max_tokens)
+
+
+READ_IMAGE_SYSTEM = """You read a photo or screenshot that someone sent to their personal assistant, so the assistant
+can act on it like a typed message. Reply with JSON only:
+{"description": "one or two plain sentences on what it is and what matters in it, e.g. 'A LinkedIn post: BOLD is
+hiring Senior Data Scientists in Noida (hybrid), 4.5+ years; resumes to the email in the post.'",
+ "text": "every bit of readable text in the image, transcribed faithfully in reading order; keep names, emails,
+phone numbers, links, dates, times and amounts exactly as written; one line per line of text; skip app chrome like
+status bars, buttons and like counts; empty string if there's no text"}"""
 
 
 def parse_reading(raw: str) -> dict:

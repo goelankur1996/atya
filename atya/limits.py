@@ -41,7 +41,7 @@ def over(usage: dict, settings: Settings, *, voice: bool = False, pdf: bool = Fa
         m = settings.daily_voice_minutes
         return f"{m} minute{'s' if m != 1 else ''} of voice notes a day"
     if pdf and settings.daily_pdf_pages and usage["pdf_pages"] >= settings.daily_pdf_pages:
-        return f"{settings.daily_pdf_pages} PDF pages a day"
+        return f"{settings.daily_pdf_pages} PDF pages and photos a day"
     return None
 
 

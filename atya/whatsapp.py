@@ -26,7 +26,7 @@ from typing import Any
 
 import requests
 
-from . import commands, documents, transcribe, wa_templates
+from . import commands, documents, images, transcribe, wa_templates
 from .config import Settings
 from .receiver import reminder_button, save_as_task
 from .store import Store
@@ -229,12 +229,36 @@ def handle_message(store: Store, wa, settings: Settings, msg: dict, name: str | 
     doc = msg.get("document") if kind == "document" else None
     file_data: bytes | None = None
     audio: dict | None = None
+    photo: dict | None = None
     filename = "file.pdf"
-    if doc:
+    pic = None
+    if kind == "image":
+        im = msg.get("image") or {}
+        pic = {"id": im.get("id"), "mime": images.mime_for(im.get("mime_type") or "image/jpeg"), "name": "photo.jpg",
+               "caption": im.get("caption") or ""}
+    elif doc and images.is_image(doc.get("mime_type") or "", doc.get("filename") or ""):
+        pic = {"id": doc.get("id"), "mime": images.mime_for(doc.get("mime_type") or "", doc.get("filename") or ""),
+               "name": doc.get("filename") or "photo", "caption": doc.get("caption") or ""}
+        doc = None
+    if pic is not None:
+        try:
+            data = wa.download_file(pic["id"], images.MAX_BYTES)
+            images.check(data)
+        except WhatsAppError as e:
+            if "larger than the limit" in str(e):
+                ctx.reply("That photo is over 15 MB. Send a smaller copy or a screenshot.")
+                return "skipped:too-big"
+            raise                                      # retried with the event
+        except images.ImageError as e:
+            ctx.reply(str(e))
+            return "skipped:bad-photo"
+        photo = {"data": data, "mime": pic["mime"], "filename": pic["name"]}
+        text = pic["caption"] or images.PLACEHOLDER
+    elif doc:
         filename = doc.get("filename") or "file.pdf"
         mime = doc.get("mime_type") or ""
         if not (mime == "application/pdf" or filename.lower().endswith(".pdf")):
-            ctx.reply("I can only save PDF files for now. Other files and photos are coming later.")
+            ctx.reply("I can save PDFs and photos; other kinds of files are coming later.")
             return "skipped:not-pdf"
         try:
             file_data = wa.download_file(doc["id"], documents.MAX_BYTES)
@@ -263,8 +287,8 @@ def handle_message(store: Store, wa, settings: Settings, msg: dict, name: str | 
             raise
         audio = {"data": data, "mime": mime, "filename": f"voice.{transcribe.extension(mime)}"}
         text = transcribe.placeholder(None)
-    elif kind in ("image", "video", "sticker"):
-        ctx.reply("I can only save text, voice notes and PDF files for now. Photos and videos are coming later.")
+    elif kind in ("video", "sticker"):
+        ctx.reply("I can save text, voice notes, photos and PDFs. Videos and stickers are coming later.")
         return "skipped:media"
     elif kind in ("location", "contacts", "order"):
         ctx.reply("I can only save text and PDF files for now.")
@@ -283,6 +307,9 @@ def handle_message(store: Store, wa, settings: Settings, msg: dict, name: str | 
         if audio is not None:
             tx.add_attachment(tenant["id"], inbox_id=inbox_id, filename=audio["filename"], mime_type=audio["mime"],
                               data=audio["data"], sha256=documents.sha256(audio["data"]))
+        if photo is not None:
+            tx.add_attachment(tenant["id"], inbox_id=inbox_id, filename=photo["filename"], mime_type=photo["mime"],
+                              data=photo["data"], sha256=documents.sha256(photo["data"]))
         tx.note_inbound(tenant["id"], "whatsapp")
     log.info("inbox <- %s (whatsapp, %d chars)", inbox_id, len(text))
     return "stored"

@@ -412,11 +412,21 @@ def test_pdf_media_and_export_on_whatsapp(store, settings, clean):
 
     deliver(store, wa, settings, event(FRIEND, doc={"id": "m2", "filename": "x.docx",
                                                     "mime_type": "application/msword"}))
-    assert "only save PDF" in wa.texts(FRIEND)[-1]
+    assert "I can save PDFs and photos" in wa.texts(FRIEND)[-1]
+    from tests.test_photos import png
+    wa.files["i"] = png()
     photo = event(FRIEND)
-    photo["entry"][0]["changes"][0]["value"]["messages"][0].update(type="image", image={"id": "i"})
+    photo["entry"][0]["changes"][0]["value"]["messages"][0].update(
+        type="image", image={"id": "i", "mime_type": "image/png", "caption": "apply by tonight"})
     deliver(store, wa, settings, photo)
-    assert "Photos and videos" in wa.texts(FRIEND)[-1]
+    with store.tx(t["id"]) as tx:
+        row = tx._one("SELECT i.raw_content, a.mime_type FROM inbox i JOIN attachments a ON a.inbox_id = i.id "
+                      "WHERE a.mime_type LIKE 'image/%%'")
+    assert row == {"raw_content": "apply by tonight", "mime_type": "image/png"}
+    video = event(FRIEND)
+    video["entry"][0]["changes"][0]["value"]["messages"][0].update(type="video", video={"id": "v"})
+    deliver(store, wa, settings, video)
+    assert "Videos and stickers are coming later" in wa.texts(FRIEND)[-1]
 
     deliver(store, wa, settings, event(FRIEND, text="/export"))
     assert "/web" in wa.texts(FRIEND)[-1]
