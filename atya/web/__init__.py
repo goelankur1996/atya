@@ -29,7 +29,7 @@ from typing import Any
 from flask import Flask, Response, abort, make_response, g, redirect, render_template, request, send_file, url_for
 
 from ..config import Settings
-from .. import connections as gsync, documents, google, plivo, whatsapp
+from .. import connections as gsync, documents, google, images, plivo, whatsapp
 from ..export import build_export
 from ..schema import CLOSED_STATUSES, FieldDef, TypeDef, load_schema
 from ..store import Store
@@ -55,7 +55,8 @@ RAW_TABLES = {
     "seq_counters": ("tenant_id", "scope", "Counters behind IDs like TSK-12."),
     "sessions": ("tenant_id", "created_at DESC", "Web sign-ins (only a hash of each is stored)."),
     "login_tokens": ("tenant_id", "expires_at DESC", "Sign-in links sent by /web (hashes only)."),
-    "attachments": ("tenant_id", "created_at DESC", "Files you sent (PDFs), with the text read from them."),
+    "attachments": ("tenant_id", "created_at DESC", "Files you sent (PDFs, photos, voice notes), with the text read "
+                                                    "from them."),
     "attachment_chunks": ("tenant_id", "attachment_id, seq", "Your files' text in searchable passages."),
 }
 RAW_CELL_CHARS = 600
@@ -553,24 +554,29 @@ def create_app(store: Store, settings: Settings) -> Flask:
         check_csrf()
         text = request.form.get("text", "").replace("\r\n", "\n").replace("\x00", "").strip()[:8000]
         upload = request.files.get("file")
-        data = upload.read(documents.MAX_BYTES + 1) if upload and upload.filename else b""
+        data = upload.read(max(documents.MAX_BYTES, images.MAX_BYTES) + 1) if upload and upload.filename else b""
         name = clean_text(upload.filename)[:200] if data else ""
+        is_photo = bool(data) and images.is_image(upload.mimetype or "", name)
         if data:
             try:
-                documents.check(data, name, upload.mimetype or "")
-            except documents.DocumentError as e:
+                if is_photo:
+                    images.check(data)
+                else:
+                    documents.check(data, name, upload.mimetype or "")
+            except (documents.DocumentError, images.ImageError) as e:
                 return redirect(url_for("messages", note="file", why=str(e)) + "#latest")
         if not text and not data:
             return redirect(url_for("messages") + "#latest")
         if text.startswith("/") and not data:
             return redirect(url_for("messages", note="commands") + "#latest")
         with tx() as t:
-            iid = t.add_inbox(g.tenant["id"], source="web", raw_content=text or f"[PDF] {name}",
+            placeholder = images.PLACEHOLDER if is_photo else f"[PDF] {name}"
+            iid = t.add_inbox(g.tenant["id"], source="web", raw_content=text or placeholder,
                               source_message_id=f"web:{uuid.uuid4()}", sender="web", actor="web")
             if data:
-                t.add_attachment(g.tenant["id"], inbox_id=iid, filename=name or "file.pdf",
-                                 mime_type="application/pdf", data=data, sha256=documents.sha256(data),
-                                 actor="web")
+                t.add_attachment(g.tenant["id"], inbox_id=iid, filename=name or ("photo" if is_photo else "file.pdf"),
+                                 mime_type=images.mime_for(upload.mimetype or "", name) if is_photo
+                                 else "application/pdf", data=data, sha256=documents.sha256(data), actor="web")
         return redirect(url_for("messages") + "#latest")
 
     @app.get("/files/<attachment_id>")
@@ -587,6 +593,11 @@ def create_app(store: Store, settings: Settings) -> Flask:
             abort(404)
         safe = re.sub(r'[^A-Za-z0-9._ -]', "_", a["filename"] or "file.pdf")[:120]
         mime = a["mime_type"] or "application/pdf"
+        if request.args.get("view") and mime in ("image/jpeg", "image/png", "image/webp", "image/gif"):
+            resp = Response(bytes(a["data"]), mimetype=mime)       # shown on the page (previews)
+            resp.headers["Content-Disposition"] = f'inline; filename="{safe}"'
+            resp.headers["Cache-Control"] = "private, max-age=86400"
+            return resp
         if request.args.get("play") and mime.startswith("audio/"):
             # For the audio player: inline, with byte ranges (Safari needs them to play).
             return send_file(io.BytesIO(bytes(a["data"])), mimetype=mime, conditional=True,

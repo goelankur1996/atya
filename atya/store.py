@@ -542,7 +542,8 @@ class Tx:
                    inbox_id: uuid.UUID | None = None, reply_to_message_id: int | None = None,
                    priority: str = "routine", actor: str = "processor",
                    buttons: list[list[tuple[str, str]]] | None = None,
-                   channel: str | None = None, kind: str | None = None) -> uuid.UUID:
+                   channel: str | None = None, kind: str | None = None,
+                   attachment_id: uuid.UUID | None = None) -> uuid.UUID:
         """Queue a reply. It goes back where the message came from: a message
         sent from the web view is answered there (channel 'web', marked sent at
         once; no sender sees it), a WhatsApp message on WhatsApp. Without a
@@ -565,11 +566,12 @@ class Tx:
         channel = channel or "telegram"
         row = self._one(
             "INSERT INTO outbox (tenant_id, inbox_id, channel, chat_id, reply_to_message_id, body, priority, "
-            "buttons, status, sent_at, kind) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            "buttons, status, sent_at, kind, attachment_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "RETURNING id",
             (tenant_id, inbox_id, channel, chat_id or 0, reply_to_message_id, body, priority,
              Jsonb([[list(b) for b in r] for r in buttons]) if buttons else None,
              "sent" if channel in ("web", "call") else "pending",
-             dt.datetime.now(dt.timezone.utc) if channel in ("web", "call") else None, kind))
+             dt.datetime.now(dt.timezone.utc) if channel in ("web", "call") else None, kind, attachment_id))
         assert row is not None
         self.audit(tenant_id, actor=actor, action="create", target_table="outbox",
                    target_id=row["id"], summary="reply queued",
@@ -695,6 +697,10 @@ class Tx:
             self.conn.execute(
                 "INSERT INTO attachment_chunks (tenant_id, attachment_id, seq, page, content) "
                 "VALUES (%s, %s, %s, NULL, %s)", (tenant_id, attachment_id, i, content))
+
+    def attachment_data(self, attachment_id) -> dict | None:
+        """A file's bytes for sending (system scope: the sender works across accounts)."""
+        return self._one("SELECT id, filename, mime_type, data FROM attachments WHERE id = %s", (attachment_id,))
 
     def link_attachment(self, attachment_id: uuid.UUID, record_id: uuid.UUID) -> None:
         self.conn.execute("UPDATE attachments SET record_id = %s WHERE id = %s", (record_id, attachment_id))

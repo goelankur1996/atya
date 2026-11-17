@@ -22,6 +22,7 @@ class TelegramAPI(Protocol):
                      buttons: list[list[tuple[str, str]]] | None = None,
                      preview: bool = True) -> dict: ...
     def send_document(self, chat_id: int, filename: str, data: bytes, caption: str = "") -> dict: ...
+    def send_photo(self, chat_id: int, data: bytes, mime: str, caption: str = "") -> dict: ...
     def answer_callback(self, callback_id: str, text: str = "") -> None: ...
     def bot_username(self) -> str: ...
     def download_file(self, file_id: str, max_bytes: int) -> bytes: ...
@@ -85,6 +86,18 @@ class Telegram:
             raise TelegramError(f"sendDocument: {e}") from e
         if not body.get("ok"):
             raise TelegramError(f"sendDocument: {body.get('error_code')} {body.get('description')}")
+        return body["result"]
+
+    def send_photo(self, chat_id: int, data: bytes, mime: str, caption: str = "") -> dict:
+        try:
+            r = self.http.post(f"{self.base}/sendPhoto", timeout=120,
+                               data={"chat_id": str(chat_id), "caption": caption[:1000]},
+                               files={"photo": ("photo." + mime.split("/")[-1], data, mime)})
+            body = r.json()
+        except (requests.RequestException, ValueError) as e:
+            raise TelegramError(f"sendPhoto: {e}") from e
+        if not body.get("ok"):
+            raise TelegramError(f"sendPhoto: {body.get('error_code')} {body.get('description')}")
         return body["result"]
 
     def download_file(self, file_id: str, max_bytes: int) -> bytes:

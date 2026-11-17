@@ -43,6 +43,9 @@ class FakeTelegram:
 
     def send_document(self, chat_id, filename, data, caption=""):
         self.documents.append((chat_id, filename, data))
+
+    def send_photo(self, chat_id, data, mime, caption=""):
+        self.photos = [*getattr(self, "photos", []), (chat_id, mime, caption)]
         return {}
 
     def answer_callback(self, callback_id, text=""):

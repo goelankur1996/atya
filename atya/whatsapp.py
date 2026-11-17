@@ -63,6 +63,22 @@ class WhatsApp:
         self.http = requests.Session()
         self.http.headers["Authorization"] = f"Bearer {token}"
 
+    def send_image(self, to: int | str, data: bytes, mime: str, caption: str = "") -> dict:
+        """Upload a photo, then send it. Returns {"message_id"}."""
+        try:
+            r = self.http.post(f"{GRAPH}/{self.phone_number_id}/media", timeout=120,
+                               data={"messaging_product": "whatsapp", "type": mime},
+                               files={"file": ("photo." + mime.split("/")[-1], data, mime)})
+            body = r.json()
+        except (requests.RequestException, ValueError) as e:
+            raise WhatsAppError(f"upload: {e}") from e
+        if r.status_code >= 400 or not body.get("id"):
+            err = body.get("error") or {}
+            raise WhatsAppError(f"upload: {err.get('code')} {err.get('message') or r.text[:300]}", err.get("code"))
+        sent = self._post({"messaging_product": "whatsapp", "to": str(to), "type": "image",
+                           "image": {"id": body["id"], "caption": caption[:1024]}})
+        return {"message_id": (sent.get("messages") or [{}])[0].get("id")}
+
     def _post(self, payload: dict) -> dict:
         try:
             r = self.http.post(f"{GRAPH}/{self.phone_number_id}/messages", json=payload, timeout=30)
@@ -428,8 +444,15 @@ def send_once(store: Store, wa) -> int:
             if row.get("kind") == "otp":
                 wamid = send_code(wa, row, inside=seen is not None and now - seen <= WINDOW)
             elif seen is not None and now - seen <= WINDOW:
-                buttons = [[tuple(b) for b in r] for r in row["buttons"]] if row.get("buttons") else None
-                wamid = wa.send_message(row["chat_id"], row["body"], buttons=buttons, preview=False).get("message_id")
+                from .sender import photo_of
+                pic = photo_of(store, row)
+                if pic is not None:                        # a saved photo, sent back with its caption
+                    wamid = wa.send_image(row["chat_id"], bytes(pic["data"]), pic["mime_type"] or "image/jpeg",
+                                          row["body"]).get("message_id")
+                else:
+                    buttons = [[tuple(b) for b in r] for r in row["buttons"]] if row.get("buttons") else None
+                    wamid = wa.send_message(row["chat_id"], row["body"], buttons=buttons,
+                                            preview=False).get("message_id")
             elif row.get("kind") == "reminder":
                 wamid = wa.send_template(wa_templates.reminder(str(row["chat_id"]), row["body"],
                                                                row.get("buttons"))).get("message_id")

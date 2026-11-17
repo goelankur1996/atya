@@ -436,3 +436,9 @@ main.settings { max-width: 760px; gap: 36px; }
 .row .actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; max-width: none; overflow: visible; }
 .row .actions form { margin: 0; }
 @media (max-width: 600px) { .row .field { width: 100%; } .site { padding: 18px 20px; } main.auth { border: 0; padding: 24px 20px; } }
+
+/* Photos: small previews in Messages, a larger one on the record page. */
+a.thumb { display: inline-block; margin: 6px 0 2px; }
+a.thumb img { display: block; max-width: 220px; max-height: 220px; border-radius: 8px; border: 1px solid var(--line, #e5e5e5); }
+a.photo { display: block; margin: 0 0 12px; }
+a.photo img { display: block; max-width: 100%; max-height: 480px; border-radius: 8px; border: 1px solid var(--line, #e5e5e5); }

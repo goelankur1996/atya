@@ -18,8 +18,12 @@ def send_once(store: Store, tg: TelegramAPI) -> int:
     for row in rows:
         try:
             buttons = [[tuple(b) for b in r] for r in row["buttons"]] if row.get("buttons") else None
-            tg.send_message(row["chat_id"], row["body"], reply_to=row["reply_to_message_id"],
-                            buttons=buttons)
+            pic = photo_of(store, row)
+            if pic is not None:                        # a saved photo, sent back with its caption
+                tg.send_photo(row["chat_id"], bytes(pic["data"]), pic["mime_type"] or "image/jpeg", row["body"])
+            else:
+                tg.send_message(row["chat_id"], row["body"], reply_to=row["reply_to_message_id"],
+                                buttons=buttons)
             ok, err = True, None
         except TelegramError as e:
             ok, err = False, str(e)
@@ -27,6 +31,13 @@ def send_once(store: Store, tg: TelegramAPI) -> int:
         with store.tx(system=True) as tx:
             tx.finish_outbox(row["id"], ok=ok, error=err)
     return len(rows)
+
+
+def photo_of(store: Store, row: dict) -> dict | None:
+    if not row.get("attachment_id"):
+        return None
+    with store.tx(system=True) as tx:
+        return tx.attachment_data(row["attachment_id"])
 
 
 def run(store: Store, tg: TelegramAPI, settings: Settings) -> None:
