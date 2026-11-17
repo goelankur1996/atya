@@ -127,4 +127,4 @@ def test_over_reasons():
     u = {"messages": 99, "tokens_in": 10**9, "tokens_out": 0, "voice_seconds": 60, "pdf_pages": 5}
     assert limits.over(u, s) is None
     assert limits.over(u, s, voice=True) == "1 minute of voice notes a day"
-    assert limits.over(u, s, pdf=True) == "5 PDF pages a day"
+    assert limits.over(u, s, pdf=True) == "5 PDF pages and photos a day"
