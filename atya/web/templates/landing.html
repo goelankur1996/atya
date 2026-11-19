@@ -1,33 +1,37 @@
 {% extends "base.html" %}
 {% block title %}ATYA · a personal assistant that lives in your chats{% endblock %}
+{% block body_class %} class="lp"{% endblock %}
 {% block header %}
-<header class="site">
+<header class="site"><div class="site-in">
   <a class="brand" href="{{ url_for('home') }}">atya</a>
-  <nav aria-label="Site">
-    <a href="{{ url_for('signin_page') }}">Log in</a>
-  </nav>
-</header>
+  <nav aria-label="Site"><a href="{{ url_for('signin_page') }}">Log in</a></nav>
+</div></header>
 {% endblock %}
 {% block page %}
 <main class="landing">
-  <p class="statement">ATYA is a personal assistant that lives in your chats. Tell it what's going on, and it helps you plan, keep track, remember and find things.</p>
-
-  <p class="prose">You talk to it on WhatsApp or Telegram, in a message or a voice note. On the web, you see everything it keeps, and fix or add to it.</p>
-
-  <p class="prose">It can <span class="eg">plan your week around your calendar</span>, <span class="eg">track your workouts or a project</span>, <span class="eg">remember what you promised Rahul</span>, <span class="eg">find that note from March</span>, <span class="eg">wish your sister on her birthday</span>, or <span class="eg">research a good physio near you</span>.</p>
-
-  <p class="prose">Soon you'll teach it your way: how it organises your things, how it researches for you, what it asks you and what it shows you. Then it starts doing things for you, not just keeping track.</p>
-
-  <p class="prose">Your records are yours alone. Export them any time, or delete everything with one command.</p>
-
-  <p class="cta">
-    <a class="cta-link" href="{{ url_for('waitlist_page') }}">Join the waitlist</a>
-    <a class="cta-quiet" href="{{ url_for('signin_page') }}">Already in? Log in</a>
-  </p>
+  <div class="copy">
+    <h1>A personal assistant that lives in your chats.</h1>
+    <p class="sub">Tell ATYA what's going on. It helps you plan, keep track, remember and find things, and calls you when it matters.</p>
+    <div class="block">
+      <p class="prose">Talk to it on WhatsApp or Telegram: a message, a voice note, a photo or a document. On the web, you see everything it keeps, and can fix or add to it.</p>
+      <p class="prose">Ask it to <span class="eg">plan your week around your calendar</span>, <span class="eg">track your workouts or a project</span>, <span class="eg">remember what you promised Jim</span>, <span class="eg">find that note from March</span>, <span class="eg">wish your sister on her birthday</span>, or <span class="eg">research a good physio near you</span>.</p>
+      <p class="prose">With their OK, it can also <span class="eg">remind people in your circle</span>: your dad about his evening walk, by message or call.</p>
+      <p class="prose soon"><b>Soon:</b> teach it your way. How it organises your things, researches for you, and what it asks and shows you. Then it starts doing things for you, not just keeping track.</p>
+    </div>
+    <div class="cta">
+      <a class="cta-link" href="{{ url_for('waitlist_page') }}">Join the waitlist</a>
+      <a class="cta-quiet" href="{{ url_for('signin_page') }}">Already in? Log in</a>
+    </div>
+  </div>
+  <div class="doodle" aria-hidden="true">
+    <div class="art"><svg aria-hidden="true" class="art-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 320"><g fill="none" stroke="#1f5fbf" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="124" cy="132" r="46"></circle><path d="M170,114 L170,154 Q171,168 183,165"></path><circle cx="134" cy="128" r="9" fill="#1f5fbf" stroke="none"></circle><circle cx="137" cy="124" r="2.6" fill="#fff" stroke="none"></circle><path d="M94,118 Q98,102 112,97" stroke="#1f5fbf" stroke-width="4"></path><circle cx="296" cy="132" r="46"></circle><path d="M342,114 L342,154 Q343,168 355,165"></path><circle cx="306" cy="128" r="9" fill="#1f5fbf" stroke="none"></circle><circle cx="309" cy="124" r="2.6" fill="#fff" stroke="none"></circle><path d="M266,118 Q270,102 284,97" stroke="#1f5fbf" stroke-width="4"></path><path d="M170,118 Q210,92 250,118"></path><path d="M210,70 L210,102 Q210,110 219,108"></path><path d="M78,124 L48,114"></path><path d="M342,108 L372,98"></path><path d="M192.9,182 Q196.7,202.9 209.05,212.4"></path><path d="M227.1,182 L204.3,237.1 C199.55,248.5 210.95,254.2 219.5,246.6"></path></g></svg></div>
+    <p>I'm happy to help with<br>All That You Ask</p>
+  </div>
 </main>
-<footer class="site-foot">
+<footer class="site-foot"><div class="foot-in">
   <span>&copy; 2026 ATYA</span>
+  <span>Your records are yours alone: export any time, or delete everything with one command.</span>
   <a href="{{ url_for('privacy') }}">Privacy policy</a>
   <a href="{{ url_for('terms') }}">Terms of service</a>
-</footer>
+</div></footer>
 {% endblock %}
