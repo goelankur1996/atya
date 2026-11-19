@@ -336,10 +336,24 @@ def test_setup_by_call(store, settings, owner):
     llm = FakeLLM()
     llm.plans["Dentist on Friday at 5"] = {"writes": [{"type": "task", "title": "Dentist", "fields": {}}]}
     _, requests = call_with_processor(store, settings, llm, tenant(store, meera["id"]), "Dentist on Friday at 5")
+    # She takes another call mid-way: the setup isn't done, and she's told so right away.
     sonic = type("S", (), {"transcript": [("ASSISTANT", "What's on this week?"), ("USER", "dentist on friday at 5")],
                            "tool_calls": []})()
     wakecall.finish_talk(store, tenant(store, meera["id"]), {"kind": "setup"}, sonic, 300,
                          dt.datetime.now(dt.timezone.utc), requests)
+    cut = outbox(store, meera["id"])[-1]
+    assert cut.startswith("Looks like our setup call got cut off") and "- TSK-1 Dentist" in cut
+    with store.tx(meera["id"]) as tx:
+        assert tx._one("SELECT buttons FROM outbox WHERE tenant_id = %s ORDER BY created_at DESC LIMIT 1",
+                       (meera["id"],))["buttons"][0][0] == ["Call me back", "setup:call"]
+    # The next setup call picks up from there, and finishing it gives the summary with everything noted.
+    p = wakecall.call_extra(store, tenant(store, meera["id"]), {"kind": "setup"})
+    assert "THIS CONTINUES A SETUP CALL THAT GOT CUT OFF" in p and "Them: dentist on friday at 5" in p
+    tools = [t["name"] for t in wakecall.call_tools(store, tenant(store, meera["id"]), [], "setup")]
+    assert tools[0] == "finish_setup"
+    sonic = type("S", (), {"transcript": [("USER", "that's all")], "tool_calls": [("finish_setup", {}, "ok")]})()
+    wakecall.finish_talk(store, tenant(store, meera["id"]), {"kind": "setup"}, sonic, 60,
+                         dt.datetime.now(dt.timezone.utc), [])
     done = outbox(store, meera["id"])[-1]
     assert done.startswith("Thanks for the call! Here's what I noted:\n- TSK-1 Dentist") and "/brief 9am" in done
     assert tenant(store, meera["id"])["brief_time"] is None                        # only if they ask for it

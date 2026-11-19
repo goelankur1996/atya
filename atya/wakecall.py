@@ -314,10 +314,14 @@ def call_extra(store: Store, tenant: dict, call: dict) -> str:
     if call["kind"] == "setup":
         from . import interview
         parts.append(interview.call_plan())
+        with store.tx(tenant["id"]) as tx:
+            prog = interview.progress(tx, tenant["id"])
+        if prog:                                     # an earlier setup call got cut off: carry on from there
+            parts.append(interview.resume_context(prog))
     return "\n\n".join(parts)
 
 
-def call_tools(store: Store, tenant: dict, requests: list) -> list[dict]:
+def call_tools(store: Store, tenant: dict, requests: list, kind: str = "") -> list[dict]:
     """The call's tools. Everything about their records goes through `atya`, the same way as a text message;
     the others are the same functions as the /brief, /wakecall and /city commands."""
     def text_tool(fn):
@@ -325,7 +329,11 @@ def call_tools(store: Store, tenant: dict, requests: list) -> list[dict]:
             return await asyncio.to_thread(fn, args)
         return run
 
-    return [
+    setup = [{"name": "finish_setup", "run": text_tool(lambda a: "Setup marked as done. Now say goodbye."),
+              "description": "Call once, in the wrap-up of the setup call, when the setup is done (or they're happy "
+                             "to leave it there). If the call ends without it, ATYA offers to pick it up again.",
+              "schema": {"type": "object", "properties": {}, "required": []}}] if kind == "setup" else []
+    return setup + [
         {"name": "atya", "run": text_tool(lambda a: ask_atya(store, tenant, str(a.get("message", "")), requests,
                                                              expects_reply=a.get("expects_reply") is not False)),
          "description": "Send something to ATYA exactly as if the user had texted it, and get ATYA's reply. Use it "
@@ -379,7 +387,7 @@ async def prepare(store: Store, settings: Settings, tenant: dict, call: dict,
             requester = tx.tenant(call["requested_by"])
             call = {**call, "requester_name": called(tx, tenant["id"], requester)}
     return (build_prompt(tenant, call, local, brief, voice_for(settings, tenant), forecast, extra, records),
-            call_tools(store, tenant, requests))
+            call_tools(store, tenant, requests, call.get("kind", "")))
 
 
 def finish_talk(store: Store, tenant: dict, call: dict, sonic, seconds: float, started: dt.datetime,
@@ -403,15 +411,25 @@ def finish_talk(store: Store, tenant: dict, call: dict, sonic, seconds: float, s
         changes = [line for i in requests
                    if (tx._one("SELECT intent FROM inbox WHERE id = %s", (i,)) or {}).get("intent") == "log"
                    for body in tx.call_replies(i) for line in body.splitlines() if line.startswith("- ")]
+        buttons = None
         if setup:
             from . import interview
-            body = interview.done_by_call(tx.tenant(tenant["id"]), changes)
+            finished = any(name == "finish_setup" for name, _, _ in sonic.tool_calls)
+            if finished:
+                prog = interview.progress(tx, tenant["id"]) or {}
+                body = interview.done_by_call(tx.tenant(tenant["id"]), changes, prog.get("noted"))
+                tx.set_state(interview.progress_key(tenant["id"]), None)
+            else:                                    # cut off: say so now, and offer to carry on
+                said = "\n".join(f"{'ATYA' if role != 'USER' else 'Them'}: {text.strip()}"
+                                  for role, text in sonic.transcript if text.strip())
+                body, buttons = interview.cut_off(tx, tx.tenant(tenant["id"]), said, changes)
         elif changes:
             body = "From our call:\n" + "\n".join(changes)
         else:
             body = None
         if body:
-            tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=body, actor="wakecall")
+            tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=body, buttons=buttons,
+                          actor="wakecall")
     log.info("call done (%s, %s): %d turns, %d tool uses, %d requests, transcript saved=%s", str(tenant["id"])[:4],
              call["kind"], len(sonic.transcript), len(sonic.tool_calls), len(requests), bool(saved))
 

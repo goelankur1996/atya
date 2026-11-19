@@ -299,8 +299,14 @@ def setup_choice(store: Store, settings: Settings, tenant: dict | None, chat_id:
             tx.add_outbox(tid, chat_id=chat_id, body=soon.format(how=call_how(store, settings, tenant)),
                           actor="commands", channel=channel)
         return "setup:call"
+    if choice == "later":
+        with store.tx(tid) as tx:
+            tx.add_outbox(tid, chat_id=chat_id, actor="commands", channel=channel,
+                          body="Sure. Send /setup whenever you'd like to carry on." if tenant.get("call_language")
+                          not in ("hinglish", "hindi") else "Theek hai. Jab chahein /setup bhejiye, wahin se shuru karenge.")
+        return "setup:later"
     with store.tx(tid) as tx:
-        opening = interview.begin(tx, tid)
+        opening = interview.begin(tx, tid, resume=interview.progress(tx, tid) is not None)
         tx.add_outbox(tid, chat_id=chat_id, body=opening, actor="commands", channel=channel)
     return "setup:text"
 
@@ -438,6 +444,12 @@ def handle(ctx: Ctx, text: str) -> str:
     if cmd == "/setup":
         with ctx.store.tx(ctx.tenant["id"]) as tx:
             tenant = tx.tenant(ctx.tenant["id"])
+            prog = interview.progress(tx, tenant["id"])
+        if prog and can_call(ctx.settings, tenant):           # an unfinished setup: offer to carry on
+            hi = tenant.get("call_language") in ("hinglish", "hindi")
+            ctx.reply("Jahan chhoda tha wahin se shuru karein?" if hi else "Let's pick up where we left off. How?",
+                      buttons=interview.RESUME_BUTTONS_HI if hi else interview.RESUME_BUTTONS)
+            return "setup:resume-offered"
         return offer_setup(ctx, tenant)
     if cmd == "/city":
         return city_cmd(ctx, arg)

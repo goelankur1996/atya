@@ -60,12 +60,55 @@ def key(tenant_id: uuid.UUID | str) -> str:
     return f"interview:{tenant_id}"
 
 
-def begin(tx: Tx, tenant_id: uuid.UUID) -> str:
-    """Start (or restart) the interview. Returns the message to send."""
+def begin(tx: Tx, tenant_id: uuid.UUID, *, resume: bool = False) -> str:
+    """Start (or restart) the interview. Returns the message to send. resume: carrying on from a setup call
+    that got cut off, so no intro and no city question."""
     now = dt.datetime.now(dt.timezone.utc).isoformat()
-    tx.set_state(key(tenant_id), {"turns": [{"q": FIRST_QUESTION, "area": "city"}], "started": now, "asked": now,
-                                  "inbox": [], "covered": [], "saved": 0})
-    return f"{INTRO}\n\n{FIRST_QUESTION}"
+    first = {"q": RESUME_QUESTION, "area": "week"} if resume else {"q": FIRST_QUESTION, "area": "city"}
+    tx.set_state(key(tenant_id), {"turns": [first], "started": now, "asked": now,
+                                  "inbox": [], "covered": ["city"] if resume else [], "saved": 0})
+    return RESUME_QUESTION if resume else f"{INTRO}\n\n{FIRST_QUESTION}"
+
+
+# --- a setup call that got cut off ---------------------------------------------------
+
+RESUME_QUESTION = ("Let's pick up where we left off, one question at a time (\"stop\" ends it any time). What does a "
+                   "normal week look like for you, and what's coming up soon?")
+CUT_OFF = "Looks like our setup call got cut off before we finished.{noted}\n\nWant to pick up where we left off?"
+CUT_OFF_HI = "Lagta hai hamari setup call beech mein kat gayi.{noted}\n\nJahan chhoda tha wahin se shuru karein?"
+RESUME_BUTTONS = [[("Call me back", "setup:call"), ("Continue by text", "setup:text"), ("Later", "setup:later")]]
+RESUME_BUTTONS_HI = [[("Call karo", "setup:call"), ("Message pe", "setup:text"), ("Baad mein", "setup:later")]]
+
+
+def progress_key(tenant_id) -> str:
+    return f"setup:progress:{tenant_id}"
+
+
+def cut_off(tx: Tx, tenant: dict, transcript: str, noted: list[str]) -> tuple[str, list]:
+    """Remember how far an unfinished setup call got (for the next call or the text interview), and return the
+    message (and buttons) offering to pick it up again."""
+    prev = tx.get_state(progress_key(tenant["id"])) or {}
+    all_noted = [*prev.get("noted", []), *noted]
+    tx.set_state(progress_key(tenant["id"]), {
+        "transcript": ((prev.get("transcript") or "") + "\n" + transcript).strip()[-6000:],
+        "noted": all_noted[-40:], "at": dt.datetime.now(dt.timezone.utc).isoformat()})
+    hi = tenant.get("call_language") in ("hinglish", "hindi")
+    so_far = ("\n\nAb tak note kiya:\n" if hi else "\n\nSo far I've noted:\n") + "\n".join(noted) if noted else ""
+    return ((CUT_OFF_HI if hi else CUT_OFF).format(noted=so_far), RESUME_BUTTONS_HI if hi else RESUME_BUTTONS)
+
+
+def progress(tx: Tx, tenant_id) -> dict | None:
+    return tx.get_state(progress_key(tenant_id))
+
+
+def resume_context(prog: dict) -> str:
+    """For the voice model on a follow-up setup call."""
+    noted = "\n".join(prog.get("noted") or []) or "(nothing yet)"
+    return ("THIS CONTINUES A SETUP CALL THAT GOT CUT OFF. Don't start over: skip the hello-and-city part and the "
+            "\"what ATYA does\" part if they were covered, and carry on from where it stopped. Open with one short "
+            "turn: say hi, that you're picking up where you left off, and ask the next question.\n\n"
+            f"Already noted (don't ask about these again):\n{noted}\n\n"
+            f"The earlier conversation (most recent last):\n{prog.get('transcript') or '(none)'}")
 
 
 def current(tx: Tx, tenant_id: uuid.UUID) -> dict | None:
@@ -210,25 +253,28 @@ call like this one, and at what time. Set only what they choose: set_morning_bri
 set_morning_call for the call. If family or friends came up, mention that ATYA can ask them things or check in on
 them, and that the chat will say how.
 
-Part 6, wrap up (half a minute). Recap three or four things you noted, in plain words. Then: from now on they can
+Part 6, wrap up (half a minute). Recap three or four things you noted, in plain words. Call finish_setup (this marks
+the setup as done; if the call ends without it, ATYA offers to pick it up again later). Then: from now on they can
 just message ATYA anything, and a summary is in their chat. Say a warm goodbye.
 
-Aim for about ten to twelve minutes in all. If they want to stop early, skip to part 6."""
+Aim for about ten to twelve minutes in all. If they want to stop early, skip to part 6 (and call finish_setup only
+if they're happy to leave it there)."""
 
 
 def call_fallback(store, settings, tenant: dict, result: str) -> None:
     """The setup call didn't happen: do the interview by message."""
     with store.tx(tenant["id"]) as tx:
-        opening = begin(tx, tenant["id"])
+        opening = begin(tx, tenant["id"], resume=progress(tx, tenant["id"]) is not None)
         note = {"declined": "No call then. ", "unreachable": ""}.get(result, "I couldn't reach you by phone. ")
         tx.add_outbox(tenant["id"], chat_id=tenant["telegram_chat_id"], body=f"{note}{TEXT_INSTEAD}\n\n{opening}",
                       actor="interview")
 
 
-def done_by_call(tenant: dict, noted: list[str]) -> str:
+def done_by_call(tenant: dict, noted: list[str], earlier: list[str] | None = None) -> str:
     """The chat message after the setup call: what was noted (by name), what's set up, what to try."""
     from .briefs import fmt_time
     hi = tenant.get("call_language") in ("hinglish", "hindi")
+    noted = [*(earlier or []), *noted]
     parts = [("Call ke liye shukriya! Maine yeh note kiya:" if hi else "Thanks for the call! Here's what I noted:")
              + ("\n" + "\n".join(noted) if noted else ("\n(abhi kuch nahi)" if hi else "\n(nothing yet)"))]
     habits = []
